@@ -51,6 +51,7 @@ Pi); NAPA uses SSE2 on x86-64 and NEON on arm64.
 visor run --config /etc/visor/visor.toml    # the service
 visor detect --repeat 100 frame.pgm         # what NAPA finds in an image, and how long it takes
 visor detect --lens 1230,1230,799.5,651.5 frame.pgm   # and each tag's pose, with this lens
+visor detect --config visor.toml --camera front-left frame.pgm   # with a configured camera's lens
 visor record --camera front-left --out frames/   # frames for lens calibration
 visor version
 ```
@@ -62,6 +63,37 @@ visor version
 
 Camera controls use the names `v4l2-ctl --list-ctrls` prints. Aim for an exposure near 1 ms with
 the gain raised: blur from the robot turning is the main error, and short exposures cut it.
+
+## Lens calibration
+
+Each camera needs its lens calibrated once, at the frame size it runs, for Visor to solve poses.
+The tool is [tools/calibrate.py](tools/calibrate.py), run on a laptop with
+[uv](https://docs.astral.sh/uv/) (it fetches OpenCV itself):
+
+```bash
+uv run tools/calibrate.py board --out board.png
+```
+
+1. Print `board.png` at 100% scale and fix it flat to something rigid.
+2. On the coprocessor, stop the service and run `visor record --camera front-left --out frames/`.
+   It saves 40 frames, one a second, while you move the board: near and far, tilted every way,
+   and into every part of the frame, its corners and edges above all.
+3. Copy the frames to the laptop and solve:
+
+```bash
+uv run tools/calibrate.py solve frames/*.pgm --out lens.toml
+```
+
+It prints the error of each view and how well each part of the frame was covered, and writes a
+`[camera.lens]` block for that camera's entry in the configuration. It refuses a session it can't
+trust (too few frames with the board, part of the frame never reached, or too large an error) and
+says which. Add `--rational` for a wide lens with strong distortion. Then check a tag at a measured
+distance with `visor detect --config ... --camera ...`.
+
+Its tests (`uv run tools/test_calibrate.py`) render boards through lenses whose values are known,
+including a strongly distorted one, and check the tool gives them back; then a tag drawn through
+that lens near the frame's corner, solved by Visor with the tool's block, lands within 1 mm of its
+true place 4.3 m out, where leaving the distortion out puts it 63 cm off.
 
 ## The robot's side
 

@@ -112,6 +112,9 @@ struct CameraFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LensFile {
+    /// The frame size it was calibrated at, which must be the camera's.
+    width: u32,
+    height: u32,
     fx: f64,
     fy: f64,
     cx: f64,
@@ -223,6 +226,12 @@ fn check_camera(file: CameraFile, tag_size_m: f64) -> Result<Camera, ConfigError
         controls.push((key, value));
     }
     let lens = match file.lens {
+        Some(l) if (l.width, l.height) != (file.width, file.height) => {
+            return Err(fail(format!(
+                "lens: calibrated at {}x{}, but the camera runs at {}x{}: calibrate at the size it runs",
+                l.width, l.height, file.width, file.height
+            )));
+        }
         Some(l) => Some(
             Lens::new(l.fx, l.fy, l.cx, l.cy, &l.distortion)
                 .map_err(|e| fail(format!("lens: {e}")))?,
@@ -293,6 +302,8 @@ mod tests {
             exposure_time_absolute = 10
             exposure_dynamic_framerate = false
             [camera.lens]
+            width = 1280
+            height = 720
             fx = 1200.0
             fy = 1201.0
             cx = 799.5
@@ -364,9 +375,15 @@ mod tests {
             ),
             (
                 format!(
-                    "team = 1234\n{CAMERA}[camera.lens]\nfx = 1.0\nfy = 1.0\ncx = 0.0\ncy = 0.0\ndistortion = [0.1]\n"
+                    "team = 1234\n{CAMERA}[camera.lens]\nwidth = 1600\nheight = 1304\nfx = 1.0\nfy = 1.0\ncx = 0.0\ncy = 0.0\ndistortion = [0.1]\n"
                 ),
                 "lens: OpenCV's distortion has 4, 5 or 8",
+            ),
+            (
+                format!(
+                    "team = 1234\n{CAMERA}[camera.lens]\nwidth = 1280\nheight = 800\nfx = 1.0\nfy = 1.0\ncx = 0.0\ncy = 0.0\n"
+                ),
+                "calibrated at 1280x800, but the camera runs at 1600x1304",
             ),
             (
                 format!("tag_size_m = 0.0\nteam = 1234\n{CAMERA}"),

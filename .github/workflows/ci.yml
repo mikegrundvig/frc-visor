@@ -1,8 +1,8 @@
 name: CI
 
 # The coprocessor program's formatting, lints and tests, on x86-64 and on arm64 (the coprocessor's
-# architecture, where NAPA takes its NEON path), and the robot client's Gradle ci. On every
-# branch's pushes and pull requests.
+# architecture, where NAPA takes its NEON path), with the lens calibration tool's tests against the
+# built program; and the robot client's Gradle ci. On every branch's pushes and pull requests.
 on:
   push:
     branches: ["**"]
@@ -43,6 +43,13 @@ jobs:
         run: cargo test --locked
       - name: Release build
         run: cargo build --release --locked
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.1"
+      - name: Lens calibration tool, through the built program
+        env:
+          VISOR_BIN: target/release/visor
+        run: uv run tools/test_calibrate.py
 
   client:
     name: Java client

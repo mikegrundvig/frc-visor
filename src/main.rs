@@ -50,6 +50,12 @@ enum Command {
         /// The tags' black square, in metres.
         #[arg(long, default_value_t = visor::config::DEFAULT_TAG_SIZE_M)]
         tag_size_m: f64,
+        /// Take the lens, tag size and min_tag_px from this camera's entry in a configuration
+        /// instead, as `visor run` would, and check the images are its size.
+        #[arg(long, requires = "config", conflicts_with_all = ["lens", "tag_size_m", "min_tag_px"])]
+        camera: Option<String>,
+        #[arg(long, requires = "camera")]
+        config: Option<PathBuf>,
     },
     /// Save frames from one camera as PGM files, for lens calibration. Stop the service first: a
     /// camera can only be open once.
@@ -81,7 +87,12 @@ fn main() -> ExitCode {
             repeat,
             lens,
             tag_size_m,
-        } => detect(&files, min_tag_px, repeat, lens.as_deref(), tag_size_m),
+            camera,
+            config,
+        } => match (config, camera) {
+            (Some(config), Some(camera)) => detect_as(&files, repeat, &config, &camera),
+            _ => detect(&files, min_tag_px, repeat, lens.as_deref(), tag_size_m),
+        },
         Command::Record {
             config,
             camera,
@@ -158,6 +169,33 @@ fn run(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `detect` with a configured camera's settings.
+fn detect_as(files: &[PathBuf], repeat: u32, path: &Path, name: &str) -> Result<()> {
+    let config = Config::load(path)?;
+    let camera = find_camera(&config, path, name)?;
+    for file in files {
+        let image = GrayImage::read_pgm(file)?;
+        if (image.width, image.height) != (camera.width, camera.height) {
+            return Err(format!(
+                "{} is {}x{}, but camera {name:?} runs at {}x{}",
+                file.display(),
+                image.width,
+                image.height,
+                camera.width,
+                camera.height
+            )
+            .into());
+        }
+    }
+    detect_with(
+        files,
+        camera.min_tag_px,
+        repeat,
+        camera.lens.clone(),
+        camera.tag_size_m,
+    )
+}
+
 fn detect(
     files: &[PathBuf],
     min_tag_px: i32,
@@ -165,9 +203,6 @@ fn detect(
     lens: Option<&[f64]>,
     tag_size_m: f64,
 ) -> Result<()> {
-    if files.is_empty() {
-        return Err("give one or more PGM files".into());
-    }
     let lens = match lens {
         Some(values) if values.len() >= 4 => Some(Lens::new(
             values[0],
@@ -179,6 +214,19 @@ fn detect(
         Some(_) => return Err("--lens is fx,fy,cx,cy and then any distortion coefficients".into()),
         None => None,
     };
+    detect_with(files, min_tag_px, repeat, lens, tag_size_m)
+}
+
+fn detect_with(
+    files: &[PathBuf],
+    min_tag_px: i32,
+    repeat: u32,
+    lens: Option<Lens>,
+    tag_size_m: f64,
+) -> Result<()> {
+    if files.is_empty() {
+        return Err("give one or more PGM files".into());
+    }
     let mut detector = Detector::new(min_tag_px)?;
     for file in files {
         let image = GrayImage::read_pgm(file)?;
@@ -254,11 +302,7 @@ fn detect(
 
 fn record(path: &Path, name: &str, out: &Path, count: u32, every: Duration) -> Result<()> {
     let config = Config::load(path)?;
-    let camera: &Camera = config
-        .cameras
-        .iter()
-        .find(|c| c.name == name)
-        .ok_or_else(|| format!("no camera named {name:?} in {}", path.display()))?;
+    let camera = find_camera(&config, path, name)?;
     std::fs::create_dir_all(out)?;
     let latest = Latest::new();
     let stop = AtomicBool::new(false);
@@ -268,6 +312,14 @@ fn record(path: &Path, name: &str, out: &Path, count: u32, every: Duration) -> R
         stop.store(true, Ordering::Relaxed);
         saved
     })
+}
+
+fn find_camera<'a>(config: &'a Config, path: &Path, name: &str) -> Result<&'a Camera> {
+    config
+        .cameras
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| format!("no camera named {name:?} in {}", path.display()).into())
 }
 
 fn save_frames(
