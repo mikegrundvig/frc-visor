@@ -8,7 +8,7 @@ spotless = "8.10.4"
 # defaults, so a newer Spotless can't reformat the code on its own.
 google-java-format = "1.36.1"
 greclipse = "4.35"
-errorprone-plugin = "5.1.1"
+errorprone-plugin = "5.2.0"
 errorprone = "2.50.0"
 nullaway = "0.14.2"
 jacoco = "0.8.15"
