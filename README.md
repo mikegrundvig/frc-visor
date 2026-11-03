@@ -48,7 +48,8 @@ Pi); NAPA uses SSE2 on x86-64 and NEON on arm64.
 ## Running
 
 ```bash
-visor run --config /etc/visor/visor.toml    # the service
+visor run                                  # the service (--config /opt/visor/visor.toml)
+visor check                                # is the configuration valid, and what it sets up
 visor detect --repeat 100 frame.pgm         # what NAPA finds in an image, and how long it takes
 visor detect --lens 1230,1230,799.5,651.5 frame.pgm   # and each tag's pose, with this lens
 visor detect --config visor.toml --camera front-left frame.pgm   # with a configured camera's lens
@@ -56,13 +57,27 @@ visor record --camera front-left --out frames/   # frames for lens calibration
 visor version
 ```
 
-- **Configuration:** [deploy/visor.example.toml](deploy/visor.example.toml).
+- **Configuration:** [deploy/visor.example.toml](deploy/visor.example.toml), at
+  `/opt/visor/visor.toml` beside the program. A robot built on
+  [frc-robot-runtime](https://github.com/mikegrundvig/frc-robot-runtime) writes it from its
+  definition and deploys both with the robot (its `frc.visor-deploy` plugin): the new program checks
+  the new configuration (`visor check`) before either replaces the old.
 - **Service:** [deploy/visor.service](deploy/visor.service), which runs as a `visor` user in the
   `video` group.
 - **chrony:** [deploy/chrony.conf](deploy/chrony.conf).
 
 Camera controls use the names `v4l2-ctl --list-ctrls` prints. Aim for an exposure near 1 ms with
 the gain raised: blur from the robot turning is the main error, and short exposures cut it.
+
+## Releases
+
+A release is a date, `year.month.day` in Cargo.toml, and its version ID is that date as one number;
+the robot client is released at the same version. Pushing the tag `v<version>` runs
+[the release workflow](.github/workflows/release.yml), which builds and tests the program on an
+arm64 runner and attaches `visor-<version>-linux-arm64.tar.gz` (the program, its licence and
+notices, the systemd unit and the chrony configuration) and its SHA-256 to the tag's GitHub release.
+`tools/release.sh` then publishes the client and that program into the FRC libraries' Maven
+repository, where a robot's deploy takes the program for its client.
 
 ## Lens calibration
 

@@ -9,8 +9,9 @@
 
 `board` writes the board to print. Print it at 100% scale and fix it to something flat and rigid. Its
 exact size doesn't change the lens, but its squares must come out square. `solve` finds the board in
-each frame, solves the lens as OpenCV does, and prints a `[camera.lens]` block for the camera's
-entry in Visor's configuration. It refuses a session that can't give a good lens: too few views,
+each frame, solves the lens as OpenCV does, and prints it twice: as a `[camera.lens]` block for the
+camera's entry in Visor's configuration, and as the robot definition takes it, for a robot whose
+deploy writes that configuration. It refuses a session that can't give a good lens: too few views,
 views that miss part of the frame (the edges are where the distortion is), or too large an error.
 """
 
@@ -97,6 +98,22 @@ class Lens:
     @property
     def cy(self):
         return float(self.camera_matrix[1, 2])
+
+    def java(self):
+        """The lens as a robot's definition takes it (frc-robot-model's CameraConfig.Software.Lens),
+        to paste into the camera's Software.visor()...lens(...)."""
+        coefficients = ", ".join(f"{c:.9g}" for c in self.distortion)
+        return (
+            "Lens.builder()\n"
+            f"    .width({self.width})\n"
+            f"    .height({self.height})\n"
+            f"    .fx({self.fx:.6f})\n"
+            f"    .fy({self.fy:.6f})\n"
+            f"    .cx({self.cx:.6f})\n"
+            f"    .cy({self.cy:.6f})\n"
+            f"    .distortion(List.of({coefficients}))\n"
+            "    .build()\n"
+        )
 
     def toml(self):
         """The block for the camera's entry in Visor's configuration."""
@@ -291,6 +308,7 @@ def main(argv=None):
         print(f"refused: {why}", file=sys.stderr)
         return 1
     print(report(lens), file=sys.stderr)
+    print("\nFor the camera's .lens(...) in a robot's definition:\n" + lens.java(), file=sys.stderr)
     print(lens.toml(), end="")
     if args.out:
         args.out.write_text(lens.toml())

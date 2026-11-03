@@ -1,4 +1,5 @@
-# Visor's configuration: /etc/visor/visor.toml on the coprocessor, deployed with the program.
+# Visor's configuration: /opt/visor/visor.toml on the coprocessor, deployed with the program. A
+# robot's deploy writes it from the robot's definition; `visor check` reads it as the service would.
 
 # Where frames go: the robot controller, by team number (10.TE.AM.2) or by address.
 team = 1234

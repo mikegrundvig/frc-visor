@@ -87,3 +87,50 @@ ext.published = [
     version: visorVersion.get(),
 ]
 apply from: file("gradle/publishing.gradle")
+
+// The coprocessor program itself, beside the client and at its version: com.michaelgrundvig.frc:visor,
+// visor-<version>-linux-arm64.tar.gz (the program, its licence and notices, the systemd unit and the
+// chrony configuration), as the release workflow builds it on GitHub's arm64 runner. A robot's
+// deploy takes it from there for the client it's built with. tools/release.sh downloads it from the
+// tag's GitHub release, checks its SHA-256 and hands it over as -PvisorTarball.
+def visorTarball = providers.gradleProperty("visorTarball").map { file(it) }
+publishing.publications {
+    program(MavenPublication) {
+        artifactId = "visor"
+        version = visorVersion.get()
+        if (visorTarball.present) {
+            artifact(visorTarball.get()) {
+                classifier = "linux-arm64"
+                extension = "tar.gz"
+            }
+        }
+        pom {
+            name = "Visor"
+            description = "AprilTag vision for an FRC robot's coprocessor, built for arm64: the program a robot's deploy puts on each coprocessor."
+            url = "https://github.com/mikegrundvig/frc-visor"
+            packaging = "pom"
+            licenses {
+                license {
+                    name = "GNU General Public License, version 3 only"
+                    url = "https://github.com/mikegrundvig/frc-visor/blob/main/LICENSE"
+                    distribution = "repo"
+                }
+            }
+            scm {
+                url = "https://github.com/mikegrundvig/frc-visor"
+            }
+        }
+    }
+}
+tasks.named("publishAllPublicationsToFrcMavenRepository") {
+    def tarball = visorTarball
+    def expected = "visor-${visorVersion.get()}-linux-arm64.tar.gz"
+    doFirst {
+        if (!tarball.present) {
+            throw new GradleException("A release publishes the coprocessor program too: -PvisorTarball=<${expected}>, from the tag's GitHub release (tools/release.sh does it)")
+        }
+        if (tarball.get().name != expected) {
+            throw new GradleException("${tarball.get().name} isn't this release's program, ${expected}")
+        }
+    }
+}

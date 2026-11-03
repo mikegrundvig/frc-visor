@@ -19,7 +19,8 @@ use visor::napa::Detector;
 use visor::pose::solve_square;
 use visor::{capture, pipeline, wire};
 
-const DEFAULT_CONFIG: &str = "/etc/visor/visor.toml";
+/// Where the robot's deploy puts the configuration, beside the program (deploy/visor.service).
+const DEFAULT_CONFIG: &str = "/opt/visor/visor.toml";
 
 #[derive(Parser)]
 #[command(version, about = "AprilTag vision for an FRC robot's coprocessor")]
@@ -73,6 +74,12 @@ enum Command {
         #[arg(long, default_value_t = 1000)]
         every_ms: u64,
     },
+    /// Check a configuration as `visor run` reads it, and say what it sets up. The robot's deploy
+    /// runs it with the new program on the new configuration before putting either in place.
+    Check {
+        #[arg(long, default_value = DEFAULT_CONFIG)]
+        config: PathBuf,
+    },
     /// Print the version, its version ID, and the licence notices.
     Version,
 }
@@ -106,6 +113,7 @@ fn main() -> ExitCode {
             count,
             Duration::from_millis(every_ms),
         ),
+        Command::Check { config } => check(&config),
         Command::Version => {
             version();
             Ok(())
@@ -338,6 +346,34 @@ fn save_frames(
         frame.image.write_pgm(&file)?;
         println!("{}", file.display());
         latest.recycle(frame.image);
+    }
+    Ok(())
+}
+
+fn check(path: &Path) -> Result<()> {
+    let config = Config::load(path)?;
+    println!(
+        "{}: visor {} (version ID {}), frames to {}",
+        path.display(),
+        env!("CARGO_PKG_VERSION"),
+        wire::VERSION_ID,
+        config.robot
+    );
+    for camera in &config.cameras {
+        println!(
+            "  camera {} {:?}: {}x{} at {} fps, {}, {}",
+            camera.index,
+            camera.name,
+            camera.width,
+            camera.height,
+            camera.fps,
+            camera.device.display(),
+            if camera.lens.is_some() {
+                "lens calibrated"
+            } else {
+                "no lens: corners only"
+            }
+        );
     }
     Ok(())
 }

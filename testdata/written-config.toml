@@ -1,0 +1,31 @@
+# Visor's configuration, written by the robot's deploy: edits here are overwritten.
+team = 1234
+
+[[camera]]
+name = "front \"left\" \\ 1"
+index = 0
+device = "/dev/v4l/by-id/usb-cam-video-index0"
+width = 1600
+height = 1304
+fps = 60
+min_tag_px = 18
+time_offset_us = -1500
+[camera.controls]
+"auto_exposure" = 1
+"exposure_time_absolute" = 10
+"gain" = 0
+[camera.lens]
+width = 1600
+height = 1304
+fx = 1229.75
+fy = 1230.125
+cx = 801.5
+cy = 650.25
+distortion = [-0.3125, 0.125, 1.0E-4, -2.5E-4, -0.03]
+
+[[camera]]
+name = "back"
+index = 3
+device = "/dev/video2"
+width = 1280
+height = 800

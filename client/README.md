@@ -9,6 +9,8 @@ messages with it, so robot code never links GPL code.
 - `VisorFrame` is one frame, reused: receiving allocates nothing once running.
 - `CameraToTag` is a tag's pose from the camera in WPILib's axes (camera-to-tag).
 - `NtpResponder` answers chrony on the coprocessors with the robot's clock (UDP 5806).
+- `VisorConfigFile` writes Visor's configuration for a coprocessor, as a robot's deploy does:
+  `testdata/written-config.toml` is its output, which Visor's own tests read back.
 
 ```java
 VisorReceiver receiver = VisorReceiver.listen(VisorReceiver.DEFAULT_PORT);

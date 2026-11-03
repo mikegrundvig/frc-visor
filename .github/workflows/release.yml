@@ -1,0 +1,56 @@
+name: Release
+
+# A tag vYEAR.MONTH.DAY, Cargo.toml's version, builds the coprocessor program on GitHub's arm64
+# runner (the coprocessors' architecture), tests it there, and attaches it to the tag's GitHub
+# release with its SHA-256: visor-<version>-linux-arm64.tar.gz, holding the program, its licence and
+# notices, the systemd unit and the chrony configuration. tools/release.sh then publishes it into
+# frc-maven beside the client.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  program:
+    name: The arm64 program
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: write # to create the tag's release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: libclang for the V4L2 bindings
+        run: sudo apt-get install -y libclang-dev
+      - name: The tag is the package's version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "The tag is $GITHUB_REF_NAME, but Cargo.toml's version is $version" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Tests
+        run: cargo test --locked
+      - name: Release build
+        run: cargo build --release --locked
+      - name: Package
+        run: |
+          name="visor-$VERSION-linux-arm64.tar.gz"
+          mkdir package
+          cp target/release/visor LICENSE NOTICE deploy/visor.service deploy/chrony.conf package/
+          # The same files make the same archive: fixed owner, order and times, no gzip timestamp.
+          tar -C package --owner=0 --group=0 --numeric-owner --sort=name \
+            --mtime="@$(git log -1 --format=%ct)" -cf - . | gzip -n > "$name"
+          sha256sum "$name" > "$name.sha256"
+          cat "$name.sha256"
+      - name: The tag's release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" visor-*.tar.gz visor-*.tar.gz.sha256 \
+            --title "Visor $VERSION" \
+            --notes "The coprocessor program for arm64, built from this tag. A robot's deploy takes it from frc-maven (com.michaelgrundvig.frc:visor:$VERSION) for the robot client of the same version."

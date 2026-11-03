@@ -312,6 +312,10 @@ class ThroughVisor(unittest.TestCase):
             file=sys.stderr,
         )
         self.assertEqual((lens["width"], lens["height"]), (W, H))
+        # The same lens as a robot's definition takes it.
+        java = calibrate.solve([(n, i) for n, i, _, _ in frames]).java()
+        self.assertIn(f".width({W})", java)
+        self.assertAlmostEqual(float(re.search(r"\.fx\(([\d.]+)\)", java).group(1)), lens["fx"], places=5)
         self.assertLess(off, 0.01 * np.linalg.norm(t), "within 1% of the distance")
         self.assertGreater(off_without, 5 * off, "the distortion matters there")
 
