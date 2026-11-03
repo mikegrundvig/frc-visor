@@ -94,6 +94,51 @@ class CameraToTagTest {
     }
   }
 
+  @Test
+  void aPoseInWpilibsAxesSurvivesTheTripThroughVisorsAxes() {
+    // A simulation sets poses in WPILib's axes; they go out in OpenCV's, as Visor sends them, and
+    // come back the same. Half turns included: a tag square in front is one.
+    Random random = new Random(11);
+    VisorFrame frame = new VisorFrame();
+    CameraToTag sent = new CameraToTag();
+    CameraToTag other = new CameraToTag();
+    CameraToTag back = new CameraToTag();
+    double[][] rotations = {{0, 0, 0, 1}, {1, 0, 0, 0}, {0, 0.6, 0, 0.8}};
+    for (int n = 0; n < 300; n++) {
+      double[] q =
+          n < rotations.length
+              ? rotations[n]
+              : new double[] {
+                random.nextGaussian(),
+                random.nextGaussian(),
+                random.nextGaussian(),
+                random.nextGaussian()
+              };
+      sent.set(
+          1 + 5 * random.nextDouble(),
+          random.nextGaussian(),
+          random.nextGaussian(),
+          q[0],
+          q[1],
+          q[2],
+          q[3]);
+      other.set(2, 0, 0, 1, 0, 0, 0);
+      frame.setHeader(n, 1600, 1304, 0, 0, true, false);
+      int tag = frame.addTag(3, 0, 50, new float[8]);
+      frame.setPoses(tag, sent, 0.1f, other, 0.4f);
+      frame.cameraToTag(tag, Candidate.BEST, back);
+      assertThat(new double[] {back.x(), back.y(), back.z()})
+          .containsExactly(new double[] {sent.x(), sent.y(), sent.z()}, within(1e-5));
+      double dot =
+          back.qw() * sent.qw()
+              + back.qx() * sent.qx()
+              + back.qy() * sent.qy()
+              + back.qz() * sent.qz();
+      assertThat(2 * Math.acos(Math.min(1, Math.abs(dot)))).as("case %d", n).isLessThan(1e-5);
+      assertThat(frame.ambiguity(tag)).isCloseTo(0.25, within(1e-6));
+    }
+  }
+
   private static double[] floats(double[] v) {
     return new double[] {(float) v[0], (float) v[1], (float) v[2]};
   }

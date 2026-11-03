@@ -22,6 +22,7 @@ public final class CameraToTag {
   // Working space, so converting allocates nothing.
   private final double[] opencv = new double[9];
   private final double[] wpilib = new double[9];
+  private final double[] quaternion = new double[4];
 
   /** The tag's centre ahead of the camera, in metres. */
   public double x() {
@@ -56,6 +57,70 @@ public final class CameraToTag {
   /** The rotation's quaternion: z. */
   public double qz() {
     return qz;
+  }
+
+  /**
+   * Sets this pose in WPILib's axes: for a simulation building the frames Visor would send. The
+   * quaternion needn't be normalized; it is here.
+   */
+  public void set(double x, double y, double z, double qw, double qx, double qy, double qz) {
+    this.x = x;
+    this.y = y;
+    this.z = z;
+    double norm = Math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+    this.qw = qw / norm;
+    this.qx = qx / norm;
+    this.qy = qy / norm;
+    this.qz = qz / norm;
+  }
+
+  /**
+   * This pose in OpenCV's axes, as Visor sends it: the rotation as an axis scaled by its angle into
+   * {@code rvec}, the translation into {@code tvec}. The opposite of {@link #setFromOpenCv}.
+   */
+  void toOpenCv(float[] rvec, float[] tvec) {
+    // The translation: WPILib's (x, y, z) is OpenCV's (z, -x, -y).
+    tvec[0] = (float) -y;
+    tvec[1] = (float) -z;
+    tvec[2] = (float) x;
+    // The rotation's matrix in WPILib's axes, from the quaternion.
+    double[] m = wpilib;
+    m[0] = 1 - 2 * (qy * qy + qz * qz);
+    m[1] = 2 * (qx * qy - qz * qw);
+    m[2] = 2 * (qx * qz + qy * qw);
+    m[3] = 2 * (qx * qy + qz * qw);
+    m[4] = 1 - 2 * (qx * qx + qz * qz);
+    m[5] = 2 * (qy * qz - qx * qw);
+    m[6] = 2 * (qx * qz - qy * qw);
+    m[7] = 2 * (qy * qz + qx * qw);
+    m[8] = 1 - 2 * (qx * qx + qy * qy);
+    // Back to OpenCV's axes, undoing setFromOpenCv: OpenCV's column k is WPILib's column (k + 1) %
+    // 3,
+    // each vector (p, q, s) turned back into (-q, -s, p).
+    double[] r = opencv;
+    for (int column = 0; column < 3; column++) {
+      int from = (column + 1) % 3;
+      r[column] = -m[3 + from];
+      r[3 + column] = -m[6 + from];
+      r[6 + column] = m[from];
+    }
+    quaternionOf(r, quaternion);
+    double w = quaternion[0];
+    double vx = quaternion[1];
+    double vy = quaternion[2];
+    double vz = quaternion[3];
+    if (w < 0) {
+      w = -w;
+      vx = -vx;
+      vy = -vy;
+      vz = -vz;
+    }
+    double length = Math.sqrt(vx * vx + vy * vy + vz * vz);
+    // The angle, from atan2 so it stays exact near zero and near a half turn.
+    double scale = length < 1e-12 ? 2 : 2 * Math.atan2(length, w) / length;
+    rvec[0] = (float) (vx * scale);
+    rvec[1] = (float) (vy * scale);
+    rvec[2] = (float) (vz * scale);
   }
 
   /**
@@ -114,38 +179,49 @@ public final class CameraToTag {
     r[8] = c + kz * kz * t;
   }
 
-  /** The quaternion of a row-major rotation matrix (Shepperd's method: the largest term first). */
+  /** The quaternion of a row-major rotation matrix, as this pose's rotation. */
   private void setQuaternion(double[] m) {
+    quaternionOf(m, quaternion);
+    qw = quaternion[0];
+    qx = quaternion[1];
+    qy = quaternion[2];
+    qz = quaternion[3];
+  }
+
+  /**
+   * The quaternion (w, x, y, z) of a row-major rotation matrix, normalized, into {@code q}
+   * (Shepperd's method: the largest term first).
+   */
+  private static void quaternionOf(double[] m, double[] q) {
     double trace = m[0] + m[4] + m[8];
     if (trace > 0) {
       double s = 2 * Math.sqrt(trace + 1);
-      qw = s / 4;
-      qx = (m[7] - m[5]) / s;
-      qy = (m[2] - m[6]) / s;
-      qz = (m[3] - m[1]) / s;
+      q[0] = s / 4;
+      q[1] = (m[7] - m[5]) / s;
+      q[2] = (m[2] - m[6]) / s;
+      q[3] = (m[3] - m[1]) / s;
     } else if (m[0] > m[4] && m[0] > m[8]) {
       double s = 2 * Math.sqrt(1 + m[0] - m[4] - m[8]);
-      qw = (m[7] - m[5]) / s;
-      qx = s / 4;
-      qy = (m[1] + m[3]) / s;
-      qz = (m[2] + m[6]) / s;
+      q[0] = (m[7] - m[5]) / s;
+      q[1] = s / 4;
+      q[2] = (m[1] + m[3]) / s;
+      q[3] = (m[2] + m[6]) / s;
     } else if (m[4] > m[8]) {
       double s = 2 * Math.sqrt(1 + m[4] - m[0] - m[8]);
-      qw = (m[2] - m[6]) / s;
-      qx = (m[1] + m[3]) / s;
-      qy = s / 4;
-      qz = (m[5] + m[7]) / s;
+      q[0] = (m[2] - m[6]) / s;
+      q[1] = (m[1] + m[3]) / s;
+      q[2] = s / 4;
+      q[3] = (m[5] + m[7]) / s;
     } else {
       double s = 2 * Math.sqrt(1 + m[8] - m[0] - m[4]);
-      qw = (m[3] - m[1]) / s;
-      qx = (m[2] + m[6]) / s;
-      qy = (m[5] + m[7]) / s;
-      qz = s / 4;
+      q[0] = (m[3] - m[1]) / s;
+      q[1] = (m[2] + m[6]) / s;
+      q[2] = (m[5] + m[7]) / s;
+      q[3] = s / 4;
     }
-    double norm = Math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
-    qw /= norm;
-    qx /= norm;
-    qy /= norm;
-    qz /= norm;
+    double norm = Math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    for (int i = 0; i < 4; i++) {
+      q[i] /= norm;
+    }
   }
 }

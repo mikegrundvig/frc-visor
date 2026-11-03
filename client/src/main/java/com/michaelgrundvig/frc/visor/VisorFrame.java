@@ -39,6 +39,11 @@ public final class VisorFrame {
   final boolean[] posesSolved = new boolean[MAX_TAGS];
   final float[] corners = new float[MAX_TAGS * CORNER_VALUES];
   final float[] poses = new float[MAX_TAGS * POSE_VALUES];
+  // Working space for setPoses from WPILib's axes, so it allocates nothing.
+  private final float[] bestRvec = new float[3];
+  private final float[] bestTvec = new float[3];
+  private final float[] otherRvec = new float[3];
+  private final float[] otherTvec = new float[3];
 
   /** Visor's version ID: 2026.11.2 is 20261102. */
   public int versionId() {
@@ -246,6 +251,17 @@ public final class VisorFrame {
     poses[at + ERRORS] = bestError;
     poses[at + ERRORS + 1] = otherError;
     posesSolved[tag] = true;
+  }
+
+  /**
+   * Gives a tag its two poses from transforms in WPILib's axes, as a simulation knows them: each
+   * camera-to-tag, with its reprojection error in pixels. They're stored as Visor sends them.
+   */
+  public void setPoses(
+      int tag, CameraToTag best, float bestError, CameraToTag other, float otherError) {
+    best.toOpenCv(bestRvec, bestTvec);
+    other.toOpenCv(otherRvec, otherTvec);
+    setPoses(tag, bestRvec, bestTvec, bestError, otherRvec, otherTvec, otherError);
   }
 
   private int checked(int tag) {
