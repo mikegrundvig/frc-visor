@@ -3,8 +3,9 @@ name: Release
 # A tag vYEAR.MONTH.DAY, Cargo.toml's version, builds the coprocessor program on GitHub's arm64
 # runner (the coprocessors' architecture), tests it there, and attaches it to the tag's GitHub
 # release with its SHA-256: visor-<version>-linux-arm64.tar.gz, holding the program, its licence and
-# notices, the systemd unit and the chrony configuration. tools/release.sh then publishes it into
-# frc-maven beside the client.
+# notices, the systemd unit, the chrony configuration, and Visor's Spotter pack (spotter/visor/).
+# tools/release.sh then publishes it into frc-maven beside the client.
+
 on:
   push:
     tags: ["v*"]
@@ -42,6 +43,9 @@ jobs:
           name="visor-$VERSION-linux-arm64.tar.gz"
           mkdir package
           cp target/release/visor LICENSE NOTICE deploy/visor.service deploy/chrony.conf package/
+          # Visor's Spotter pack, which the robot program pushes to its boards.
+          mkdir package/spotter
+          cp -r spotter/visor package/spotter/
           # The same files make the same archive: fixed owner, order and times, no gzip timestamp.
           tar -C package --owner=0 --group=0 --numeric-owner --sort=name \
             --mtime="@$(git log -1 --format=%ct)" -cf - . | gzip -n > "$name"

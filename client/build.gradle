@@ -20,6 +20,24 @@ java {
 
 repositories {
     mavenCentral()
+    // Spotter's, for the test of Visor's pack (../spotter/visor) on its agent: only Spotter's own.
+    exclusiveContent {
+        forRepository {
+            maven { url = "https://mikegrundvig.github.io/frc-spotter/maven" }
+        }
+        filter {
+            includeModule "com.michaelgrundvig.frc", "spotter-manager"
+            includeModule "com.michaelgrundvig.frc", "spotter-agent"
+        }
+    }
+}
+
+// The agent, as a coprocessor runs it (java -jar), for the pack's test.
+configurations {
+    spotterAgent {
+        canBeConsumed = false
+        transitive = false
+    }
 }
 
 dependencies {
@@ -34,6 +52,8 @@ dependencies {
     testRuntimeOnly "org.junit.platform:junit-platform-launcher"
     testImplementation libs.assertj.core
     testImplementation libs.jackson.databind
+    testImplementation libs.spotter.manager
+    spotterAgent libs.spotter.agent
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -68,6 +88,16 @@ tasks.named("test") {
     // The frames Visor's own tests check against: the golden file.
     systemProperty "visor.testdata", file("../testdata").absolutePath
     inputs.dir("../testdata").withPropertyName("testdata").withPathSensitivity(PathSensitivity.RELATIVE)
+    // Visor's Spotter pack, and the agent that runs it, for VisorPackTest.
+    systemProperty "visor.pack", file("../spotter/visor").absolutePath
+    inputs.dir("../spotter/visor").withPropertyName("pack").withPathSensitivity(PathSensitivity.RELATIVE)
+    def agent = configurations.spotterAgent
+    inputs.files(agent).withPropertyName("spotterAgent").withNormalizer(ClasspathNormalizer)
+    jvmArgumentProviders.add({
+        [
+            "-Dvisor.spotterAgent=${agent.singleFile.absolutePath}".toString()
+        ]
+    } as CommandLineArgumentProvider)
     // chrony, where a developer has it, for the responder's test against the real thing.
     def chronyd = System.getenv("VISOR_CHRONYD")
     if (chronyd != null) {

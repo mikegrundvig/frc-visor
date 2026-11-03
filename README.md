@@ -58,10 +58,13 @@ visor version
 ```
 
 - **Configuration:** [deploy/visor.example.toml](deploy/visor.example.toml), at
-  `/opt/visor/visor.toml` beside the program. A robot built on
-  [frc-robot-runtime](https://github.com/mikegrundvig/frc-robot-runtime) writes it from its
-  definition and deploys both with the robot (its `frc.visor-deploy` plugin): the new program checks
-  the new configuration (`visor check`) before either replaces the old.
+  `/opt/visor/visor.toml` beside the program.
+- **Installed by the robot:** a robot built on
+  [frc-robot-runtime](https://github.com/mikegrundvig/frc-robot-runtime) carries Visor's release
+  and, as it starts, checks each coprocessor through [Spotter](https://github.com/mikegrundvig/frc-spotter)'s
+  agent with Visor's pack ([spotter/visor](spotter/visor/README.md)): it installs the release where
+  the board has another, and writes the configuration from the cameras the board has plugged in.
+  The new configuration is checked (`visor check`) before it replaces the old.
 - **Service:** [deploy/visor.service](deploy/visor.service), which runs as a `visor` user in the
   `video` group.
 - **chrony:** [deploy/chrony.conf](deploy/chrony.conf).
@@ -75,9 +78,9 @@ A release is a date, `year.month.day` in Cargo.toml, and its version ID is that 
 the robot client is released at the same version. Pushing the tag `v<version>` runs
 [the release workflow](.github/workflows/release.yml), which builds and tests the program on an
 arm64 runner and attaches `visor-<version>-linux-arm64.tar.gz` (the program, its licence and
-notices, the systemd unit and the chrony configuration) and its SHA-256 to the tag's GitHub release.
-`tools/release.sh` then publishes the client and that program into the FRC libraries' Maven
-repository, where a robot's deploy takes the program for its client.
+notices, the systemd unit, the chrony configuration and the Spotter pack) and its SHA-256 to the
+tag's GitHub release. `tools/release.sh` then publishes the client and that archive into the FRC
+libraries' Maven repository, from which a robot's build takes the archive for its client.
 
 ## Lens calibration
 

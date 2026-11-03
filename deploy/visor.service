@@ -2,16 +2,16 @@
 Description=Visor, AprilTag vision for the robot
 After=network-online.target chrony.service
 Wants=network-online.target
-# The robot's deploy puts the program and its configuration in /opt/visor and stops the old one to
-# start the new: keep trying for good, including before the first deploy.
+# The robot program puts the program and its configuration in /opt/visor, through Visor's Spotter
+# pack (spotter/visor), and restarts it: keep trying for good, including before the first install.
 StartLimitIntervalSec=0
 
 [Service]
 ExecStart=/opt/visor/visor run --config /opt/visor/visor.toml
 Restart=always
 RestartSec=1
-# The cameras (the video group) are all it needs. The image creates the visor user, who owns
-# /opt/visor (kept across boots on a read-only root) and is the user the robot's deploy logs in as.
+# The cameras (the video group) are all it needs. The image creates the visor user; /opt/visor is
+# Spotter's agent's to write (spotter/visor/README.md), and kept across boots on a read-only root.
 User=visor
 SupplementaryGroups=video
 # Visor's threads on the fast cores of an RK3588 (Orange Pi 5: cores 4-7 are the Cortex-A76s).

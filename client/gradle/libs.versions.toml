@@ -16,6 +16,8 @@ junit = "6.1.3"
 assertj = "3.27.7"
 # Reads the JSON test files Visor's own tests share with these.
 jackson = "2.20.1"
+# Spotter, whose agent runs Visor's pack (../spotter/visor) in its test, driven by its manager.
+spotter = "0.4.0"
 
 [libraries]
 jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
@@ -24,6 +26,8 @@ nullaway = { module = "com.uber.nullaway:nullaway", version.ref = "nullaway" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+spotter-manager = { module = "com.michaelgrundvig.frc:spotter-manager", version.ref = "spotter" }
+spotter-agent = { module = "com.michaelgrundvig.frc:spotter-agent", version.ref = "spotter" }
 
 [plugins]
 spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }

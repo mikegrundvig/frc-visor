@@ -1,0 +1,38 @@
+# Visor on a coprocessor, for Spotter's agent: what's installed and what cameras are plugged in, so
+# the robot can check it as it starts, and the two actions it puts things right with. The robot
+# program (frc-robot-runtime) pushes this pack from its deploy folder, and installs and configures
+# Visor while it's disabled. What the board's image grants the agent for it is in README.md.
+pack: visor
+version: 1.0.0
+collectors:
+  - id: status
+    run: [./status]                                 # {"version": "2026.11.4", "config": "<sha256>", "cameras": "..."}
+    every: 2s
+    fields:
+      version: {label: Visor, type: text}           # empty: none installed
+      config: {label: Configuration (SHA-256), type: text}   # empty: none
+      cameras: {label: Cameras plugged in, type: text}       # their /dev/v4l/by-id/ names, comma-separated
+logs:
+  - id: log
+    label: Visor's log
+    run: [./journal, --unit=visor.service]          # Spotter's catalog's ./journal, beside this file
+    map: {time: {from: __REALTIME_TIMESTAMP, unit: us}, level: PRIORITY, source: SYSLOG_IDENTIFIER, message: MESSAGE, cursor: __CURSOR}
+actions:
+  - id: install
+    label: Install Visor
+    description: Puts the release given (its visor-<version>-linux-arm64.tar.gz) in place and restarts Visor
+    run: [./install]
+    input: file
+    timeout: 60s
+    response:
+      exit: {type: number, fail: {notEquals: 0}}
+      version: {type: text}
+  - id: configure
+    label: Configure Visor
+    description: Puts the configuration given in place, once Visor's check passes, and restarts Visor
+    run: [./configure]
+    input: text
+    timeout: 30s
+    response:
+      exit: {type: number, fail: {notEquals: 0}}
+      config: {type: text}

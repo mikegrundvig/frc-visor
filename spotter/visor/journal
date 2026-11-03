@@ -1,0 +1,56 @@
+#!/bin/sh
+# Spotter's catalog journal script (github.com/mikegrundvig/frc-spotter, packs/debian/journal, MIT
+# License), its example changed to this pack's service.
+# A page of the journal, as journalctl -o json writes it, by what the agent asks in SPOTTER_*:
+# SPOTTER_FROM latest (the newest SPOTTER_LIMIT entries), before or after SPOTTER_CURSOR (an
+# entry's __CURSOR), oldest first, at SPOTTER_LEVEL or more severe. Its arguments go to journalctl
+# as they are: --unit=visor.service, for one service's log. Reading the system journal takes
+# the systemd-journal group, which the agent's package gives it.
+#
+# The auth and authpriv facilities (4 and 10: logins, sudo, sshd, with user names, addresses and
+# command lines) are left out, as anyone on the robot's network may page a log; --with-auth, as its
+# first argument, keeps them. SPOTTER_* are anyone's too: only ever quoted, never evaluated.
+set -u
+limit=${SPOTTER_LIMIT:-100}
+level=${SPOTTER_LEVEL:-debug}
+case $level in
+  error) level=err ;;
+  warning | info | debug) ;;
+  *) level=debug ;;
+esac
+cursor=${SPOTTER_CURSOR:-}
+auth=no
+if [ "${1:-}" = --with-auth ]; then
+  auth=yes
+  shift
+fi
+set -- -o json --output-fields=MESSAGE,PRIORITY,SYSLOG_IDENTIFIER,SYSLOG_FACILITY --no-pager -q \
+  --priority="$level" "$@"
+
+# Lines of the auth facilities left out, unless asked for.
+unauth() {
+  if [ "$auth" = yes ]; then
+    cat
+  else
+    grep -v -E '"SYSLOG_FACILITY":"(4|10)"'
+  fi
+}
+
+case ${SPOTTER_FROM:-latest} in
+  latest)
+    # Newest first, as many as asked, then oldest first.
+    journalctl "$@" --reverse | unauth | head -n "$limit" | tac
+    ;;
+  before)
+    # Back from the cursor's entry, newest first: that entry left out, then oldest first.
+    journalctl "$@" --cursor="$cursor" --reverse | grep -v -F -e "$cursor" | unauth |
+      head -n "$limit" | tac
+    ;;
+  after)
+    journalctl "$@" --after-cursor="$cursor" | unauth | head -n "$limit"
+    ;;
+  *)
+    echo "SPOTTER_FROM is latest, before or after, not $SPOTTER_FROM" >&2
+    exit 2
+    ;;
+esac

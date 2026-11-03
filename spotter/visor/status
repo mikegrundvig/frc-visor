@@ -1,0 +1,20 @@
+#!/bin/sh
+# What Visor this board has, its configuration's SHA-256, and the cameras plugged in: one JSON
+# object. VISOR_DIR (/opt/visor) and VISOR_DEVICES (/dev/v4l/by-id) are for an image laid out
+# otherwise, and tests.
+set -u
+dir=${VISOR_DIR:-/opt/visor}
+devices=${VISOR_DEVICES:-/dev/v4l/by-id}
+version=""
+if [ -x "$dir/visor" ]; then
+  # "visor 2026.11.4 (version ID 20261104)": the second word.
+  version=$("$dir/visor" version 2>/dev/null | head -n 1 | cut -d ' ' -f 2)
+fi
+config=""
+if [ -f "$dir/visor.toml" ]; then
+  config=$(sha256sum "$dir/visor.toml" | cut -d ' ' -f 1)
+fi
+# Each camera's capture device, by the name that finds it after a replug. Only the characters such
+# names have, so the JSON needs no escaping.
+cameras=$(ls "$devices" 2>/dev/null | grep -E -e '-video-index0$' | grep -E '^[A-Za-z0-9_.:+-]+$' | paste -sd , -)
+printf '{"version": "%s", "config": "%s", "cameras": "%s"}\n' "$version" "$config" "$cameras"
