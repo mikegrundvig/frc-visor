@@ -16,5 +16,12 @@ if [ -f "$dir/visor.toml" ]; then
 fi
 # Each camera's capture device, by the name that finds it after a replug. Only the characters such
 # names have, so the JSON needs no escaping.
-cameras=$(ls "$devices" 2>/dev/null | grep -E -e '-video-index0$' | grep -E '^[A-Za-z0-9_.:+-]+$' | paste -sd , -)
+cameras=""
+for device in "$devices"/*-video-index0; do
+  name=${device##*/}
+  case $name in
+    *[!A-Za-z0-9_.:+-]* | '*-video-index0') continue ;;
+  esac
+  cameras="${cameras:+$cameras,}$name"
+done
 printf '{"version": "%s", "config": "%s", "cameras": "%s"}\n' "$version" "$config" "$cameras"

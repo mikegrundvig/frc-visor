@@ -3,6 +3,9 @@
 # restarts Visor. A configuration it refuses leaves the board as it was, and says why.
 # VISOR_DIR and VISOR_RESTART as for ./install.
 set -eu
+# The agent runs its packs with a umask of 0077; Visor runs as its own user, who must read
+# what this writes.
+umask 022
 dir=${VISOR_DIR:-/opt/visor}
 cat > "$dir/visor.toml.new"
 if ! checked=$("$dir/visor" check --config "$dir/visor.toml.new" 2>&1); then
@@ -11,6 +14,7 @@ if ! checked=$("$dir/visor" check --config "$dir/visor.toml.new" 2>&1); then
   exit 1
 fi
 echo "$checked" >&2
+chmod 644 "$dir/visor.toml.new"
 mv -f "$dir/visor.toml.new" "$dir/visor.toml"
 if [ -n "${VISOR_RESTART:-}" ]; then "$VISOR_RESTART"; else systemctl restart visor.service; fi
 printf '{"config": "%s"}\n' "$(sha256sum "$dir/visor.toml" | cut -d ' ' -f 1)"

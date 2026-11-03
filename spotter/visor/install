@@ -5,6 +5,9 @@
 # it was. VISOR_DIR (/opt/visor) and VISOR_RESTART (a program run in place of
 # `systemctl restart visor.service`) are for an image laid out otherwise, and tests.
 set -eu
+# The agent runs its packs with a umask of 0077; Visor runs as its own user, who must read
+# what this writes.
+umask 022
 dir=${VISOR_DIR:-/opt/visor}
 work="$dir/.install"
 rm -rf "$work"

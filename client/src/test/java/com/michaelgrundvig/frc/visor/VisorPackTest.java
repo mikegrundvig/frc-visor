@@ -131,6 +131,13 @@ class VisorPackTest {
     String hash = sha256(toml);
     await(spotter, () -> config.text().equals(hash), "the configuration's hash");
     assertThat(visor.resolve("visor.toml")).content().isEqualTo(toml);
+    // Readable by Visor, which runs as its own user, though the agent writes it under umask 0077.
+    assertThat(
+            PosixFilePermissions.toString(
+                Files.getPosixFilePermissions(visor.resolve("visor.toml"))))
+        .isEqualTo("rw-r--r--");
+    assertThat(PosixFilePermissions.toString(Files.getPosixFilePermissions(visor.resolve("visor"))))
+        .isEqualTo("rwxr-xr-x");
 
     // One it refuses leaves the board as it was, and says why.
     Run refused = run(spotter, board.run("visor.configure", "bad = true\n"));
@@ -162,13 +169,17 @@ class VisorPackTest {
     Path log = work.resolve("agent.log");
     ProcessBuilder builder =
         new ProcessBuilder(
+                "/bin/sh",
+                "-c",
+                // With the umask its systemd unit gives it (UMask=0077): what a pack writes is its
+                // own
+                // unless the pack says otherwise.
+                "umask 077; exec \"$0\" -Xmx128m -jar \"$1\" --root=\"$2\" --controller=127.0.0.1"
+                    + " --port=\"$3\"",
                 ProcessHandle.current().info().command().orElse("java"),
-                "-Xmx128m",
-                "-jar",
                 System.getProperty("visor.spotterAgent"),
-                "--root=" + root,
-                "--controller=127.0.0.1",
-                "--port=" + port)
+                root.toString(),
+                Integer.toString(port))
             .redirectErrorStream(true)
             .redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()));
     builder.environment().put("VISOR_DIR", visor.toString());
