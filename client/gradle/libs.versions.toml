@@ -2,7 +2,7 @@
 # the tests'. Its own version is Visor's, read from ../Cargo.toml (gradle/publishing.gradle).
 
 [versions]
-jspecify = "1.0.0"
+jspecify = "1.0.1"
 spotless = "8.10.4"
 # The formatters Spotless runs (gradle/quality.gradle), pinned rather than left to Spotless's
 # defaults, so a newer Spotless can't reformat the code on its own.
