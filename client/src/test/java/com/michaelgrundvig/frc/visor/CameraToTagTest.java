@@ -28,7 +28,7 @@ class CameraToTagTest {
     // camera's x), its y up (the camera's -y), its z out of its face (the camera's -z). That's a
     // half turn about x.
     CameraToTag pose = convert(new double[] {Math.PI, 0, 0}, new double[] {0, 0, 3});
-    // WPILib's, as PhotonVision gives it: 3 m ahead, and turned half round about z, its x pointing
+    // WPILib's camera-to-tag: 3 m ahead, and turned half round about z, its x pointing
     // back at the camera.
     assertThat(pose.x()).isCloseTo(3, within(CLOSE));
     assertThat(pose.y()).isCloseTo(0, within(CLOSE));

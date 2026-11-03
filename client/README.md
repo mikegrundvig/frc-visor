@@ -7,7 +7,7 @@ messages with it, so robot code never links GPL code.
 - `VisorReceiver` receives frames on UDP 5807, on a thread of its own, and hands them to the robot
   loop through a fixed ring. `inMemory()` makes one a simulation feeds directly.
 - `VisorFrame` is one frame, reused: receiving allocates nothing once running.
-- `CameraToTag` is a tag's pose in WPILib's axes, as PhotonVision gives camera-to-target.
+- `CameraToTag` is a tag's pose from the camera in WPILib's axes (camera-to-tag).
 - `NtpResponder` answers chrony on the coprocessors with the robot's clock (UDP 5806).
 
 ```java

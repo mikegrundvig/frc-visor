@@ -1,8 +1,9 @@
-//! Visor's solve of the corners PhotonVision's simulation saw (testdata/photonvision-cases.json).
+//! Visor's solve of the reference corners (testdata/reference-solves.json): tags the robot
+//! template's camera simulation saw across 2026's field.
 //!
-//! Visor's answers are kept in testdata/photonvision-visor.json, as the wire carries them: OpenCV's
+//! Visor's answers are kept in testdata/visor-solves.json, as the wire carries them: OpenCV's
 //! rvec and tvec for each pose, best first, and each one's error. The robot client's tests convert
-//! them to WPILib's axes and check they're PhotonVision's own transforms. This test checks Visor
+//! them to WPILib's axes and check they're the reference solve's transforms. This test checks Visor
 //! still gives those answers (VISOR_WRITE_GOLDEN=1 writes them afresh).
 
 use serde_json::{Value, json};
@@ -26,10 +27,9 @@ fn numbers(value: &Value) -> Vec<f64> {
 
 /// Visor's answer for every case: [best, other], each {rvec, tvec, error}, as f32 on the wire.
 fn answers() -> Value {
-    let cases: Value = serde_json::from_str(
-        &std::fs::read_to_string(testdata("photonvision-cases.json")).unwrap(),
-    )
-    .unwrap();
+    let cases: Value =
+        serde_json::from_str(&std::fs::read_to_string(testdata("reference-solves.json")).unwrap())
+            .unwrap();
     let f = |key: &str| cases[key].as_f64().unwrap();
     let lens = Lens::new(f("fx"), f("fy"), f("cx"), f("cy"), &[]).unwrap();
     let size = f("tag_size_m");
@@ -39,7 +39,7 @@ fn answers() -> Value {
         .iter()
         .map(|case| {
             let corners: [f64; 8] = numbers(&case["corners"]).try_into().unwrap();
-            let poses = solve_square(&corners, &lens, size).expect("PhotonVision solved it");
+            let poses = solve_square(&corners, &lens, size).expect("the reference solved it");
             let wire = |v: nalgebra::Vector3<f64>| [v.x as f32, v.y as f32, v.z as f32];
             Value::Array(
                 poses
@@ -53,9 +53,9 @@ fn answers() -> Value {
 }
 
 #[test]
-fn visor_still_solves_photonvision_s_corners_the_same() {
+fn visor_still_solves_the_reference_corners_the_same() {
     let fresh = answers();
-    let path = testdata("photonvision-visor.json");
+    let path = testdata("visor-solves.json");
     if std::env::var_os("VISOR_WRITE_GOLDEN").is_some() {
         std::fs::write(&path, serde_json::to_string(&fresh).unwrap() + "\n").unwrap();
     }

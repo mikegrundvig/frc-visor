@@ -48,7 +48,7 @@ tag's own frame, centred on it, has x right and y up as it's printed, and z out 
 the camera. A flat square fits two poses,
 mirror images about the line of sight; both come, the better first, as OpenCV's
 `solvePnPGeneric` with `SOLVEPNP_IPPE_SQUARE` gives them (Visor's solve matches OpenCV's to about
-1e-10 from the same undistorted corners). PhotonVision's ambiguity is the best error over the
+1e-10 from the same undistorted corners). The usual ambiguity is the best error over the
 other's. A client converts to its own axes once.
 
 ## The capture time

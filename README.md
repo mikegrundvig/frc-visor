@@ -10,9 +10,9 @@ needs real cameras and coprocessors.
 
 ## Why
 
-NAPA finds tags much faster than the AprilTag detector in WPILib and PhotonVision, and much
-farther away. On rendered 1600 × 1304 frames it took about 3 ms on one laptop core and found tags
-to 10 m, where the usual detector at its fastest setting found them to about 3 m. On a
+NAPA finds tags much faster than WPILib's AprilTag detector, and much farther away. On rendered
+1600 × 1304 frames it took about 3 ms on one laptop core and found tags to 10 m, where WPILib's
+detector at decimate 2 found them to about 3 m. On a
 coprocessor that range is the difference between seeing a tag from most of the field and not.
 
 Visor is deliberately small: capture, detect, solve, send. No web UI, no NetworkTables, no field

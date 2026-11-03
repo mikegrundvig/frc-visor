@@ -123,8 +123,8 @@ public final class VisorFrame {
   }
 
   /**
-   * How close a tag's two poses are to equally likely, as PhotonVision measures it: the best pose's
-   * error over the other's. 0 is certain, 1 a coin toss.
+   * How close a tag's two poses are to equally likely, as FRC vision usually measures it: the best
+   * pose's error over the other's. 0 is certain, 1 a coin toss.
    */
   public double ambiguity(int tag) {
     double best = error(tag, Candidate.BEST);
@@ -143,8 +143,7 @@ public final class VisorFrame {
   }
 
   /**
-   * A tag's pose from the camera in WPILib's axes, as PhotonVision gives a camera-to-target
-   * transform, into {@code into}.
+   * A tag's pose from the camera in WPILib's axes (camera-to-tag), into {@code into}.
    *
    * @throws IllegalStateException if the tag's poses weren't solved
    */

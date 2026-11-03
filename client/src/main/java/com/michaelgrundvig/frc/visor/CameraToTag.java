@@ -1,9 +1,9 @@
 package com.michaelgrundvig.frc.visor;
 
 /**
- * A tag's pose from the camera in WPILib's axes, as PhotonVision gives a camera-to-target
- * transform: the camera's x out of the lens, y left, z up; the tag's x out of its face, y to your
- * right as you face it, z up. Mutable and reusable, so reading poses allocates nothing.
+ * A tag's pose from the camera in WPILib's axes, the usual camera-to-tag transform: the camera's x
+ * out of the lens, y left, z up; the tag's x out of its face, y to your right as you face it, z up.
+ * Mutable and reusable, so reading poses allocates nothing.
  *
  * <p>Visor sends poses in OpenCV's axes: the camera's x right, y down, z out of the lens; the tag's
  * x right and y up as it's printed, z out of its face. This turns one into the other.

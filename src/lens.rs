@@ -1,6 +1,6 @@
 //! A camera's lens calibration in OpenCV's model: focal lengths and optical centre in pixels, and
 //! up to eight distortion coefficients in OpenCV's order (k1, k2, p1, p2, k3, k4, k5, k6), as
-//! OpenCV's and PhotonVision's calibrations give them. It's for the resolution it was measured at.
+//! OpenCV's calibration gives them. It's for the resolution it was measured at.
 
 use std::fmt;
 
