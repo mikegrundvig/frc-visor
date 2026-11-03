@@ -44,7 +44,8 @@ detector reports corners half a pixel from that, and in a different order; a cli
 They're raw: not undistorted, so a replay can solve them again with a corrected calibration.
 
 **Poses** are the tag in the camera's frame, OpenCV's axes: x right, y down, z out of the lens. The
-tag's own frame has x right, y up and z into the tag, centred on it. A flat square fits two poses,
+tag's own frame, centred on it, has x right and y up as it's printed, and z out of its face, toward
+the camera. A flat square fits two poses,
 mirror images about the line of sight; both come, the better first, as OpenCV's
 `solvePnPGeneric` with `SOLVEPNP_IPPE_SQUARE` gives them (Visor's solve matches OpenCV's to about
 1e-10 from the same undistorted corners). PhotonVision's ambiguity is the best error over the

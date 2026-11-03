@@ -63,10 +63,17 @@ visor version
 Camera controls use the names `v4l2-ctl --list-ctrls` prints. Aim for an exposure near 1 ms with
 the gain raised: blur from the robot turning is the main error, and short exposures cut it.
 
+## The robot's side
+
+[client/](client/README.md) is a Java library for the robot program: it receives frames on its own
+thread and hands them to the loop without allocating, answers chrony with the robot's clock, and
+gives each pose in WPILib's axes. A simulation can feed it frames through the same path.
+
 ## Licence
 
 Visor is free software under the GNU General Public License, version 3 only: see
 [LICENSE](LICENSE) and [NOTICE](NOTICE). It includes NAPA, by Zachary Wilson, under the same
 licence, in [vendor/napa](vendor/napa).
 
-The robot only exchanges network messages with Visor, so robot code doesn't link Visor's code.
+The robot only exchanges network messages with Visor, so robot code doesn't link Visor's code. The
+client in [client/](client) is under the BSD 3-Clause License instead.

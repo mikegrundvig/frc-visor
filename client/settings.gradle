@@ -1,0 +1,16 @@
+// The robot's side of Visor: decoding its frames, receiving them, answering chrony's NTP requests
+// with the robot's clock, and putting the poses in WPILib's axes. A plain Java library with no
+// dependencies, under the BSD 3-Clause License (LICENSE): it talks to Visor only over the network.
+
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+    }
+}
+
+plugins {
+    // Downloads the JDK the build asks for (java.toolchain), so ./gradlew works on any machine.
+    id "org.gradle.toolchains.foojay-resolver-convention" version "1.0.0"
+}
+
+rootProject.name = "frc-visor-client"

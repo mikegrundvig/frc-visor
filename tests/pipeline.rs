@@ -150,6 +150,17 @@ fn each_frame_reaches_the_robot_with_its_tags_and_robot_time() {
                 known.distance_m
             );
             assert!(best.error_px <= alt.error_px);
+            // NAPA's corner order and the solve's tag frame agree: a printed tag seen from the
+            // front has its z axis (out of its face) pointing back toward the camera.
+            let rvec = nalgebra::Vector3::from(best.rvec.map(f64::from));
+            let tvec = nalgebra::Vector3::from(best.tvec.map(f64::from));
+            let face = nalgebra::Rotation3::new(rvec) * nalgebra::Vector3::z();
+            assert!(
+                face.dot(&tvec) < 0.0,
+                "{} tag {}: facing away",
+                scene.name,
+                known.id
+            );
         }
     }
 }

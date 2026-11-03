@@ -1,0 +1,133 @@
+// Publishing: this project as a Maven artifact in the FRC libraries' repository,
+// github.com/mikegrundvig/frc-maven, which GitHub Pages serves at https://mikegrundvig.github.io/frc-maven/.
+// A robot program, and the libraries that read this one, take it from there by its version.
+//
+//   ./gradlew publishToFrcMaven     every check (ci), then this release into ../frc-maven
+//
+// ../frc-maven is a clone of that repository beside this one; -PfrcMavenDir=<folder> names another.
+// Publishing writes the files only: the clone's own commit and push put them online (its README).
+//
+// The project says what it is before applying this file, in ext.published: its artifact id, a name,
+// a description, the repository it comes from, its licence, and its version, which is Visor's.
+
+apply plugin: "maven-publish"
+
+version = published.version
+
+// The sources and the Javadoc travel beside the jar, so an editor shows both for a library that
+// comes from the repository. The Javadoc jar is the javadoc task's output: what ci builds, which
+// fails on a broken reference and on nothing else (gradle/quality.gradle).
+java {
+    withSourcesJar()
+    withJavadocJar()
+}
+
+// What the project compiles against and a program brings itself (compileOnlyApi): WPILib, and what
+// comes with it. Gradle's module metadata, which Gradle builds read, puts them on a reader's compile
+// classpath and never on its runtime classpath. A POM can't say that, and Gradle writes them there
+// as "compile", which Maven takes for run time too; "provided" is the POM's word for it.
+def provided = configurations.compileOnlyApi.allDependencies.collect { "${it.group}:${it.name}".toString() } as Set
+
+// The README goes into the sources jar beside the sources, so an editor shows it with them.
+def readme = file("README.md")
+if (readme.exists()) {
+    tasks.named("sourcesJar") {
+        from(readme)
+    }
+}
+
+// The tests' sources too, beside the jar as <artifact>-<version>-test-sources.jar: the FRC libraries
+// all publish them, so their guides can show examples of code from the tests.
+def testSourcesJar = tasks.register("testSourcesJar", Jar) {
+    description = "Assemble a jar of the tests' sources."
+    group = "build"
+    archiveClassifier = "test-sources"
+    ["test", "testFixtures"].each { name ->
+        def sources = sourceSets.findByName(name)
+        if (sources != null) {
+            from(sources.java.srcDirs) {
+                into "src/${name}/java"
+            }
+        }
+    }
+}
+
+def frcMavenDir = providers.gradleProperty("frcMavenDir")
+        .map { String path -> new File(path.startsWith("~") ? System.getProperty("user.home") + path.substring(1) : path) }
+        .orElse(rootProject.layout.projectDirectory.dir("../frc-maven").asFile)
+        .get()
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            from components.java
+            artifact testSourcesJar
+            artifactId = published.artifactId
+            pom {
+                name = published.name
+                description = published.description
+                url = "https://github.com/mikegrundvig/${published.repository}"
+                // The repository's own license, where it has one (its LICENSE file).
+                if (published.license) {
+                    licenses {
+                        license {
+                            name = published.license
+                            url = "https://github.com/mikegrundvig/${published.repository}/blob/main/${published.licensePath}"
+                            distribution = "repo"
+                        }
+                    }
+                }
+                developers {
+                    developer {
+                        id = "mikegrundvig"
+                        name = "Michael Grundvig"
+                        email = "1361573+mikegrundvig@users.noreply.github.com"
+                    }
+                }
+                scm {
+                    url = "https://github.com/mikegrundvig/${published.repository}"
+                    connection = "scm:git:https://github.com/mikegrundvig/${published.repository}.git"
+                    developerConnection = "scm:git:ssh://git@github.com/mikegrundvig/${published.repository}.git"
+                }
+                withXml { xml ->
+                    xml.asNode().dependencies.dependency.each { dependency ->
+                        if ("${dependency.groupId.text()}:${dependency.artifactId.text()}".toString() in provided) {
+                            dependency.scope[0].value = "provided"
+                        }
+                    }
+                }
+            }
+        }
+    }
+    repositories {
+        maven {
+            name = "frcMaven"
+            url = frcMavenDir.toURI()
+        }
+    }
+}
+
+// Test fixtures, where a project has them, are a variant of its own in Gradle's module metadata,
+// which is how Gradle builds find them (testFixtures(...)). A POM has no way to say so, and Gradle
+// says that as it publishes: said once here instead.
+pluginManager.withPlugin("java-test-fixtures") {
+    publishing.publications.maven {
+        suppressPomMetadataWarningsFor("testFixturesApiElements")
+        suppressPomMetadataWarningsFor("testFixturesRuntimeElements")
+    }
+}
+
+tasks.register("publishToFrcMaven") {
+    group = "publishing"
+    description = "Run every check, then publish this release into the frc-maven clone (-PfrcMavenDir, ../frc-maven by default)."
+    dependsOn "ci", "publishAllPublicationsToFrcMavenRepository"
+}
+tasks.named("publishAllPublicationsToFrcMavenRepository") {
+    mustRunAfter "ci"
+    def dir = frcMavenDir
+    doFirst {
+        if (!new File(dir, ".git").exists()) {
+            throw new GradleException("${dir} isn't a clone of github.com/mikegrundvig/frc-maven: clone it there, or name yours with -PfrcMavenDir=<folder>")
+        }
+    }
+}

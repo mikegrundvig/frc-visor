@@ -1,0 +1,88 @@
+// The robot's side of Visor (settings.gradle). It runs in the robot program, beside the 20 ms loop,
+// so the steady state allocates nothing: frames decode into reused objects, and the receive thread
+// hands them over through a fixed ring (ZeroAllocationTest checks it).
+
+plugins {
+    id "java-library"
+    id "jacoco"
+    alias(libs.plugins.spotless)
+    alias(libs.plugins.errorprone)
+}
+
+// Published as com.michaelgrundvig.frc:frc-visor-client (gradle/publishing.gradle, at the end).
+group = "com.michaelgrundvig.frc"
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // @Nullable, in the API.
+    api libs.jspecify
+
+    errorprone libs.errorprone.core
+    errorprone libs.nullaway
+
+    testImplementation platform(libs.junit.bom)
+    testImplementation "org.junit.jupiter:junit-jupiter"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+    testImplementation libs.assertj.core
+}
+
+tasks.withType(JavaCompile).configureEach {
+    // As the robot program compiles: the client runs on the robot.
+    options.compilerArgs.add "-XDstringConcat=inline"
+}
+
+// Visor's version (../Cargo.toml) as a resource, so the client knows the version ID frames from the
+// same release carry. One owner of the version: the Rust package's.
+def visorVersion = providers.fileContents(layout.projectDirectory.file("../Cargo.toml")).asText.map { text ->
+    def match = text =~ /(?m)^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"/
+    if (!match.find()) {
+        throw new GradleException("../Cargo.toml has no version = \"year.month.day\"")
+    }
+    "${match.group(1)}.${match.group(2)}.${match.group(3)}".toString()
+}
+def generatedResources = layout.buildDirectory.dir("generated/resources/visor")
+def writeVersion = tasks.register("writeVisorVersion") {
+    def version = visorVersion
+    inputs.property("version", version)
+    outputs.dir(generatedResources)
+    doLast {
+        def file = generatedResources.get().file("com/michaelgrundvig/frc/visor/version.properties").asFile
+        file.parentFile.mkdirs()
+        file.text = "version=${version.get()}\n"
+    }
+}
+sourceSets.main.resources.srcDir(writeVersion)
+
+tasks.named("test") {
+    useJUnitPlatform()
+    // The frames Visor's own tests check against: the golden file.
+    systemProperty "visor.testdata", file("../testdata").absolutePath
+    inputs.dir("../testdata").withPropertyName("testdata").withPathSensitivity(PathSensitivity.RELATIVE)
+    // chrony, where a developer has it, for the responder's test against the real thing.
+    def chronyd = System.getenv("VISOR_CHRONYD")
+    if (chronyd != null) {
+        systemProperty "visor.chronyd", chronyd
+    }
+}
+
+apply from: file("gradle/quality.gradle")
+
+ext.published = [
+    artifactId: "frc-visor-client",
+    name: "Visor client",
+    description: "The robot's side of Visor, AprilTag vision on a coprocessor: decoding and receiving its frames, answering chrony with the robot's clock, and its poses in WPILib's axes.",
+    repository: "frc-visor",
+    license: "BSD 3-Clause License",
+    licensePath: "client/LICENSE",
+    version: visorVersion.get(),
+]
+apply from: file("gradle/publishing.gradle")

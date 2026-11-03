@@ -1,7 +1,8 @@
 name: CI
 
-# Formatting, lints and tests, on x86-64 and on arm64 (the coprocessor's architecture, where NAPA
-# takes its NEON path), on every branch's pushes and pull requests.
+# The coprocessor program's formatting, lints and tests, on x86-64 and on arm64 (the coprocessor's
+# architecture, where NAPA takes its NEON path), and the robot client's Gradle ci. On every
+# branch's pushes and pull requests.
 on:
   push:
     branches: ["**"]
@@ -42,3 +43,17 @@ jobs:
         run: cargo test --locked
       - name: Release build
         run: cargo build --release --locked
+
+  client:
+    name: Java client
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Caches Gradle, its dependencies, and the JDK 25 toolchain Gradle downloads on first use.
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - name: Formatting, static analysis, tests, coverage
+        working-directory: client
+        run: ./gradlew ci

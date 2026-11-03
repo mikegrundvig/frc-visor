@@ -4,7 +4,8 @@
 //! A flat square seen by one camera fits two poses, mirror images about the line of sight; IPPE
 //! gives both, best first, each with its reprojection error. The robot chooses between them (with
 //! its gyro, or other tags). Poses are the tag in the camera's frame, OpenCV's axes: x right, y
-//! down, z out of the lens; the tag's own frame has x right, y up and z into the tag, centred on it.
+//! down, z out of the lens; the tag's own frame, centred on it, has x right and y up as the tag is
+//! printed, and z out of its face, toward a camera that sees it.
 
 use nalgebra::{Matrix3, Rotation3, SMatrix, SVector, Vector3};
 

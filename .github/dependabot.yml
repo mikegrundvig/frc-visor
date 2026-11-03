@@ -1,8 +1,12 @@
-# Weekly pull requests for newer crates and CI actions.
+# Weekly pull requests for newer crates, the client's build and test libraries, and CI actions.
 version: 2
 updates:
   - package-ecosystem: cargo
     directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: gradle
+    directory: /client
     schedule:
       interval: weekly
   - package-ecosystem: github-actions

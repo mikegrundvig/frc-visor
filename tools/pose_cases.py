@@ -37,8 +37,10 @@ def random_case(rng):
     D = np.array(distortion)
     distance = rng.uniform(0.5, 10)
     turn = cv2.Rodrigues(np.array([rng.uniform(-1.2, 1.2), rng.uniform(-1.2, 1.2), rng.uniform(-math.pi, math.pi)]))[0]
-    # Tags face the camera: the tag's +z points away from it, as OpenCV's IPPE expects of a visible tag.
-    rvec = cv2.Rodrigues(turn)[0].ravel()
+    # Tags face the camera: OpenCV's tag frame has z out of the tag's face, so a tag seen from the
+    # front has its z toward the camera. Start from a tag square to the camera and turn it.
+    facing_camera = np.diag([1.0, -1.0, -1.0])
+    rvec = cv2.Rodrigues(turn @ facing_camera)[0].ravel()
     tvec = np.array([rng.uniform(-0.4, 0.4) * distance, rng.uniform(-0.35, 0.35) * distance, distance])
     obj = square(TAG_M)
     corners, _ = cv2.projectPoints(obj, rvec, tvec, K, D)
@@ -46,9 +48,9 @@ def random_case(rng):
     if rng.random() < 0.5:
         corners = corners + rng.normal(0, 0.5, corners.shape)
     in_frame = (corners[:, 0] > 2).all() and (corners[:, 0] < W - 2).all() and (corners[:, 1] > 2).all() and (corners[:, 1] < H - 2).all()
-    # Seen from the front (the camera is on the tag's -z side) and not edge-on.
+    # Seen from the front (the tag's z points back toward the camera) and not edge-on.
     normal = cv2.Rodrigues(rvec)[0][:, 2]
-    facing = float(np.dot(normal, tvec / np.linalg.norm(tvec)))
+    facing = -float(np.dot(normal, tvec / np.linalg.norm(tvec)))
     if not in_frame or facing < 0.35:
         return None
     ok, rvecs, tvecs, errors = cv2.solvePnPGeneric(obj, corners.reshape(4, 1, 2), K, D, flags=cv2.SOLVEPNP_IPPE_SQUARE)
