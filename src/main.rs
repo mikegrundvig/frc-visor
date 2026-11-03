@@ -14,7 +14,9 @@ use visor::clock::SystemClocks;
 use visor::config::{Camera, Config};
 use visor::image::GrayImage;
 use visor::latest::Latest;
+use visor::lens::Lens;
 use visor::napa::Detector;
+use visor::pose::solve_square;
 use visor::{capture, pipeline, wire};
 
 const DEFAULT_CONFIG: &str = "/etc/visor/visor.toml";
@@ -41,6 +43,13 @@ enum Command {
         /// Detect each image this many times and print the timing.
         #[arg(long, default_value_t = 1)]
         repeat: u32,
+        /// Solve each tag's poses with this lens: fx,fy,cx,cy then 0, 4, 5 or 8 distortion
+        /// coefficients, comma-separated.
+        #[arg(long, value_delimiter = ',', allow_negative_numbers = true)]
+        lens: Option<Vec<f64>>,
+        /// The tags' black square, in metres.
+        #[arg(long, default_value_t = visor::config::DEFAULT_TAG_SIZE_M)]
+        tag_size_m: f64,
     },
     /// Save frames from one camera as PGM files, for lens calibration. Stop the service first: a
     /// camera can only be open once.
@@ -70,7 +79,9 @@ fn main() -> ExitCode {
             files,
             min_tag_px,
             repeat,
-        } => detect(&files, min_tag_px, repeat),
+            lens,
+            tag_size_m,
+        } => detect(&files, min_tag_px, repeat, lens.as_deref(), tag_size_m),
         Command::Record {
             config,
             camera,
@@ -147,10 +158,27 @@ fn run(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn detect(files: &[PathBuf], min_tag_px: i32, repeat: u32) -> Result<()> {
+fn detect(
+    files: &[PathBuf],
+    min_tag_px: i32,
+    repeat: u32,
+    lens: Option<&[f64]>,
+    tag_size_m: f64,
+) -> Result<()> {
     if files.is_empty() {
         return Err("give one or more PGM files".into());
     }
+    let lens = match lens {
+        Some(values) if values.len() >= 4 => Some(Lens::new(
+            values[0],
+            values[1],
+            values[2],
+            values[3],
+            &values[4..],
+        )?),
+        Some(_) => return Err("--lens is fx,fy,cx,cy and then any distortion coefficients".into()),
+        None => None,
+    };
     let mut detector = Detector::new(min_tag_px)?;
     for file in files {
         let image = GrayImage::read_pgm(file)?;
@@ -195,6 +223,30 @@ fn detect(files: &[PathBuf], min_tag_px: i32, repeat: u32) -> Result<()> {
                 ms(times[times.len() * 95 / 100]),
                 ms(times[times.len() - 1])
             );
+        }
+        if let Some(lens) = &lens {
+            let mut times = Vec::new();
+            for tag in found {
+                for _ in 0..repeat.max(1) {
+                    let started = Instant::now();
+                    let _ = solve_square(&tag.corners, lens, tag_size_m);
+                    times.push(started.elapsed());
+                }
+                match solve_square(&tag.corners, lens, tag_size_m) {
+                    Some([best, alt]) => println!(
+                        "  tag {:3}  best at ({:.3}, {:.3}, {:.3}) m, {:.3} px; other {:.3} px",
+                        tag.id, best.tvec.x, best.tvec.y, best.tvec.z, best.error_px, alt.error_px
+                    ),
+                    None => println!("  tag {:3}  no pose", tag.id),
+                }
+            }
+            if repeat > 1 && !times.is_empty() {
+                times.sort();
+                println!(
+                    "  pose solve: median {:.1} µs per tag",
+                    times[times.len() / 2].as_secs_f64() * 1e6
+                );
+            }
         }
     }
     Ok(())

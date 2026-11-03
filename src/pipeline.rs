@@ -10,8 +10,10 @@ use log::{info, warn};
 use crate::clock::{Clocks, monotonic_to_robot};
 use crate::config::Camera;
 use crate::latest::Latest;
+use crate::lens::Lens;
 use crate::napa::{Detection, Detector};
-use crate::wire::{self, Frame, MAX_TAGS, Tag};
+use crate::pose::{TagPose, solve_square};
+use crate::wire::{self, Frame, MAX_TAGS, Pose, Tag};
 
 /// How often each camera logs its numbers.
 const REPORT_EVERY: Duration = Duration::from_secs(10);
@@ -38,7 +40,7 @@ pub fn run(
         };
         let started = Instant::now();
         let tags = match detector.detect(&captured.image) {
-            Ok(found) => tags_of(found),
+            Ok(found) => tags_of(found, camera.lens.as_ref(), camera.tag_size_m),
             Err(error) => {
                 warn!("{}: {error}", camera.name);
                 Vec::new()
@@ -66,23 +68,33 @@ pub fn run(
     }
 }
 
-/// NAPA's detections as the wire carries them. If there are ever more than a frame holds, the
-/// clearest are kept.
-fn tags_of(found: &[Detection]) -> Vec<Tag> {
-    let mut tags: Vec<Tag> = found
-        .iter()
+/// NAPA's detections as the wire carries them, each with its two poses when the camera has a lens
+/// calibration. If there are ever more than a frame holds, the clearest are kept.
+fn tags_of(found: &[Detection], lens: Option<&Lens>, tag_size_m: f64) -> Vec<Tag> {
+    let mut kept: Vec<&Detection> = found.iter().collect();
+    if kept.len() > MAX_TAGS {
+        kept.sort_by(|a, b| b.decision_margin.total_cmp(&a.decision_margin));
+        kept.truncate(MAX_TAGS);
+    }
+    kept.into_iter()
         .map(|d| Tag {
             id: d.id as u16,
             hamming: d.hamming as u8,
             decision_margin: d.decision_margin,
             corners: d.corners.map(|v| v as f32),
+            poses: lens
+                .and_then(|lens| solve_square(&d.corners, lens, tag_size_m))
+                .map(|poses| poses.map(|p| wire_pose(&p))),
         })
-        .collect();
-    if tags.len() > MAX_TAGS {
-        tags.sort_by(|a, b| b.decision_margin.total_cmp(&a.decision_margin));
-        tags.truncate(MAX_TAGS);
+        .collect()
+}
+
+fn wire_pose(pose: &TagPose) -> Pose {
+    Pose {
+        rvec: [pose.rvec.x as f32, pose.rvec.y as f32, pose.rvec.z as f32],
+        tvec: [pose.tvec.x as f32, pose.tvec.y as f32, pose.tvec.z as f32],
+        error_px: pose.error_px as f32,
     }
-    tags
 }
 
 /// What a camera logs every ten seconds.
@@ -162,23 +174,41 @@ mod tests {
     }
 
     #[test]
-    fn detections_become_wire_tags() {
-        let tags = tags_of(&[detection(586, 40.0)]);
+    fn detections_become_wire_tags_with_poses_only_given_a_lens() {
+        let lens = Lens::new(1000.0, 1000.0, 800.0, 650.0, &[]).unwrap();
+        // A 0.2 m tag 2 m straight ahead, square to the camera: 100 px across, centred.
+        let mut seen = detection(586, 40.0);
+        seen.corners = [750.0, 600.0, 850.0, 600.0, 850.0, 700.0, 750.0, 700.0];
+        let without = tags_of(&[seen], None, 0.2);
         assert_eq!(
-            tags,
+            without,
             [Tag {
                 id: 586,
                 hamming: 1,
                 decision_margin: 40.0,
-                corners: [0.25; 8]
+                corners: [750.0, 600.0, 850.0, 600.0, 850.0, 700.0, 750.0, 700.0],
+                poses: None,
             }]
+        );
+        let with = tags_of(&[seen], Some(&lens), 0.2);
+        let [best, _] = with[0].poses.expect("solved");
+        let [x, y, z] = best.tvec;
+        assert!(
+            x.abs() < 1e-4 && y.abs() < 1e-4 && (z - 2.0).abs() < 1e-4,
+            "{:?}",
+            best.tvec
+        );
+        // A degenerate square is sent with its corners alone.
+        assert_eq!(
+            tags_of(&[detection(1, 9.0)], Some(&lens), 0.2)[0].poses,
+            None
         );
     }
 
     #[test]
     fn past_a_frame_s_room_the_clearest_tags_are_kept() {
         let found: Vec<Detection> = (0..40).map(|i| detection(i, i as f32)).collect();
-        let tags = tags_of(&found);
+        let tags = tags_of(&found, None, 0.1651);
         assert_eq!(tags.len(), MAX_TAGS);
         assert!(tags.iter().all(|t| t.decision_margin >= 8.0));
     }

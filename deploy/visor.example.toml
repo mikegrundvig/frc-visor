@@ -4,6 +4,7 @@
 team = 1234
 # robot = "10.12.34.2"
 # port = 5807
+# tag_size_m = 0.1651   # the tags' black square: 6.5 in, FRC's since 2024
 
 [[camera]]
 name = "front-left"     # for logs
@@ -21,3 +22,13 @@ time_offset_us = 0      # from the spin test
 [camera.controls]
 auto_exposure = 1
 exposure_time_absolute = 10
+
+# The lens calibration at this resolution, OpenCV's model: focal lengths and centre in pixels, and
+# 0, 4, 5 or 8 distortion coefficients (k1, k2, p1, p2, k3, k4, k5, k6). Without it, tags are sent
+# with their corners only, no poses.
+[camera.lens]
+fx = 1229.96
+fy = 1229.96
+cx = 799.5
+cy = 651.5
+distortion = [0.0, 0.0, 0.0, 0.0, 0.0]

@@ -1,20 +1,21 @@
 //! The datagram Visor sends the robot for each frame. The layout is in docs/wire.md: little-endian,
-//! fixed sizes, no padding, a 28-byte header and 40 bytes per tag.
+//! fixed sizes, no padding, a 28-byte header and 96 bytes per tag.
 
 use std::fmt;
 
 /// "VISR" in byte order, so a stray packet on the port is dropped, not misread.
 pub const MAGIC: u32 = 0x5253_4956;
 pub const HEADER_BYTES: usize = 28;
-pub const TAG_BYTES: usize = 40;
-/// The most tags one frame carries. 36 would fit in one Ethernet packet; 32 leaves room.
-pub const MAX_TAGS: usize = 32;
+pub const TAG_BYTES: usize = 96;
+/// The most tags one frame carries: as many as fit one Ethernet packet's 1,472 bytes of UDP payload.
+pub const MAX_TAGS: usize = 15;
 
 /// This build's version ID, from its version: 2026.11.2 is 20261102.
 pub const VERSION_ID: u32 = parse_version_id(env!("VISOR_VERSION_ID"));
 
 const FLAG_CLOCK_SYNCED: u8 = 1 << 0;
 const FLAG_DEQUEUE_TIME: u8 = 1 << 1;
+const TAG_FLAG_POSES: u8 = 1 << 0;
 
 /// One frame from one camera, and every tag NAPA found in it.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,6 +45,21 @@ pub struct Tag {
     pub decision_margin: f32,
     /// x0, y0 … x3, y3: OpenCV's corner order, in pixel-centre coordinates.
     pub corners: [f32; 8],
+    /// The tag's two poses, best first, when the camera has a lens calibration and the corners
+    /// could be solved.
+    pub poses: Option<[Pose; 2]>,
+}
+
+/// One of a tag's two poses: the tag in the camera's frame, OpenCV's axes (x right, y down, z out
+/// of the lens).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Pose {
+    /// The rotation as an axis scaled by its angle, radians (OpenCV's rvec).
+    pub rvec: [f32; 3],
+    /// The tag's centre, metres (OpenCV's tvec).
+    pub tvec: [f32; 3],
+    /// Root-mean-square reprojection error per coordinate, pixels.
+    pub error_px: f32,
 }
 
 /// Why a datagram isn't a frame.
@@ -94,9 +110,23 @@ impl Frame {
         for tag in &self.tags {
             out.extend_from_slice(&tag.id.to_le_bytes());
             out.push(tag.hamming);
-            out.push(0);
+            out.push(if tag.poses.is_some() {
+                TAG_FLAG_POSES
+            } else {
+                0
+            });
             out.extend_from_slice(&tag.decision_margin.to_le_bytes());
-            for value in tag.corners {
+            // Without poses, their bytes are zero.
+            let [best, alt] = tag.poses.unwrap_or_default();
+            let values = tag
+                .corners
+                .iter()
+                .chain(&best.rvec)
+                .chain(&best.tvec)
+                .chain(&alt.rvec)
+                .chain(&alt.tvec)
+                .chain([&best.error_px, &alt.error_px]);
+            for value in values {
                 out.extend_from_slice(&value.to_le_bytes());
             }
         }
@@ -135,14 +165,23 @@ impl Frame {
             .map(|_| {
                 let id = read.u16();
                 let hamming = read.u8();
-                read.u8();
+                let tag_flags = read.u8();
                 let decision_margin = read.f32();
                 let corners = std::array::from_fn(|_| read.f32());
+                let mut pose = || Pose {
+                    rvec: std::array::from_fn(|_| read.f32()),
+                    tvec: std::array::from_fn(|_| read.f32()),
+                    error_px: 0.0,
+                };
+                let (mut best, mut alt) = (pose(), pose());
+                best.error_px = read.f32();
+                alt.error_px = read.f32();
                 Tag {
                     id,
                     hamming,
                     decision_margin,
                     corners,
+                    poses: (tag_flags & TAG_FLAG_POSES != 0).then_some([best, alt]),
                 }
             })
             .collect();
@@ -234,6 +273,18 @@ mod tests {
                     hamming: 0,
                     decision_margin: 61.25,
                     corners: [100.5, 200.25, 180.0, 201.0, 179.75, 280.5, 99.0, 279.0],
+                    poses: Some([
+                        Pose {
+                            rvec: [0.125, -2.5, 0.0625],
+                            tvec: [-0.5, 0.25, 3.75],
+                            error_px: 0.1875,
+                        },
+                        Pose {
+                            rvec: [-0.25, 2.0, -0.5],
+                            tvec: [-0.5, 0.25, 3.5],
+                            error_px: 1.5,
+                        },
+                    ]),
                 },
                 Tag {
                     id: 586,
@@ -242,6 +293,7 @@ mod tests {
                     corners: [
                         1500.125, 1200.0, 1580.0, 1201.5, 1579.0, 1290.25, 1499.5, 1289.0,
                     ],
+                    poses: None,
                 },
             ],
         }
@@ -289,7 +341,7 @@ mod tests {
         let mut wrong_magic = good.clone();
         wrong_magic[0] ^= 0xff;
         let mut too_many = good.clone();
-        too_many[26] = 33;
+        too_many[26] = 16;
         let cases: Vec<(&str, Vec<u8>, WireError)> = vec![
             ("empty", vec![], WireError::TooShort(0)),
             ("header cut", good[..27].to_vec(), WireError::TooShort(27)),
@@ -298,13 +350,13 @@ mod tests {
                 wrong_magic,
                 WireError::NotVisor(MAGIC ^ 0xff),
             ),
-            ("too many tags", too_many, WireError::TooManyTags(33)),
+            ("too many tags", too_many, WireError::TooManyTags(16)),
             (
                 "a tag cut off",
                 good[..good.len() - 1].to_vec(),
                 WireError::WrongLength {
-                    expected: 108,
-                    actual: 107,
+                    expected: 220,
+                    actual: 219,
                 },
             ),
         ];

@@ -7,6 +7,8 @@ pub mod clock;
 pub mod config;
 pub mod image;
 pub mod latest;
+pub mod lens;
 pub mod napa;
 pub mod pipeline;
+pub mod pose;
 pub mod wire;

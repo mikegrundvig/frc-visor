@@ -1,8 +1,9 @@
 # Visor
 
 Visor is AprilTag vision for an FRC robot's coprocessor. It captures frames from USB cameras, finds
-tags with [NAPA](https://github.com/zwatx/NAPA), stamps each frame with its capture time on the
-robot's clock, and sends the raw corners to the robot over UDP. The robot solves the poses.
+tags with [NAPA](https://github.com/zwatx/NAPA), solves each tag's two candidate poses, stamps each
+frame with its capture time on the robot's clock, and sends it to the robot over UDP, raw corners
+included. The robot chooses between the poses and does the rest.
 
 **Visor hasn't run on robot hardware yet.** It's built and tested against rendered frames; it
 needs real cameras and coprocessors.
@@ -14,7 +15,8 @@ farther away. On rendered 1600 × 1304 frames it took about 3 ms on one laptop c
 to 10 m, where the usual detector at its fastest setting found them to about 3 m. On a
 coprocessor that range is the difference between seeing a tag from most of the field and not.
 
-Visor is deliberately small: capture, detect, send. No web UI, no NetworkTables, no pose solving.
+Visor is deliberately small: capture, detect, solve, send. No web UI, no NetworkTables, no field
+layout, no multi-tag solving.
 
 ## How it works
 
@@ -25,6 +27,9 @@ Visor is deliberately small: capture, detect, send. No web UI, no NetworkTables,
 - **The clock.** chrony keeps the coprocessor's clock on the robot program's, through a small NTP
   responder in the robot program (see [docs/wire.md](docs/wire.md#the-capture-time)). Each frame's
   kernel timestamp becomes robot time, plus a per-camera offset you measure.
+- **Poses.** With a camera's lens calibration in the configuration, each tag's two poses are solved
+  as OpenCV's IPPE does it (`SOLVEPNP_IPPE_SQUARE`): about 3 µs per tag on a laptop. Visor's
+  undistortion runs until it converges, where OpenCV's stops at five steps.
 - **The wire.** One UDP datagram per frame, every frame: [docs/wire.md](docs/wire.md).
 
 ## Building
@@ -45,6 +50,7 @@ Pi); NAPA uses SSE2 on x86-64 and NEON on arm64.
 ```bash
 visor run --config /etc/visor/visor.toml    # the service
 visor detect --repeat 100 frame.pgm         # what NAPA finds in an image, and how long it takes
+visor detect --lens 1230,1230,799.5,651.5 frame.pgm   # and each tag's pose, with this lens
 visor record --camera front-left --out frames/   # frames for lens calibration
 visor version
 ```

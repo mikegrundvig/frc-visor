@@ -47,6 +47,8 @@ fn camera() -> Camera {
         min_tag_px: 16,
         time_offset_nanos: -2_000_000,
         controls: Vec::new(),
+        lens: Some(common::rendered_lens()),
+        tag_size_m: 0.1651,
     }
 }
 
@@ -137,6 +139,17 @@ fn each_frame_reaches_the_robot_with_its_tags_and_robot_time() {
                 scene.name
             );
             assert!(tag.decision_margin > 0.0);
+            // Solved: the best pose puts the tag where the renderer did, to half a percent.
+            let [best, alt] = tag.poses.expect("poses, with a lens");
+            let z = f64::from(best.tvec[2]);
+            assert!(
+                (z - known.distance_m).abs() < 0.005 * known.distance_m,
+                "{} tag {}: {z} m, rendered at {} m",
+                scene.name,
+                known.id,
+                known.distance_m
+            );
+            assert!(best.error_px <= alt.error_px);
         }
     }
 }

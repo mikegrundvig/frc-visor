@@ -7,10 +7,14 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::lens::Lens;
+
 /// The port frames go to on the robot.
 pub const DEFAULT_PORT: u16 = 5807;
 const DEFAULT_FPS: u32 = 60;
 const DEFAULT_MIN_TAG_PX: i32 = 16;
+/// An FRC AprilTag's black square since 2024: 6.5 inches.
+pub const DEFAULT_TAG_SIZE_M: f64 = 0.1651;
 
 /// The checked configuration.
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +42,11 @@ pub struct Camera {
     pub time_offset_nanos: i64,
     /// V4L2 controls by the names `v4l2-ctl --list-ctrls` prints, set in this order.
     pub controls: Vec<(String, i64)>,
+    /// The lens calibration at this resolution. Without one, tags are sent with their corners
+    /// only, no poses.
+    pub lens: Option<Lens>,
+    /// The side of the tags' black square, in metres.
+    pub tag_size_m: f64,
 }
 
 /// The pixel formats Visor reads.
@@ -78,6 +87,7 @@ struct File {
     robot: Option<IpAddr>,
     team: Option<u32>,
     port: Option<u16>,
+    tag_size_m: Option<f64>,
     #[serde(default, rename = "camera")]
     cameras: Vec<CameraFile>,
 }
@@ -96,6 +106,18 @@ struct CameraFile {
     time_offset_us: Option<i64>,
     #[serde(default)]
     controls: toml::Table,
+    lens: Option<LensFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LensFile {
+    fx: f64,
+    fy: f64,
+    cx: f64,
+    cy: f64,
+    #[serde(default)]
+    distortion: Vec<f64>,
 }
 
 impl Config {
@@ -116,6 +138,12 @@ impl Config {
                 ));
             }
         };
+        let tag_size_m = file.tag_size_m.unwrap_or(DEFAULT_TAG_SIZE_M);
+        if !(tag_size_m > 0.0 && tag_size_m < 10.0) {
+            return Err(ConfigError(format!(
+                "tag_size_m is the tags' black square in metres, not {tag_size_m}"
+            )));
+        }
         if file.cameras.is_empty() {
             return Err(ConfigError("no [[camera]]".into()));
         }
@@ -123,7 +151,7 @@ impl Config {
         let mut indices = HashSet::new();
         let mut cameras = Vec::new();
         for camera in file.cameras {
-            let camera = check_camera(camera)?;
+            let camera = check_camera(camera, tag_size_m)?;
             if !names.insert(camera.name.clone()) {
                 return Err(ConfigError(format!(
                     "two cameras are named {:?}",
@@ -158,7 +186,7 @@ fn team_address(team: u32) -> Result<IpAddr, ConfigError> {
     )))
 }
 
-fn check_camera(file: CameraFile) -> Result<Camera, ConfigError> {
+fn check_camera(file: CameraFile, tag_size_m: f64) -> Result<Camera, ConfigError> {
     let name = file.name;
     let fail = |why: String| ConfigError(format!("camera {name:?}: {why}"));
     if name.trim().is_empty() {
@@ -194,6 +222,13 @@ fn check_camera(file: CameraFile) -> Result<Camera, ConfigError> {
         };
         controls.push((key, value));
     }
+    let lens = match file.lens {
+        Some(l) => Some(
+            Lens::new(l.fx, l.fy, l.cx, l.cy, &l.distortion)
+                .map_err(|e| fail(format!("lens: {e}")))?,
+        ),
+        None => None,
+    };
     Ok(Camera {
         index: file.index,
         device: file.device,
@@ -204,6 +239,8 @@ fn check_camera(file: CameraFile) -> Result<Camera, ConfigError> {
         min_tag_px,
         time_offset_nanos: file.time_offset_us.unwrap_or(0) * 1_000,
         controls,
+        lens,
+        tag_size_m,
         name,
     })
 }
@@ -232,6 +269,7 @@ mod tests {
         );
         assert_eq!(camera.time_offset_nanos, 0);
         assert!(camera.controls.is_empty());
+        assert_eq!((camera.lens.as_ref(), camera.tag_size_m), (None, 0.1651));
     }
 
     #[test]
@@ -239,6 +277,7 @@ mod tests {
         let text = r#"
             robot = "127.0.0.1"
             port = 6000
+            tag_size_m = 0.15
             [[camera]]
             name = "back"
             index = 3
@@ -253,12 +292,24 @@ mod tests {
             auto_exposure = 1
             exposure_time_absolute = 10
             exposure_dynamic_framerate = false
+            [camera.lens]
+            fx = 1200.0
+            fy = 1201.0
+            cx = 799.5
+            cy = 651.5
+            distortion = [0.1, -0.2, 0.001, 0.002, 0.05]
         "#;
         let config = Config::parse(text).unwrap();
         assert_eq!(config.robot, "127.0.0.1:6000".parse().unwrap());
         let camera = &config.cameras[0];
         assert_eq!(camera.format, Some(PixelFormat::Yuyv));
         assert_eq!(camera.time_offset_nanos, -1_500_000);
+        assert_eq!(camera.tag_size_m, 0.15);
+        let lens = camera.lens.as_ref().unwrap();
+        assert_eq!(
+            (lens.fx, lens.cy, lens.distortion[4], lens.distortion[5]),
+            (1200.0, 651.5, 0.05, 0.0)
+        );
         // In the file's order, which matters: manual exposure has to be on before exposure is set.
         let controls: Vec<(&str, i64)> = camera
             .controls
@@ -310,6 +361,16 @@ mod tests {
             (
                 format!("team = 1234\n{CAMERA}[camera.controls]\ngain = \"high\"\n"),
                 "control gain",
+            ),
+            (
+                format!(
+                    "team = 1234\n{CAMERA}[camera.lens]\nfx = 1.0\nfy = 1.0\ncx = 0.0\ncy = 0.0\ndistortion = [0.1]\n"
+                ),
+                "lens: OpenCV's distortion has 4, 5 or 8",
+            ),
+            (
+                format!("tag_size_m = 0.0\nteam = 1234\n{CAMERA}"),
+                "tag_size_m",
             ),
         ];
         for (text, why) in cases {
