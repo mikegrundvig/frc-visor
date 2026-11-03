@@ -1,0 +1,23 @@
+# Visor's configuration: /etc/visor/visor.toml on the coprocessor, deployed with the program.
+
+# Where frames go: the robot controller, by team number (10.TE.AM.2) or by address.
+team = 1234
+# robot = "10.12.34.2"
+# port = 5807
+
+[[camera]]
+name = "front-left"     # for logs
+index = 0               # sent in every frame; unique on the robot
+# A /dev/v4l/by-id/ path finds the same camera again after a replug.
+device = "/dev/v4l/by-id/usb-ThriftyCam-video-index0"
+width = 1600
+height = 1304
+fps = 60
+# format = "GREY"       # GREY or YUYV; without it, GREY if the camera offers it, else YUYV
+min_tag_px = 16
+time_offset_us = 0      # from the spin test
+
+# By the names `v4l2-ctl --list-ctrls` prints, set in this order. UVC exposure is in 100 µs units.
+[camera.controls]
+auto_exposure = 1
+exposure_time_absolute = 10

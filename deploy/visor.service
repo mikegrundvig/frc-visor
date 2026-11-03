@@ -1,0 +1,22 @@
+[Unit]
+Description=Visor, AprilTag vision for the robot
+After=network-online.target chrony.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/visor run --config /etc/visor/visor.toml
+Restart=always
+RestartSec=1
+# The cameras (the video group) are all it needs. The image creates the visor user.
+User=visor
+SupplementaryGroups=video
+# Visor's threads on the fast cores of an RK3588 (Orange Pi 5: cores 4-7 are the Cortex-A76s).
+CPUAffinity=4-7
+Nice=-5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

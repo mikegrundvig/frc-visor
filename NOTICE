@@ -1,0 +1,10 @@
+Visor
+Copyright (c) 2026 Michael Grundvig
+
+Visor is free software: you can redistribute it and/or modify it under the terms of the GNU General
+Public License, version 3 only (GPL-3.0-only), in LICENSE. It comes with no warranty.
+
+Visor includes NAPA, the AprilTag detector, by Zachary Wilson (https://github.com/zwatx/NAPA), in
+vendor/napa/, under GPL-3.0-only. NAPA's notice, including its additional term under section 7(b)
+of the GPL that works based on NAPA keep its notice and credit Zachary Wilson as its author, is in
+vendor/napa/NOTICE. `visor version` prints that credit.

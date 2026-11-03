@@ -1,0 +1,44 @@
+name: CI
+
+# Formatting, lints and tests, on x86-64 and on arm64 (the coprocessor's architecture, where NAPA
+# takes its NEON path), on every branch's pushes and pull requests.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Build, check, test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      # Actions are pinned to a commit (the version beside it), so a moved tag can't change what
+      # runs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust's formatter and linter, and libclang for the V4L2 bindings
+        run: |
+          rustup component add rustfmt clippy
+          sudo apt-get install -y libclang-dev
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Lints
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --locked
+      - name: Release build
+        run: cargo build --release --locked
