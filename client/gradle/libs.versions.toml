@@ -14,6 +14,8 @@ nullaway = "0.14.2"
 jacoco = "0.8.15"
 junit = "6.1.3"
 assertj = "3.27.7"
+# Reads the JSON test files Visor's own tests share with these.
+jackson = "2.20.1"
 
 [libraries]
 jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
@@ -21,6 +23,7 @@ errorprone-core = { module = "com.google.errorprone:error_prone_core", version.r
 nullaway = { module = "com.uber.nullaway:nullaway", version.ref = "nullaway" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 
 [plugins]
 spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }
