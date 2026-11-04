@@ -2,6 +2,7 @@
 //! ([`capture`]) and a detect thread ([`pipeline`]) joined by a one-frame slot ([`latest`]); frames
 //! go to the robot as [`wire`] datagrams stamped with robot time ([`clock`]).
 
+pub mod cameras;
 pub mod capture;
 pub mod clock;
 pub mod config;

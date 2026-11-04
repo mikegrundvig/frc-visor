@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 use log::{error, info};
 
+use visor::cameras;
 use visor::clock::SystemClocks;
-use visor::config::{Camera, Config};
+use visor::config::{Camera, Config, PixelFormat};
 use visor::image::GrayImage;
 use visor::latest::Latest;
 use visor::lens::Lens;
@@ -63,10 +64,23 @@ enum Command {
     Record {
         #[arg(long, default_value = DEFAULT_CONFIG)]
         config: PathBuf,
-        /// The camera's name in the configuration.
-        #[arg(long)]
-        camera: String,
-        #[arg(long)]
+        /// The camera's name in the configuration, once the robot has configured the board.
+        #[arg(long, required_unless_present = "device", conflicts_with = "device")]
+        camera: Option<String>,
+        /// Or the camera's device, as `visor cameras` names it, at the size it's to run.
+        #[arg(long, requires_all = ["width", "height"])]
+        device: Option<PathBuf>,
+        #[arg(long, requires = "device")]
+        width: Option<u32>,
+        #[arg(long, requires = "device")]
+        height: Option<u32>,
+        #[arg(long, requires = "device", default_value_t = visor::config::DEFAULT_FPS)]
+        fps: u32,
+        /// GREY or YUYV; without one, GREY if the camera offers it.
+        #[arg(long, requires = "device", value_parser = ["GREY", "YUYV"])]
+        format: Option<String>,
+        /// In RAM on a read-only board, and gone at the next boot.
+        #[arg(long, default_value = "/tmp/visor-frames")]
         out: PathBuf,
         #[arg(long, default_value_t = 40)]
         count: u32,
@@ -80,6 +94,9 @@ enum Command {
         #[arg(long, default_value = DEFAULT_CONFIG)]
         config: PathBuf,
     },
+    /// List the cameras plugged in: each one's device to give Visor, and the formats and sizes it
+    /// offers. Works while the service runs.
+    Cameras,
     /// Print the version, its version ID, and the licence notices.
     Version,
 }
@@ -103,17 +120,27 @@ fn main() -> ExitCode {
         Command::Record {
             config,
             camera,
+            device,
+            width,
+            height,
+            fps,
+            format,
             out,
             count,
             every_ms,
-        } => record(
-            &config,
-            &camera,
-            &out,
-            count,
-            Duration::from_millis(every_ms),
-        ),
+        } => {
+            let every = Duration::from_millis(every_ms);
+            match (camera, device, width, height) {
+                (Some(name), _, _, _) => record_configured(&config, &name, &out, count, every),
+                (None, Some(device), Some(width), Some(height)) => {
+                    let camera = unconfigured(device, width, height, fps, format.as_deref());
+                    record(&camera, &out, count, every)
+                }
+                _ => Err("give --camera, or --device with --width and --height".into()),
+            }
+        }
         Command::Check { config } => check(&config),
+        Command::Cameras => cameras(),
         Command::Version => {
             version();
             Ok(())
@@ -308,9 +335,51 @@ fn detect_with(
     Ok(())
 }
 
-fn record(path: &Path, name: &str, out: &Path, count: u32, every: Duration) -> Result<()> {
+fn record_configured(
+    path: &Path,
+    name: &str,
+    out: &Path,
+    count: u32,
+    every: Duration,
+) -> Result<()> {
     let config = Config::load(path)?;
     let camera = find_camera(&config, path, name)?;
+    record(camera, out, count, every)
+}
+
+/// A camera by its device alone, before any robot has configured the board: no controls, no lens.
+/// Its frames are named after the device.
+fn unconfigured(
+    device: PathBuf,
+    width: u32,
+    height: u32,
+    fps: u32,
+    format: Option<&str>,
+) -> Camera {
+    let name = device
+        .file_name()
+        .map_or("camera".into(), |n| n.to_string_lossy().into_owned());
+    Camera {
+        name,
+        index: 0,
+        device,
+        width,
+        height,
+        fps,
+        format: match format {
+            Some("GREY") => Some(PixelFormat::Grey),
+            Some("YUYV") => Some(PixelFormat::Yuyv),
+            _ => None,
+        },
+        min_tag_px: visor::config::DEFAULT_MIN_TAG_PX,
+        time_offset_nanos: 0,
+        controls: Vec::new(),
+        lens: None,
+        tag_size_m: visor::config::DEFAULT_TAG_SIZE_M,
+    }
+}
+
+fn record(camera: &Camera, out: &Path, count: u32, every: Duration) -> Result<()> {
     std::fs::create_dir_all(out)?;
     let latest = Latest::new();
     let stop = AtomicBool::new(false);
@@ -339,15 +408,69 @@ fn save_frames(
 ) -> Result<()> {
     for n in 0..count {
         thread::sleep(every);
-        let frame = latest
-            .take(Duration::from_secs(5))
-            .ok_or("no frame from the camera for 5 s")?;
+        let frame = latest.take(Duration::from_secs(5)).ok_or(
+            "no frame from the camera for 5 s: if Visor's service is running, it has the \
+                 camera (systemctl stop visor first)",
+        )?;
         let file = out.join(format!("{}-{n:03}.pgm", camera.name));
         frame.image.write_pgm(&file)?;
         println!("{}", file.display());
         latest.recycle(frame.image);
     }
     Ok(())
+}
+
+/// Each camera plugged in: the device to give Visor, and what it offers. A video device that offers
+/// no capture format (a UVC camera's second, metadata, device) is left out.
+fn cameras() -> Result<()> {
+    let plugged = cameras::plugged(Path::new(cameras::BY_ID), Path::new(cameras::BY_PATH))?;
+    let mut listed = 0;
+    for each in &plugged {
+        let offers = match offered(&each.device) {
+            Ok(offers) if offers.is_empty() => continue,
+            Ok(offers) => offers,
+            Err(why) => vec![format!("can't be read: {why}")],
+        };
+        listed += 1;
+        println!("{} ({})", each.name().display(), each.device.display());
+        if each.by_id.is_empty() {
+            println!(
+                "  no by-id name: this camera has no serial of its own, or shares one with \
+                 another, so this name follows the USB port it's in"
+            );
+        }
+        for line in offers {
+            println!("  {line}");
+        }
+    }
+    if listed == 0 {
+        println!("no cameras plugged in");
+    } else {
+        println!("Visor reads GREY and YUYV; give a camera its device and one of these sizes.");
+    }
+    Ok(())
+}
+
+/// A device's capture formats, each with its frame sizes.
+fn offered(device: &Path) -> Result<Vec<String>> {
+    use v4l::video::Capture;
+    let opened = v4l::Device::with_path(device)?;
+    let mut lines = Vec::new();
+    for format in opened.enum_formats()? {
+        let sizes: Vec<String> = opened
+            .enum_framesizes(format.fourcc)?
+            .into_iter()
+            .map(|size| match size.size {
+                v4l::framesize::FrameSizeEnum::Discrete(d) => format!("{}x{}", d.width, d.height),
+                v4l::framesize::FrameSizeEnum::Stepwise(s) => format!(
+                    "{}x{} to {}x{}",
+                    s.min_width, s.min_height, s.max_width, s.max_height
+                ),
+            })
+            .collect();
+        lines.push(format!("{}: {}", format.fourcc, sizes.join(", ")));
+    }
+    Ok(lines)
 }
 
 fn check(path: &Path) -> Result<()> {

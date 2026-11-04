@@ -86,6 +86,12 @@ class VisorPackTest {
             "usb-Other_Cam_X-video-index0")) {
       Files.createFile(devices.resolve(device));
     }
+    // By port: these two, and a third camera whose serial is the first's, so it has no by-id name.
+    Path ports = Files.createDirectories(work.resolve("by-path"));
+    for (String port : List.of("1.1", "1.2", "1.3")) {
+      Files.createFile(ports.resolve("platform-xhci-usb-0:" + port + ":1.0-video-index0"));
+      Files.createFile(ports.resolve("platform-xhci-usb-0:" + port + ":1.0-video-index1"));
+    }
     Path restarts = work.resolve("restarts");
     Path restart = executable("restart", "#!/bin/sh\necho restarted >> " + restarts + "\n");
     Path packs = Files.createDirectories(work.resolve("packs/visor"));
@@ -95,7 +101,7 @@ class VisorPackTest {
       }
     }
     int port = freePort();
-    startAgent(port, visor, devices, restart);
+    startAgent(port, visor, devices + " " + ports, restart);
 
     Manager spotter =
         new Manager(
@@ -115,7 +121,11 @@ class VisorPackTest {
     assertThat(version.text()).as("no Visor yet").isEmpty();
     assertThat(config.text()).isEmpty();
     assertThat(cameras.text())
-        .isEqualTo("usb-Other_Cam_X-video-index0,usb-Thrifty_Cam_0001-video-index0");
+        .isEqualTo(
+            "usb-Other_Cam_X-video-index0,usb-Thrifty_Cam_0001-video-index0,"
+                + "platform-xhci-usb-0:1.1:1.0-video-index0,"
+                + "platform-xhci-usb-0:1.2:1.0-video-index0,"
+                + "platform-xhci-usb-0:1.3:1.0-video-index0");
 
     // A release installs, and Visor is restarted on it.
     Run installed = run(spotter, board.run("visor.install", release(program("2099.1.2"))));
@@ -163,7 +173,7 @@ class VisorPackTest {
    * The agent, as systemd runs it on a board: started again whenever it exits, as it does after a
    * push to read the packs pushed.
    */
-  private void startAgent(int port, Path visor, Path devices, Path restart) throws IOException {
+  private void startAgent(int port, Path visor, String devices, Path restart) throws IOException {
     Path root = Files.createDirectories(work.resolve("root"));
     Files.createDirectories(root.resolve("var/lib/frc-spotter"));
     Path log = work.resolve("agent.log");
@@ -183,7 +193,7 @@ class VisorPackTest {
             .redirectErrorStream(true)
             .redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()));
     builder.environment().put("VISOR_DIR", visor.toString());
-    builder.environment().put("VISOR_DEVICES", devices.toString());
+    builder.environment().put("VISOR_DEVICES", devices);
     builder.environment().put("VISOR_RESTART", restart.toString());
     agent = builder.start();
     Thread thread =

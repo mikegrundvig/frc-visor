@@ -11,8 +11,8 @@ use crate::lens::Lens;
 
 /// The port frames go to on the robot.
 pub const DEFAULT_PORT: u16 = 5807;
-const DEFAULT_FPS: u32 = 60;
-const DEFAULT_MIN_TAG_PX: i32 = 16;
+pub const DEFAULT_FPS: u32 = 60;
+pub const DEFAULT_MIN_TAG_PX: i32 = 16;
 /// An FRC AprilTag's black square since 2024: 6.5 inches.
 pub const DEFAULT_TAG_SIZE_M: f64 = 0.1651;
 

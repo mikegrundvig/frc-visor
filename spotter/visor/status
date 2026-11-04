@@ -1,10 +1,10 @@
 #!/bin/sh
 # What Visor this board has, its configuration's SHA-256, and the cameras plugged in: one JSON
-# object. VISOR_DIR (/opt/visor) and VISOR_DEVICES (/dev/v4l/by-id) are for an image laid out
-# otherwise, and tests.
+# object. VISOR_DIR (/opt/visor) and VISOR_DEVICES (the folders of names, space-separated) are for
+# an image laid out otherwise, and tests.
 set -u
 dir=${VISOR_DIR:-/opt/visor}
-devices=${VISOR_DEVICES:-/dev/v4l/by-id}
+devices=${VISOR_DEVICES:-/dev/v4l/by-id /dev/v4l/by-path}
 version=""
 if [ -x "$dir/visor" ]; then
   # "visor 2026.11.4 (version ID 20261104)": the second word.
@@ -14,14 +14,17 @@ config=""
 if [ -f "$dir/visor.toml" ]; then
   config=$(sha256sum "$dir/visor.toml" | cut -d ' ' -f 1)
 fi
-# Each camera's capture device, by the name that finds it after a replug. Only the characters such
-# names have, so the JSON needs no escaping.
+# Each camera's capture device, by the names udev gives it: by-id's, from its serial, which finds it
+# after a replug into any port; and by-path's, from the port, for a camera whose serial isn't its
+# own. Only the characters such names have, so the JSON needs no escaping.
 cameras=""
-for device in "$devices"/*-video-index0; do
-  name=${device##*/}
-  case $name in
-    *[!A-Za-z0-9_.:+-]* | '*-video-index0') continue ;;
-  esac
-  cameras="${cameras:+$cameras,}$name"
+for folder in $devices; do
+  for device in "$folder"/*-video-index0; do
+    name=${device##*/}
+    case $name in
+      *[!A-Za-z0-9_.:+-]* | '*-video-index0') continue ;;
+    esac
+    cameras="${cameras:+$cameras,}$name"
+  done
 done
 printf '{"version": "%s", "config": "%s", "cameras": "%s"}\n' "$version" "$config" "$cameras"

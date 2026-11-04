@@ -9,7 +9,7 @@ with its other packs.
 |---|---|
 | `visor.status.version` | The Visor in `/opt/visor`, by its version (`2026.11.4`); empty when there's none |
 | `visor.status.config` | The SHA-256 of its configuration, `/opt/visor/visor.toml`; empty when there's none |
-| `visor.status.cameras` | The cameras plugged in, by their `/dev/v4l/by-id/` names, comma-separated |
+| `visor.status.cameras` | The cameras plugged in, by their `/dev/v4l/by-id/` names, then their `/dev/v4l/by-path/` names, comma-separated |
 | `visor.log` | Visor's journal (`visor.service`) |
 | `visor.install` | Takes a release archive, `visor-<version>-linux-arm64.tar.gz`, as its input: unpacks it beside the running program, has the new program say its version, then moves it into place and restarts Visor. One that won't run on the board leaves it as it was |
 | `visor.configure` | Takes a configuration as its input: Visor checks it (`visor check`), and only then is it moved into place and Visor restarted. One Visor refuses leaves the board as it was, and the response says why |
@@ -46,7 +46,7 @@ pack what it needs, and nothing more:
   });
   ```
 
-- **The cameras' names:** `/dev/v4l/by-id/` is readable by anyone, so listing them needs nothing.
+- **The cameras' names:** `/dev/v4l/by-id/` and `/dev/v4l/by-path/` are readable by anyone, so listing them needs nothing.
 
 `VISOR_DIR`, `VISOR_DEVICES` and `VISOR_RESTART`, in the agent's environment, change where it looks
 and how it restarts Visor, for an image laid out otherwise (and the tests). `journal` is Spotter's

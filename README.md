@@ -93,12 +93,26 @@ uv run tools/calibrate.py board --out board.png
 ```
 
 1. Print `board.png` at 100% scale and fix it flat to something rigid.
-2. On the coprocessor, stop the service and run `visor record --camera front-left --out frames/`.
-   It saves 40 frames, one a second, while you move the board: near and far, tilted every way,
-   and into every part of the frame, its corners and edges above all.
-3. Copy the frames to the laptop and solve:
+2. On the coprocessor, `visor cameras` lists each camera plugged in: the device to give Visor, and
+   the formats and sizes it offers. A camera with no `/dev/v4l/by-id/` name of its own (no serial,
+   or another camera's) is listed by its USB port's name instead, which follows the port.
+3. Stop the service, which has the cameras open, and record at the size the camera is to run:
+
+   ```bash
+   sudo systemctl stop visor
+   visor record --device /dev/v4l/by-id/usb-...-video-index0 --width 1280 --height 800
+   sudo systemctl start visor
+   ```
+
+   It saves 40 frames, one a second, to `/tmp/visor-frames/` (in RAM, gone at the next boot)
+   while you move the board: near and far, tilted every way, and into every part of the frame,
+   its corners and edges above all. Once the robot has configured the board, `--camera <name>`
+   takes the camera's device, size and settings from the configuration instead, by the camera's
+   name in the robot program.
+4. Copy the frames to the laptop and solve:
 
 ```bash
+scp '<user>@<coprocessor>:/tmp/visor-frames/*.pgm' frames/
 uv run tools/calibrate.py solve frames/*.pgm --out lens.toml
 ```
 
