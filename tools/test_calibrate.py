@@ -324,16 +324,24 @@ class PrintedBoard(unittest.TestCase):
     """The board `board` writes is the board `solve` looks for, at the size asked."""
 
     def test_the_written_board_is_found_whole(self):
+        # The default board, and a bought one: 15 x 15 squares of 1.125 in with 0.875 in markers,
+        # 112 markers, so ids past 100 and a 1000-marker dictionary.
+        bought = ["--squares", "15x15", "--square-mm", "28.575", "--marker-mm", "22.225", "--dictionary", "4X4_1000"]
+        cases = [
+            ("the default board", [], BOARD, 300),
+            ("a bought board", bought, calibrate.Board(15, 15, 0.028575, 0.022225, "4X4_1000"), 100),
+        ]
         (REPO / "target").mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=REPO / "target") as scratch:
-            out = Path(scratch) / "board.png"
-            with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(calibrate.main(["board", "--out", str(out), "--dpi", "300"]), 0)
-            image = cv2.imread(str(out), cv2.IMREAD_GRAYSCALE)
-        square_px = BOARD.square_m / 0.0254 * 300
-        self.assertAlmostEqual(image.shape[1], (BOARD.columns + 1) * square_px, delta=BOARD.columns + 4)
-        _, ids, _, _ = cv2.aruco.CharucoDetector(BOARD.opencv()).detectBoard(image)
-        self.assertEqual(len(ids), (BOARD.columns - 1) * (BOARD.rows - 1))
+        for why, args, board, dpi in cases:
+            with self.subTest(why), tempfile.TemporaryDirectory(dir=REPO / "target") as scratch:
+                out = Path(scratch) / "board.png"
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(calibrate.main(["board", *args, "--out", str(out), "--dpi", str(dpi)]), 0)
+                image = cv2.imread(str(out), cv2.IMREAD_GRAYSCALE)
+                square_px = board.square_m / 0.0254 * dpi
+                self.assertAlmostEqual(image.shape[1], (board.columns + 1) * square_px, delta=board.columns + 4)
+                _, ids, _, _ = cv2.aruco.CharucoDetector(board.opencv()).detectBoard(image)
+                self.assertEqual(len(ids), (board.columns - 1) * (board.rows - 1))
 
 
 if __name__ == "__main__":

@@ -109,6 +109,11 @@ The tool is [tools/calibrate.py](tools/calibrate.py), run on a laptop with
 uv run tools/calibrate.py board --out board.png
 ```
 
+A bought ChArUco board works too: pass its `--squares`, `--square-mm`, `--marker-mm` and
+`--dictionary` to both `board` and `solve` (a 15 x 15 board of 1.125 in squares and 0.875 in
+markers is `--squares 15x15 --square-mm 28.575 --marker-mm 22.225 --dictionary 4X4_1000`), and
+skip printing.
+
 1. Print `board.png` at 100% scale and fix it flat to something rigid.
 2. On the coprocessor, `visor cameras` lists each camera plugged in: the device to give Visor, and
    the formats and sizes it offers. A camera with a USB serial is named by its `/dev/v4l/by-id/`

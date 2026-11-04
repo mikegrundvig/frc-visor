@@ -25,6 +25,7 @@ import numpy as np
 
 DICTIONARIES = {
     "4X4_100": cv2.aruco.DICT_4X4_100,
+    "4X4_1000": cv2.aruco.DICT_4X4_1000,
     "5X5_100": cv2.aruco.DICT_5X5_100,
     "6X6_100": cv2.aruco.DICT_6X6_100,
 }
