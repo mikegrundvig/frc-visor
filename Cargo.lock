@@ -1071,7 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "visor"
-version = "2026.11.5"
+version = "2026.11.6"
 dependencies = [
  "cc",
  "clap",
