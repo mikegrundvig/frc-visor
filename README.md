@@ -67,7 +67,24 @@ visor version
   The new configuration is checked (`visor check`) before it replaces the old.
 - **Service:** [deploy/visor.service](deploy/visor.service), which runs as a `visor` user in the
   `video` group.
-- **chrony:** [deploy/chrony.conf](deploy/chrony.conf).
+- **chrony:** [deploy/chrony.conf](deploy/chrony.conf), with the robot controller's address
+  (`10.TE.AM.2`) in its `server` line.
+
+### Checking the clock
+
+With the robot program running, on the coprocessor:
+
+```bash
+chronyc sources     # the robot's line starts ^*: chrony has chosen it
+chronyc tracking    # Reference ID names 10.TE.AM.2, Leap status Normal, System time under 0.001 s
+```
+
+That's the pass: frames are stamped in robot time, to well under the 1 ms Visor aims for (chrony
+held about 0.1 ms on a test bench; a robot's network is yet to be measured). Anything else, and
+Visor marks every frame unsynced: the robot leaves them all out and raises the camera's
+no-capture-time alert. `^?` or no line means chrony can't reach the robot program: check the
+`server` address and that the robot program is running, since it answers on UDP 5806. After the
+robot controller reboots, chrony steps to its new clock within about a second (`makestep`).
 
 Camera controls use the names `v4l2-ctl --list-ctrls` prints. Aim for an exposure near 1 ms with
 the gain raised: blur from the robot turning is the main error, and short exposures cut it.
