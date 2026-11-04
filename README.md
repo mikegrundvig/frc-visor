@@ -114,6 +114,12 @@ A bought ChArUco board works too: pass its `--squares`, `--square-mm`, `--marker
 markers is `--squares 15x15 --square-mm 28.575 --marker-mm 22.225 --dictionary 4X4_1000`), and
 skip printing.
 
+With the camera plugged into a Linux laptop instead of a coprocessor, two live views help:
+`uv run tools/focus.py <device>` shows how sharp the middle of the frame is while you turn the lens
+to its peak, and `uv run tools/capture.py <device> --out frames/` (with the board's options) shows
+the board's corners, its rough distance and tilt, and each ninth of the frame's coverage, and saves
+a frame every 1.5 s while the board is steady. Solve its folder as below.
+
 1. Print `board.png` at 100% scale and fix it flat to something rigid.
 2. On the coprocessor, `visor cameras` lists each camera plugged in: the device to give Visor, and
    the formats and sizes it offers. A camera with a USB serial is named by its `/dev/v4l/by-id/`
