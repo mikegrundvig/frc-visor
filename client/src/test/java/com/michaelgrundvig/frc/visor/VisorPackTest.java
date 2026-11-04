@@ -79,19 +79,14 @@ class VisorPackTest {
   void aBoardIsBroughtUpToDateAndRefusesWhatWouldBreakIt() throws Exception {
     Path visor = Files.createDirectories(work.resolve("opt-visor"));
     Path devices = Files.createDirectories(work.resolve("by-id"));
-    for (String device :
-        List.of(
-            "usb-Thrifty_Cam_0001-video-index0",
-            "usb-Thrifty_Cam_0001-video-index1",
-            "usb-Other_Cam_X-video-index0")) {
-      Files.createFile(devices.resolve(device));
-    }
-    // By port: these two, and a third camera whose serial is the first's, so it has no by-id name.
     Path ports = Files.createDirectories(work.resolve("by-path"));
-    for (String port : List.of("1.1", "1.2", "1.3")) {
-      Files.createFile(ports.resolve("platform-xhci-usb-0:" + port + ":1.0-video-index0"));
-      Files.createFile(ports.resolve("platform-xhci-usb-0:" + port + ":1.0-video-index1"));
-    }
+    Path sysfs = Files.createDirectories(work.resolve("sys"));
+    // Three cameras, as udev names them and the kernel describes them: one with a serial, one with
+    // none (a ThriftyCam), whose by-id name every camera of its model shares, and a third whose
+    // serial is the first's, so udev's one by-id name for it leads to the first alone.
+    plugIn(devices, ports, sysfs, 0, "1.1", "0001", "usb-Thrifty_Cam_0001");
+    plugIn(devices, ports, sysfs, 2, "1.2", null, "usb-DCX-240524--XH_SPCA2630_PC_Camera");
+    plugIn(devices, ports, sysfs, 4, "1.3", "0001", null);
     Path restarts = work.resolve("restarts");
     Path restart = executable("restart", "#!/bin/sh\necho restarted >> " + restarts + "\n");
     Path packs = Files.createDirectories(work.resolve("packs/visor"));
@@ -101,7 +96,7 @@ class VisorPackTest {
       }
     }
     int port = freePort();
-    startAgent(port, visor, devices + " " + ports, restart);
+    startAgent(port, visor, devices, ports, sysfs, restart);
 
     Manager spotter =
         new Manager(
@@ -116,14 +111,16 @@ class VisorPackTest {
     Value config = board.value("visor.status.config");
     Value cameras = board.value("visor.status.cameras");
 
-    // Pushed the pack, the board says it has no Visor yet, and which cameras are plugged in.
+    // Pushed the pack, the board says it has no Visor yet, and which cameras are plugged in: each
+    // once, by its name as `visor cameras` gives it. The one with its own serial by id; the
+    // ThriftyCam, with no serial, by its port though it's the only one of its model; and the one
+    // whose serial is another's by its port.
     await(spotter, version::available, "the pack's status");
     assertThat(version.text()).as("no Visor yet").isEmpty();
     assertThat(config.text()).isEmpty();
     assertThat(cameras.text())
         .isEqualTo(
-            "usb-Other_Cam_X-video-index0,usb-Thrifty_Cam_0001-video-index0,"
-                + "platform-xhci-usb-0:1.1:1.0-video-index0,"
+            "usb-Thrifty_Cam_0001-video-index0,"
                 + "platform-xhci-usb-0:1.2:1.0-video-index0,"
                 + "platform-xhci-usb-0:1.3:1.0-video-index0");
 
@@ -173,7 +170,8 @@ class VisorPackTest {
    * The agent, as systemd runs it on a board: started again whenever it exits, as it does after a
    * push to read the packs pushed.
    */
-  private void startAgent(int port, Path visor, String devices, Path restart) throws IOException {
+  private void startAgent(int port, Path visor, Path devices, Path ports, Path sysfs, Path restart)
+      throws IOException {
     Path root = Files.createDirectories(work.resolve("root"));
     Files.createDirectories(root.resolve("var/lib/frc-spotter"));
     Path log = work.resolve("agent.log");
@@ -193,7 +191,9 @@ class VisorPackTest {
             .redirectErrorStream(true)
             .redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()));
     builder.environment().put("VISOR_DIR", visor.toString());
-    builder.environment().put("VISOR_DEVICES", devices);
+    builder.environment().put("VISOR_BY_ID", devices.toString());
+    builder.environment().put("VISOR_BY_PATH", ports.toString());
+    builder.environment().put("VISOR_SYSFS", sysfs.toString());
     builder.environment().put("VISOR_RESTART", restart.toString());
     agent = builder.start();
     Thread thread =
@@ -216,6 +216,39 @@ class VisorPackTest {
     thread.setDaemon(true);
     thread.start();
     supervisor = thread;
+  }
+
+  /**
+   * A camera in a USB port, as video devices {@code first} (capture) and {@code first + 1}
+   * (metadata): their by-path names, their by-id names when udev gave it one ({@code id}, without
+   * the {@code -video-index} part), and in sysfs, its USB device with its serial, if it has one.
+   */
+  private void plugIn(
+      Path devices,
+      Path ports,
+      Path sysfs,
+      int first,
+      String port,
+      @Nullable String serial,
+      @Nullable String id)
+      throws IOException {
+    Path usb = Files.createDirectories(work.resolve("usb").resolve(port));
+    Path controlInterface = Files.createDirectories(usb.resolve(port + ":1.0"));
+    if (serial != null) {
+      Files.writeString(usb.resolve("serial"), serial + "\n");
+    }
+    for (int index = 0; index < 2; index++) {
+      String video = "video" + (first + index);
+      Path device = Files.createDirectories(work.resolve("dev")).resolve(video);
+      Files.createFile(device);
+      Files.createSymbolicLink(
+          Files.createDirectories(sysfs.resolve(video)).resolve("device"), controlInterface);
+      Files.createSymbolicLink(
+          ports.resolve("platform-xhci-usb-0:" + port + ":1.0-video-index" + index), device);
+      if (id != null) {
+        Files.createSymbolicLink(devices.resolve(id + "-video-index" + index), device);
+      }
+    }
   }
 
   /** A release archive as the release workflow makes one: the program, as {@code ./visor}. */

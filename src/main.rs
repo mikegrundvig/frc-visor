@@ -423,7 +423,11 @@ fn save_frames(
 /// Each camera plugged in: the device to give Visor, and what it offers. A video device that offers
 /// no capture format (a UVC camera's second, metadata, device) is left out.
 fn cameras() -> Result<()> {
-    let plugged = cameras::plugged(Path::new(cameras::BY_ID), Path::new(cameras::BY_PATH))?;
+    let plugged = cameras::plugged(
+        Path::new(cameras::BY_ID),
+        Path::new(cameras::BY_PATH),
+        Path::new(cameras::SYSFS),
+    )?;
     let mut listed = 0;
     for each in &plugged {
         let offers = match offered(&each.device) {
@@ -433,10 +437,15 @@ fn cameras() -> Result<()> {
         };
         listed += 1;
         println!("{} ({})", each.name().display(), each.device.display());
-        if each.by_id.is_empty() {
+        if each.serial.is_none() {
             println!(
-                "  no by-id name: this camera has no serial of its own, or shares one with \
-                 another, so this name follows the USB port it's in"
+                "  no USB serial, so named by the USB port it's in, always: label the port and \
+                 its cable"
+            );
+        } else if each.by_id.is_empty() {
+            println!(
+                "  its serial is another camera's, so named by the USB port it's in: label the \
+                 port and its cable"
             );
         }
         for line in offers {

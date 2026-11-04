@@ -1,10 +1,12 @@
 #!/bin/sh
 # What Visor this board has, its configuration's SHA-256, and the cameras plugged in: one JSON
-# object. VISOR_DIR (/opt/visor) and VISOR_DEVICES (the folders of names, space-separated) are for
-# an image laid out otherwise, and tests.
+# object. VISOR_DIR (/opt/visor), VISOR_BY_ID and VISOR_BY_PATH (udev's folders of names) and
+# VISOR_SYSFS (the kernel's video devices) are for an image laid out otherwise, and tests.
 set -u
 dir=${VISOR_DIR:-/opt/visor}
-devices=${VISOR_DEVICES:-/dev/v4l/by-id /dev/v4l/by-path}
+by_id=${VISOR_BY_ID:-/dev/v4l/by-id}
+by_path=${VISOR_BY_PATH:-/dev/v4l/by-path}
+sysfs=${VISOR_SYSFS:-/sys/class/video4linux}
 version=""
 if [ -x "$dir/visor" ]; then
   # "visor 2026.11.4 (version ID 20261104)": the second word.
@@ -14,16 +16,35 @@ config=""
 if [ -f "$dir/visor.toml" ]; then
   config=$(sha256sum "$dir/visor.toml" | cut -d ' ' -f 1)
 fi
-# Each camera's capture device, by the names udev gives it: by-id's, from its serial, which finds it
-# after a replug into any port; and by-path's, from the port, for a camera whose serial isn't its
-# own. Only the characters such names have, so the JSON needs no escaping.
+
+# Whether a video device's USB device reports a serial that isn't blank.
+has_serial() {
+  serial="$sysfs/${1##*/}/device/../serial"
+  [ -r "$serial" ] && [ -n "$(tr -d '[:space:]' < "$serial")" ]
+}
+
+# Each camera's capture device once, by its name as `visor cameras` gives it: its by-id name, from
+# its serial, which finds it after a replug into any port, when it has a serial and udev gave it the
+# name; otherwise its by-path name, from the port. A camera with no serial shares its by-id name
+# with every camera of its model, so it's never named by it, even alone. Only the characters such
+# names have, so the JSON needs no escaping.
 cameras=""
-for folder in $devices; do
-  for device in "$folder"/*-video-index0; do
-    name=${device##*/}
+seen=" "
+for folder in "$by_id" "$by_path"; do
+  for link in "$folder"/*-video-index0; do
+    [ -e "$link" ] || continue
+    name=${link##*/}
     case $name in
-      *[!A-Za-z0-9_.:+-]* | '*-video-index0') continue ;;
+      *[!A-Za-z0-9_.:+-]*) continue ;;
     esac
+    device=$(readlink -f "$link")
+    case $seen in
+      *" $device "*) continue ;;
+    esac
+    if [ "$folder" = "$by_id" ] && ! has_serial "$device"; then
+      continue
+    fi
+    seen="$seen$device "
     cameras="${cameras:+$cameras,}$name"
   done
 done

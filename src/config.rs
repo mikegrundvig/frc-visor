@@ -30,7 +30,8 @@ pub struct Camera {
     pub name: String,
     /// Sent in every frame; unique on the robot.
     pub index: u8,
-    /// Best a `/dev/v4l/by-id/` path, so a replugged camera is found again.
+    /// As `visor cameras` names it: its `/dev/v4l/by-id/` path when it has a USB serial, so it's
+    /// found again in any port; without one, its `/dev/v4l/by-path/` path, its USB port's.
     pub device: PathBuf,
     pub width: u32,
     pub height: u32,

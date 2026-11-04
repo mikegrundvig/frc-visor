@@ -111,13 +111,17 @@ uv run tools/calibrate.py board --out board.png
 
 1. Print `board.png` at 100% scale and fix it flat to something rigid.
 2. On the coprocessor, `visor cameras` lists each camera plugged in: the device to give Visor, and
-   the formats and sizes it offers. A camera with no `/dev/v4l/by-id/` name of its own (no serial,
-   or another camera's) is listed by its USB port's name instead, which follows the port.
+   the formats and sizes it offers. A camera with a USB serial is named by its `/dev/v4l/by-id/`
+   name, which follows the camera to any port. A camera with no serial (the ThriftyCam has none) is
+   named by its USB port, its `/dev/v4l/by-path/` name, always, even when it's the only one plugged
+   in: every camera of its model shares one by-id name, which breaks when a second is plugged in.
+   So is a camera whose serial is another's. A camera named by its port must go back in that port:
+   label the ports and the cables.
 3. Stop the service, which has the cameras open, and record at the size the camera is to run:
 
    ```bash
    sudo systemctl stop visor
-   visor record --device /dev/v4l/by-id/usb-...-video-index0 --width 1280 --height 800
+   visor record --device /dev/v4l/by-path/platform-...-video-index0 --width 1280 --height 800
    sudo systemctl start visor
    ```
 

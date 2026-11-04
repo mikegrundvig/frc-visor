@@ -42,7 +42,9 @@ public final class VisorConfigFile {
    *
    * @param name for Visor's logs
    * @param index sent in every frame: the camera's place in the robot's list of cameras
-   * @param device its V4L2 device, best a {@code /dev/v4l/by-id/} path
+   * @param device its V4L2 device as {@code visor cameras} names it: a {@code /dev/v4l/by-id/} path
+   *     for a camera with a USB serial; for one with none, its port's {@code /dev/v4l/by-path/}
+   *     path
    * @param width the frame size it runs at
    * @param height the frame size it runs at
    */

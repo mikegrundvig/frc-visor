@@ -10,8 +10,9 @@ team = 1234
 [[camera]]
 name = "front-left"     # for logs
 index = 0               # sent in every frame; unique on the robot
-# A /dev/v4l/by-id/ path finds the same camera again after a replug.
-device = "/dev/v4l/by-id/usb-ThriftyCam-video-index0"
+# As `visor cameras` names it: a /dev/v4l/by-id/ path for a camera with a USB serial, found again
+# in any port; for one with none, like the ThriftyCam, its USB port's /dev/v4l/by-path/ path.
+device = "/dev/v4l/by-path/platform-xhci-hcd.0-usb-0:1:1.0-video-index0"
 width = 1600
 height = 1304
 fps = 60
