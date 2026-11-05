@@ -24,7 +24,7 @@ serde = { version = "1", features = ["derive"] }
 socket2 = "0.6"
 tokio = { version = "1", features = ["net", "rt", "sync", "time"] }
 tokio-io-timeout = "1"
-toml = { version = "0.9", features = ["preserve_order"] }
+toml = { version = "1.1", features = ["preserve_order"] }
 v4l = "0.14"
 
 [build-dependencies]
