@@ -1,7 +1,7 @@
 [package]
 name = "visor"
 # The version is a date, and the version ID every frame carries is made from it: 2026.11.2 is 20261102.
-version = "2026.11.7"
+version = "2026.11.8"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "AprilTag vision for an FRC robot's coprocessor: USB cameras, NAPA, raw corners to the robot over UDP"
