@@ -18,7 +18,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 jpeg-encoder = "0.7"
 libc = "0.2"
 log = "0.4"
-nalgebra = { version = "0.34", default-features = false, features = ["std"] }
+nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 socket2 = "0.6"
