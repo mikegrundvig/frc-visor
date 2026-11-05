@@ -1,6 +1,7 @@
-//! A camera's capture thread: opens the V4L2 device, sets its format, frame rate and controls,
-//! and streams frames into the camera's [`Latest`] slot. On any error it closes the camera and
-//! tries again every 300 ms, so an unplugged camera comes back by itself.
+//! A camera's capture thread: opens the V4L2 device, sets its format, frame rate, exposure, gain
+//! and controls, and streams frames into the camera's [`Latest`] slot, each with the exposure and
+//! gain in effect. On any error it closes the camera and tries again every 300 ms, so an unplugged
+//! camera comes back by itself, its settings set again.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,7 +10,6 @@ use std::time::Duration;
 
 use log::{info, warn};
 use v4l::buffer::{Flags, Type};
-use v4l::control::{self, Control, Value};
 use v4l::io::mmap::Stream;
 use v4l::io::traits::CaptureStream;
 use v4l::video::Capture;
@@ -19,6 +19,7 @@ use v4l::{Device, Format, FourCC};
 use crate::clock::Clocks;
 use crate::config::{Camera, PixelFormat};
 use crate::latest::{Captured, Latest};
+use crate::settings::{self, InEffect, Said};
 
 const RETRY: Duration = Duration::from_millis(300);
 /// No frame for this long counts as a lost camera.
@@ -28,8 +29,10 @@ const BUFFERS: u32 = 4;
 /// Captures until `stop` is set, reconnecting as needed.
 pub fn run(camera: &Camera, latest: &Latest, clocks: &impl Clocks, stop: &AtomicBool) {
     let mut last_error = None;
+    // Across reopens, so a camera that keeps coming back says each warning once.
+    let mut said = Said::default();
     while !stop.load(Ordering::Relaxed) {
-        match capture(camera, latest, clocks, stop, &mut last_error) {
+        match capture(camera, latest, clocks, stop, &mut last_error, &mut said) {
             Ok(()) => return,
             Err(error) => {
                 // Said once per cause, not every 300 ms.
@@ -50,12 +53,20 @@ fn capture(
     clocks: &impl Clocks,
     stop: &AtomicBool,
     last_error: &mut Option<String>,
+    said: &mut Said,
 ) -> io::Result<()> {
     let device = Device::with_path(&camera.device)
         .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", camera.device.display())))?;
     let (format, pixels) = set_format(&device, camera)?;
     let params = device.set_params(&Parameters::with_fps(camera.fps))?;
-    apply_controls(&device, &camera.controls)?;
+    let applied = settings::apply(&device, camera)?;
+    for warning in &applied.warnings {
+        if said.first_time(warning) {
+            warn!("{}: {warning}", camera.name);
+        }
+    }
+    let in_effect = applied.in_effect;
+    info!("{}: {}", camera.name, described(in_effect));
     let mut stream = Stream::with_buffers(&device, Type::VideoCapture, BUFFERS)?;
     stream.set_timeout(STALL);
     info!(
@@ -95,6 +106,7 @@ fn capture(
                 image,
                 monotonic_nanos,
                 dequeue_time: !stamped,
+                settings: in_effect,
             }),
             // A short frame is skipped, not a reason to reconnect.
             Err(error) => {
@@ -161,54 +173,17 @@ pub fn choose_format(
         })
 }
 
-/// Sets each control, in order, by its `v4l2-ctl` name.
-fn apply_controls(device: &Device, controls: &[(String, i64)]) -> io::Result<()> {
-    if controls.is_empty() {
-        return Ok(());
+/// The exposure and gain in effect, as the log says it once the camera is open.
+fn described(in_effect: InEffect) -> String {
+    let exposure = match (in_effect.auto_exposure, in_effect.exposure_us) {
+        (Some(true), _) => "the camera's automatic exposure".to_string(),
+        (_, Some(us)) => format!("exposure {:.1} ms", f64::from(us) / 1000.0),
+        (_, None) => "exposure unknown".to_string(),
+    };
+    match in_effect.gain {
+        Some(gain) => format!("{exposure}, gain {gain}"),
+        None => format!("{exposure}, no gain control"),
     }
-    let known = device.query_controls()?;
-    for (name, value) in controls {
-        let found = known
-            .iter()
-            .filter(|c| c.typ != control::Type::CtrlClass)
-            .find(|c| control_key(&c.name) == *name);
-        let Some(description) = found else {
-            let names: Vec<String> = known
-                .iter()
-                .filter(|c| c.typ != control::Type::CtrlClass)
-                .map(|c| control_key(&c.name))
-                .collect();
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("no control {name}; the camera has {}", names.join(", ")),
-            ));
-        };
-        let value = match description.typ {
-            control::Type::Boolean => Value::Boolean(*value != 0),
-            _ => Value::Integer(*value),
-        };
-        device
-            .set_control(Control {
-                id: description.id,
-                value,
-            })
-            .map_err(|e| io::Error::new(e.kind(), format!("setting {name}: {e}")))?;
-    }
-    Ok(())
-}
-
-/// A control's name as `v4l2-ctl` prints it: "Exposure Time, Absolute" is
-/// `exposure_time_absolute`.
-pub fn control_key(name: &str) -> String {
-    let mut key = String::new();
-    for c in name.chars() {
-        if c.is_ascii_alphanumeric() {
-            key.push(c.to_ascii_lowercase());
-        } else if !key.is_empty() && !key.ends_with('_') {
-            key.push('_');
-        }
-    }
-    key.trim_end_matches('_').to_string()
 }
 
 fn time_source(flags: Flags) -> &'static str {
@@ -225,23 +200,6 @@ fn time_source(flags: Flags) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn control_names_match_v4l2_ctl() {
-        let cases = [
-            ("Exposure Time, Absolute", "exposure_time_absolute"),
-            ("Auto Exposure", "auto_exposure"),
-            (
-                "White Balance Temperature, Auto",
-                "white_balance_temperature_auto",
-            ),
-            ("Gain", "gain"),
-            ("  Power Line Frequency ", "power_line_frequency"),
-        ];
-        for (name, key) in cases {
-            assert_eq!(control_key(name), key);
-        }
-    }
 
     /// What the camera offers, what's configured, and the choice or part of the refusal.
     type FormatCase<'a> = (

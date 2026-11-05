@@ -14,7 +14,10 @@ package com.michaelgrundvig.frc.visor;
  */
 public final class VisorFrame {
   /** The most tags a frame carries. */
-  public static final int MAX_TAGS = 15;
+  public static final int MAX_TAGS = 14;
+
+  /** The clipped share's unit on the wire: hundredths of a percent. */
+  private static final double CLIPPED_UNITS = 10_000;
 
   /** x and y for each of four corners. */
   static final int CORNER_VALUES = 8;
@@ -32,6 +35,17 @@ public final class VisorFrame {
   int camera;
   boolean clockSynced;
   boolean dequeueTime;
+  boolean exposureKnown;
+  long exposureMicros;
+  boolean gainKnown;
+  int gain;
+  boolean autoExposure;
+  int medianBrightness;
+  int highBrightness;
+
+  /** The share of pixels at full white, in hundredths of a percent, as sent. */
+  int clipped;
+
   int tagCount;
   final int[] ids = new int[MAX_TAGS];
   final int[] hamming = new int[MAX_TAGS];
@@ -85,6 +99,52 @@ public final class VisorFrame {
   /** Whether the capture time is when Visor got the frame, because the driver gave no timestamp. */
   public boolean dequeueTime() {
     return dequeueTime;
+  }
+
+  /**
+   * Whether the exposure the image was taken at is known: not while the camera chose it (its own
+   * automatic exposure on), nor from a camera with no exposure control.
+   */
+  public boolean exposureKnown() {
+    return exposureKnown;
+  }
+
+  /**
+   * The exposure the image was taken at, in microseconds, as read back from the camera; 0 unless
+   * {@link #exposureKnown()}.
+   */
+  public long exposureMicros() {
+    return exposureMicros;
+  }
+
+  /** Whether the camera's gain is known: not from a camera with no gain control. */
+  public boolean gainKnown() {
+    return gainKnown;
+  }
+
+  /** The camera's gain control, in its own units, as read back; 0 unless {@link #gainKnown()}. */
+  public int gain() {
+    return gain;
+  }
+
+  /** Whether the camera's own automatic exposure was on, so it chose the exposure. */
+  public boolean autoExposure() {
+    return autoExposure;
+  }
+
+  /** The image's median brightness, 0 (black) to 255 (white), from a sample of its pixels. */
+  public int medianBrightness() {
+    return medianBrightness;
+  }
+
+  /** Its 99th percentile, 0 to 255: about a tag's white, where one is in view. */
+  public int highBrightness() {
+    return highBrightness;
+  }
+
+  /** The share of its pixels at or near full white (250 or more), from 0 to 1. */
+  public double clippedShare() {
+    return clipped / CLIPPED_UNITS;
   }
 
   /** How many tags are in the frame. */
@@ -171,6 +231,14 @@ public final class VisorFrame {
     camera = other.camera;
     clockSynced = other.clockSynced;
     dequeueTime = other.dequeueTime;
+    exposureKnown = other.exposureKnown;
+    exposureMicros = other.exposureMicros;
+    gainKnown = other.gainKnown;
+    gain = other.gain;
+    autoExposure = other.autoExposure;
+    medianBrightness = other.medianBrightness;
+    highBrightness = other.highBrightness;
+    clipped = other.clipped;
     tagCount = other.tagCount;
     int n = other.tagCount;
     System.arraycopy(other.ids, 0, ids, 0, n);
@@ -182,7 +250,8 @@ public final class VisorFrame {
   }
 
   /**
-   * Sets everything but the tags, which it clears: for a simulation or a test building a frame to
+   * Sets everything but the tags, which it clears, and the camera's settings and the image's
+   * brightness, which it leaves unknown and black: for a simulation or a test building a frame to
    * send. The version ID is this client's.
    */
   public void setHeader(
@@ -201,7 +270,57 @@ public final class VisorFrame {
     this.camera = camera;
     this.clockSynced = clockSynced;
     this.dequeueTime = dequeueTime;
+    this.exposureKnown = false;
+    this.exposureMicros = 0;
+    this.gainKnown = false;
+    this.gain = 0;
+    this.autoExposure = false;
+    this.medianBrightness = 0;
+    this.highBrightness = 0;
+    this.clipped = 0;
     this.tagCount = 0;
+  }
+
+  /**
+   * Sets the exposure the image was taken at: a known one, in microseconds, with the camera's
+   * automatic exposure off.
+   */
+  public void setExposure(long micros) {
+    if (micros <= 0 || micros > 0xffff_ffffL) {
+      throw new IllegalArgumentException("an exposure in microseconds, not " + micros);
+    }
+    exposureKnown = true;
+    exposureMicros = micros;
+    autoExposure = false;
+  }
+
+  /** Sets the exposure as the camera's own choice: its automatic exposure on, the time unknown. */
+  public void setAutoExposure() {
+    exposureKnown = false;
+    exposureMicros = 0;
+    autoExposure = true;
+  }
+
+  /** Sets the camera's gain control as read back. */
+  public void setGain(int gain) {
+    gainKnown = true;
+    this.gain = gain;
+  }
+
+  /**
+   * Sets the image's brightness: its median and 99th percentile, 0 to 255, and the share of its
+   * pixels at full white, 0 to 1.
+   */
+  public void setBrightness(int median, int high, double clippedShare) {
+    if (median < 0 || median > 255 || high < 0 || high > 255) {
+      throw new IllegalArgumentException("brightness is 0 to 255: " + median + ", " + high);
+    }
+    if (!(clippedShare >= 0 && clippedShare <= 1)) {
+      throw new IllegalArgumentException("a share is 0 to 1, not " + clippedShare);
+    }
+    medianBrightness = median;
+    highBrightness = high;
+    clipped = (int) Math.round(clippedShare * CLIPPED_UNITS);
   }
 
   /** Sets the version ID, which {@link #setHeader} makes this client's. */

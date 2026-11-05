@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Visor's configuration file (deploy/visor.example.toml), written for one coprocessor: what a
@@ -15,8 +16,8 @@ import java.util.Objects;
  * VisorConfigFile file = VisorConfigFile.forTeam(1234);
  * file.camera("front-left", 0, "/dev/v4l/by-id/usb-cam-video-index0", 1600, 1304)
  *     .fps(60)
- *     .control("auto_exposure", 1)
- *     .control("exposure_time_absolute", 10)
+ *     .exposureMicros(1000)
+ *     .gain(40)
  *     .lens(1600, 1304, 1229.7, 1229.9, 801.2, 650.4, -0.31, 0.12, 0.0004, -0.0002, -0.02);
  * String toml = file.toToml();
  * }</pre>
@@ -54,7 +55,10 @@ public final class VisorConfigFile {
     return camera;
   }
 
-  /** One camera's entry. Unset settings are left out, so Visor's defaults apply. */
+  /**
+   * One camera's entry. Unset settings are left out, so Visor's defaults apply: for the exposure
+   * and gain, the camera's own.
+   */
   public static final class Camera {
     private final String name;
     private final int index;
@@ -64,6 +68,8 @@ public final class VisorConfigFile {
     private int fps;
     private int minTagPixels;
     private long timeOffsetMicros;
+    private long exposureMicros;
+    private @Nullable Long gain;
     private final Map<String, Long> controls = new LinkedHashMap<>();
     private double[] lens = new double[0];
 
@@ -94,8 +100,29 @@ public final class VisorConfigFile {
     }
 
     /**
-     * A V4L2 control, by the name {@code v4l2-ctl --list-ctrls} prints. Visor sets them in the
-     * order given, which matters: manual exposure before the exposure.
+     * A fixed exposure, in microseconds: Visor turns the camera's automatic exposure off and sets
+     * this, every time it opens the camera. Without one, the camera's own automatic exposure.
+     */
+    public Camera exposureMicros(long micros) {
+      if (micros <= 0) {
+        throw new IllegalArgumentException("an exposure is a positive time, not " + micros);
+      }
+      this.exposureMicros = micros;
+      return this;
+    }
+
+    /**
+     * The camera's {@code gain} control, in its own units ({@code visor cameras} lists its range).
+     * Without one, the camera's default.
+     */
+    public Camera gain(long gain) {
+      this.gain = gain;
+      return this;
+    }
+
+    /**
+     * A V4L2 control, by the name {@code v4l2-ctl --list-ctrls} prints. Visor sets them after the
+     * exposure and gain, in the order given, which matters where one control depends on another.
      */
     public Camera control(String control, long value) {
       controls.put(Objects.requireNonNull(control), value);
@@ -146,6 +173,13 @@ public final class VisorConfigFile {
       }
       if (timeOffsetMicros != 0) {
         out.append("time_offset_us = ").append(timeOffsetMicros).append('\n');
+      }
+      if (exposureMicros > 0) {
+        out.append("exposure_us = ").append(exposureMicros).append('\n');
+      }
+      Long gain = this.gain;
+      if (gain != null) {
+        out.append("gain = ").append(gain).append('\n');
       }
       if (!controls.isEmpty()) {
         out.append("[camera.controls]\n");

@@ -4,8 +4,9 @@ Visor sends one UDP datagram per captured frame to the robot controller, port 58
 frame is sent for every image, with or without tags, so silence means a camera or Visor is down.
 A lost datagram is simply lost: the next frame is 16 ms behind it.
 
-Everything is little-endian, with fixed sizes and no padding: a 28-byte header, then 96 bytes per
-tag. Eight tags is 796 bytes; 15, the most a frame carries, is 1,468, inside one Ethernet packet.
+Everything is little-endian, with fixed sizes and no padding: a 40-byte header, then 96 bytes per
+tag. Eight tags is 808 bytes; 14, the most a frame carries, is 1,384, inside one Ethernet packet's
+1,472 bytes of UDP payload.
 
 ## Header
 
@@ -18,9 +19,14 @@ tag. Eight tags is 796 bytes; 15, the most a frame carries, is 1,468, inside one
 | 14 | Height | u16 | |
 | 16 | Capture time | i64 | Nanoseconds on the robot's clock (below) |
 | 24 | Camera | u8 | The camera's index from Visor's configuration, unique on the robot |
-| 25 | Flags | u8 | Bit 0: the clock is synced to the robot. Bit 1: the capture time is when Visor got the frame, because the driver gave no timestamp. Other bits are 0 |
-| 26 | Tag count | u8 | 0 to 15; with more in view, the 15 with the highest decision margins |
+| 25 | Flags | u8 | Bit 0: the clock is synced to the robot. Bit 1: the capture time is when Visor got the frame, because the driver gave no timestamp. Bit 2: the exposure below is known. Bit 3: the gain below is known. Bit 4: the camera's own automatic exposure is on. Other bits are 0 |
+| 26 | Tag count | u8 | 0 to 14; with more in view, the 14 with the highest decision margins |
 | 27 | Reserved | u8 | 0 |
+| 28 | Exposure | u32 | Microseconds, as read back from the camera once its settings were set; 0 without bit 2 (its automatic exposure on, so the camera chooses it, or no exposure control) |
+| 32 | Gain | i32 | The camera's `gain` control, in its own units, as read back; 0 without bit 3 (no gain control) |
+| 36 | Median brightness | u8 | The image's middle pixel, 0 (black) to 255 (white), from every fourth pixel of every fourth row |
+| 37 | High brightness | u8 | Its 99th percentile, about a tag's white where one is in view |
+| 38 | Clipped | u16 | The share of those pixels at 250 or brighter, in hundredths of a percent: 0 to 10,000 |
 
 ## Each tag
 
@@ -51,6 +57,14 @@ mirror images about the line of sight; both come, the better first, as OpenCV's
 1e-10 from the same undistorted corners). The usual ambiguity is the best error over the
 other's. A client converts to its own axes once.
 
+## Exposure and brightness
+
+The exposure and gain are what the camera reports, read back as Visor opens it (and again after a
+replug), so a frame says what it was taken at, not only what was asked for. Where a control can't
+be read back, it's what Visor set. The brightness is the image's own, from a sample of one pixel in
+16, so a log shows whether the exposure and gain suit the light: tag whites at a high brightness of
+100 to 200 with nothing clipped is a well-exposed frame.
+
 ## The capture time
 
 The robot program answers NTP requests on UDP 5806 with its own clock plus 2026-01-01T00:00:00Z
@@ -67,7 +81,8 @@ byte for byte, and a client's tests should decode it and check every field (`src
 values):
 
 - version ID 20261102, sequence 4,000,000,001, 1600 × 1304, capture time 1,234,567,890,123 ns,
-  camera 3, clock synced, driver timestamp;
+  camera 3, clock synced, driver timestamp, exposure 1,000 µs and gain 40 known, the camera's
+  automatic exposure off, median brightness 37, high 201, clipped 125 (1.25%);
 - tag 7, hamming 0, margin 61.25, corners (100.5, 200.25) (180, 201) (179.75, 280.5) (99, 279),
   poses solved: best rvec (0.125, -2.5, 0.0625), tvec (-0.5, 0.25, 3.75), error 0.1875; other
   rvec (-0.25, 2, -0.5), tvec (-0.5, 0.25, 3.5), error 1.5;

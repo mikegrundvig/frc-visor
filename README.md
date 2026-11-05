@@ -23,7 +23,7 @@ layout, no multi-tag solving.
 - **Per camera, two threads.** One captures (V4L2, memory-mapped), the other detects. They share
   one slot holding the newest frame, so a slow detection drops frames rather than falling behind.
 - **USB recovery.** On any capture error the camera is closed and reopened every 300 ms, and its
-  settings reapplied.
+  settings reapplied: its exposure and gain included ([below](#exposure-and-gain)).
 - **The clock.** chrony keeps the coprocessor's clock on the robot program's, through a small NTP
   responder in the robot program (see [docs/wire.md](docs/wire.md#the-capture-time)). Each frame's
   kernel timestamp becomes robot time, plus a per-camera offset you measure.
@@ -86,8 +86,32 @@ no-capture-time alert. `^?` or no line means chrony can't reach the robot progra
 `server` address and that the robot program is running, since it answers on UDP 5806. After the
 robot controller reboots, chrony steps to its new clock within about a second (`makestep`).
 
-Camera controls use the names `v4l2-ctl --list-ctrls` prints. Aim for an exposure near 1 ms with
-the gain raised: blur from the robot turning is the main error, and short exposures cut it.
+### Exposure and gain
+
+Visor sets each camera's exposure and gain from its configuration every time it opens the camera,
+after a replug too, and has no default of its own: `exposure_us` turns the camera's automatic
+exposure off and fixes the exposure; `gain` sets its `gain` control. Left out, Visor puts back the
+camera's own automatic exposure and its default gain, so what a camera does follows from the
+configuration alone. A robot's configuration gives them from the robot's description of each
+camera, where the defaults live (frc-robot-runtime's docs/visor.md): a fixed 1 ms, since blur from
+the robot turning is the main error and short exposures cut it, with the gain the camera's own
+until a team sets one.
+
+Visor finds the controls by V4L2's standard IDs (`auto_exposure`, its manual mode 1;
+`exposure_time_absolute`, in 100 µs; `gain`), whatever the kernel names them. A camera without one,
+or a value outside its range, is a warning in Visor's log, said once, and the camera keeps
+capturing at what it has. Any other control goes under `[camera.controls]` by the name
+`v4l2-ctl --list-ctrls` prints, set after these; a name the camera doesn't have stops it opening.
+
+`visor cameras` lists each camera's controls, with their ranges, defaults and values now: on a new
+camera, that's the check of its names and its gain's range, without `v4l2-ctl`.
+
+Every frame carries the exposure and gain in effect, read back from the camera, and how bright it
+is: the median and 99th percentile of a sample of its pixels, and the share at full white
+([docs/wire.md](docs/wire.md#exposure-and-brightness)). Every ten seconds, when most frames were
+too dark to read tags far (the brightest 1% under 64 of 255) or had their whites clipping (over 1%
+of the frame at 250 or more), Visor's log says so, with the exposure and gain, and what to change:
+the exposure, the gain, or the light.
 
 ## Releases
 

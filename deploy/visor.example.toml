@@ -20,10 +20,15 @@ fps = 60
 min_tag_px = 16
 time_offset_us = 0      # from the spin test
 
-# By the names `v4l2-ctl --list-ctrls` prints, set in this order. UVC exposure is in 100 µs units.
-[camera.controls]
-auto_exposure = 1
-exposure_time_absolute = 10
+# The exposure and gain, set every time the camera opens, after a replug too. Visor has no default
+# of its own: left out, the camera's own automatic exposure and its default gain are put back.
+exposure_us = 1000      # a fixed exposure: the camera's automatic exposure off, then this
+# gain = 40             # the camera's `gain` control, in its own units (`visor cameras` lists its range)
+
+# Any other control, by the name `v4l2-ctl --list-ctrls` prints, set in this order after the exposure
+# and gain. A name the camera doesn't have stops it opening, so `visor check` and the log say which.
+# [camera.controls]
+# power_line_frequency = 2
 
 # The lens calibration, from `tools/calibrate.py solve`, at the frame size the camera runs. OpenCV's
 # model: focal lengths and centre in pixels, and 0, 4, 5 or 8 distortion coefficients (k1, k2, p1,

@@ -34,6 +34,9 @@ class VisorWireTest {
         new float[] {0.5f, -0.25f, 3.9f},
         0.8f);
     frame.addTag(400, 0, 12f, new float[] {1, 2, 3, 4, 5, 6, 7, 8});
+    frame.setExposure(1300);
+    frame.setGain(55);
+    frame.setBrightness(41, 187, 0.0042);
     return frame;
   }
 
@@ -50,6 +53,14 @@ class VisorWireTest {
     assertThat(frame.camera()).isEqualTo(3);
     assertThat(frame.clockSynced()).isTrue();
     assertThat(frame.dequeueTime()).isFalse();
+    assertThat(frame.exposureKnown()).isTrue();
+    assertThat(frame.exposureMicros()).isEqualTo(1000);
+    assertThat(frame.gainKnown()).isTrue();
+    assertThat(frame.gain()).isEqualTo(40);
+    assertThat(frame.autoExposure()).isFalse();
+    assertThat(frame.medianBrightness()).isEqualTo(37);
+    assertThat(frame.highBrightness()).isEqualTo(201);
+    assertThat(frame.clippedShare()).isEqualTo(0.0125);
     assertThat(frame.tagCount()).isEqualTo(2);
 
     assertThat(frame.tagId(0)).isEqualTo(7);
@@ -106,6 +117,29 @@ class VisorWireTest {
     }
   }
 
+  /** The camera choosing its own exposure, with no gain control: neither is known. */
+  @Test
+  void settingsTheCameraDoesntReportArriveUnknown() {
+    VisorFrame sent = built(1, 0);
+    sent.setHeader(1, 1600, 1304, 5, 0, true, false);
+    sent.setAutoExposure();
+    sent.setBrightness(255, 255, 1);
+    ByteBuffer buffer = ByteBuffer.allocate(VisorWire.MAX_BYTES);
+    VisorWire.encode(sent, buffer);
+    buffer.flip();
+
+    VisorFrame received = built(9, 9);
+    VisorWire.decode(buffer, received);
+    assertThat(received.autoExposure()).isTrue();
+    assertThat(received.exposureKnown()).isFalse();
+    assertThat(received.exposureMicros()).isZero();
+    assertThat(received.gainKnown()).isFalse();
+    assertThat(received.clippedShare()).isEqualTo(1.0);
+    assertThatThrownBy(() -> sent.setBrightness(256, 0, 0)).hasMessageContaining("0 to 255");
+    assertThatThrownBy(() -> sent.setBrightness(0, 0, 1.5)).hasMessageContaining("0 to 1");
+    assertThatThrownBy(() -> sent.setExposure(0)).hasMessageContaining("microseconds");
+  }
+
   @Test
   void aFullFrameFitsOnePacket() {
     VisorFrame frame = new VisorFrame();
@@ -118,7 +152,7 @@ class VisorWireTest {
     assertThat(buffer.position()).isEqualTo(VisorWire.MAX_BYTES).isLessThanOrEqualTo(1472);
     assertThatThrownBy(() -> frame.addTag(99, 0, 1, new float[8]))
         .isInstanceOf(IllegalStateException.class)
-        .hasMessageContaining("at most 15");
+        .hasMessageContaining("at most 14");
     assertThatThrownBy(() -> VisorWire.encode(frame, ByteBuffer.allocate(100)))
         .isInstanceOf(BufferOverflowException.class);
   }
@@ -129,12 +163,12 @@ class VisorWireTest {
     byte[] wrongMagic = good.clone();
     wrongMagic[0] ^= (byte) 0xff;
     byte[] tooManyTags = good.clone();
-    tooManyTags[26] = 16;
+    tooManyTags[26] = 15;
     record Case(String name, byte[] bytes, VisorWire.Decoded expected) {}
     List<Case> cases =
         List.of(
             new Case("empty", new byte[0], VisorWire.Decoded.TOO_SHORT),
-            new Case("header cut", Arrays.copyOf(good, 27), VisorWire.Decoded.TOO_SHORT),
+            new Case("header cut", Arrays.copyOf(good, 39), VisorWire.Decoded.TOO_SHORT),
             new Case("wrong magic", wrongMagic, VisorWire.Decoded.NOT_VISOR),
             new Case("too many tags", tooManyTags, VisorWire.Decoded.TOO_MANY_TAGS),
             new Case(
@@ -193,6 +227,14 @@ class VisorWireTest {
     assertThat(actual.camera()).isEqualTo(expected.camera());
     assertThat(actual.clockSynced()).isEqualTo(expected.clockSynced());
     assertThat(actual.dequeueTime()).isEqualTo(expected.dequeueTime());
+    assertThat(actual.exposureKnown()).isEqualTo(expected.exposureKnown());
+    assertThat(actual.exposureMicros()).isEqualTo(expected.exposureMicros());
+    assertThat(actual.gainKnown()).isEqualTo(expected.gainKnown());
+    assertThat(actual.gain()).isEqualTo(expected.gain());
+    assertThat(actual.autoExposure()).isEqualTo(expected.autoExposure());
+    assertThat(actual.medianBrightness()).isEqualTo(expected.medianBrightness());
+    assertThat(actual.highBrightness()).isEqualTo(expected.highBrightness());
+    assertThat(actual.clippedShare()).isEqualTo(expected.clippedShare());
     assertThat(actual.tagCount()).isEqualTo(expected.tagCount());
     for (int tag = 0; tag < expected.tagCount(); tag++) {
       assertThat(actual.tagId(tag)).isEqualTo(expected.tagId(tag));

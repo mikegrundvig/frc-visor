@@ -21,9 +21,10 @@ class VisorConfigFileTest {
         .fps(60)
         .minTagPixels(18)
         .timeOffsetMicros(-1500)
-        .control("auto_exposure", 1)
-        .control("exposure_time_absolute", 10)
-        .control("gain", 0)
+        .exposureMicros(1000)
+        .gain(40)
+        .control("power_line_frequency", 2)
+        .control("brightness", -10)
         .lens(1600, 1304, 1229.75, 1230.125, 801.5, 650.25, -0.3125, 0.125, 1.0e-4, -2.5e-4, -0.03);
     file.camera("back", 3, "/dev/video2", 1280, 800);
     return file;
@@ -52,5 +53,6 @@ class VisorConfigFileTest {
     assertThatThrownBy(() -> VisorConfigFile.forTeam(0)).hasMessageContaining("positive");
     VisorConfigFile.Camera camera = VisorConfigFile.forTeam(1).camera("c", 0, "/dev/video0", 4, 4);
     assertThatThrownBy(() -> camera.lens(4, 4, 1, 1, 2, 2, Double.NaN)).hasMessageContaining("NaN");
+    assertThatThrownBy(() -> camera.exposureMicros(0)).hasMessageContaining("positive time");
   }
 }

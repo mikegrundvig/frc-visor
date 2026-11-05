@@ -41,7 +41,13 @@ pub struct Camera {
     pub min_tag_px: i32,
     /// Added to every capture time: the spin test's result.
     pub time_offset_nanos: i64,
-    /// V4L2 controls by the names `v4l2-ctl --list-ctrls` prints, set in this order.
+    /// A fixed exposure, in microseconds: the camera's automatic exposure off, and this set. None
+    /// leaves the exposure to the camera's own automatic exposure, turned back on.
+    pub exposure_us: Option<u32>,
+    /// The camera's `gain` control, in its own units. None puts back the camera's default.
+    pub gain: Option<i64>,
+    /// V4L2 controls by the names `v4l2-ctl --list-ctrls` prints, set in this order, after the
+    /// exposure and gain.
     pub controls: Vec<(String, i64)>,
     /// The lens calibration at this resolution. Without one, tags are sent with their corners
     /// only, no poses.
@@ -105,6 +111,8 @@ struct CameraFile {
     format: Option<PixelFormat>,
     min_tag_px: Option<i32>,
     time_offset_us: Option<i64>,
+    exposure_us: Option<u32>,
+    gain: Option<i64>,
     #[serde(default)]
     controls: toml::Table,
     lens: Option<LensFile>,
@@ -213,6 +221,13 @@ fn check_camera(file: CameraFile, tag_size_m: f64) -> Result<Camera, ConfigError
             "min_tag_px is from 8 to 30000, not {min_tag_px}"
         )));
     }
+    if let Some(us) = file.exposure_us
+        && !(1..=10_000_000).contains(&us)
+    {
+        return Err(fail(format!(
+            "exposure_us is the exposure in microseconds, 1 to 10000000, not {us}"
+        )));
+    }
     let mut controls = Vec::new();
     for (key, value) in file.controls {
         let value = match value {
@@ -248,6 +263,8 @@ fn check_camera(file: CameraFile, tag_size_m: f64) -> Result<Camera, ConfigError
         format: file.format,
         min_tag_px,
         time_offset_nanos: file.time_offset_us.unwrap_or(0) * 1_000,
+        exposure_us: file.exposure_us,
+        gain: file.gain,
         controls,
         lens,
         tag_size_m,
@@ -278,6 +295,8 @@ mod tests {
             (60, 16, None)
         );
         assert_eq!(camera.time_offset_nanos, 0);
+        // No opinion: the camera's own exposure and gain.
+        assert_eq!((camera.exposure_us, camera.gain), (None, None));
         assert!(camera.controls.is_empty());
         assert_eq!((camera.lens.as_ref(), camera.tag_size_m), (None, 0.1651));
     }
@@ -298,9 +317,11 @@ mod tests {
             format = "YUYV"
             min_tag_px = 24
             time_offset_us = -1500
+            exposure_us = 1000
+            gain = 40
             [camera.controls]
-            auto_exposure = 1
-            exposure_time_absolute = 10
+            power_line_frequency = 2
+            brightness = -10
             exposure_dynamic_framerate = false
             [camera.lens]
             width = 1280
@@ -317,12 +338,13 @@ mod tests {
         assert_eq!(camera.format, Some(PixelFormat::Yuyv));
         assert_eq!(camera.time_offset_nanos, -1_500_000);
         assert_eq!(camera.tag_size_m, 0.15);
+        assert_eq!((camera.exposure_us, camera.gain), (Some(1000), Some(40)));
         let lens = camera.lens.as_ref().unwrap();
         assert_eq!(
             (lens.fx, lens.cy, lens.distortion[4], lens.distortion[5]),
             (1200.0, 651.5, 0.05, 0.0)
         );
-        // In the file's order, which matters: manual exposure has to be on before exposure is set.
+        // In the file's order, which matters where one control depends on another.
         let controls: Vec<(&str, i64)> = camera
             .controls
             .iter()
@@ -331,8 +353,8 @@ mod tests {
         assert_eq!(
             controls,
             [
-                ("auto_exposure", 1),
-                ("exposure_time_absolute", 10),
+                ("power_line_frequency", 2),
+                ("brightness", -10),
                 ("exposure_dynamic_framerate", 0)
             ]
         );
@@ -373,6 +395,14 @@ mod tests {
             (
                 format!("team = 1234\n{CAMERA}[camera.controls]\ngain = \"high\"\n"),
                 "control gain",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}exposure_us = 0\n"),
+                "exposure_us is the exposure in microseconds",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}exposure_us = 1.5\n"),
+                "invalid type",
             ),
             (
                 format!(

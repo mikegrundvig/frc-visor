@@ -94,8 +94,8 @@ enum Command {
         #[arg(long, default_value = DEFAULT_CONFIG)]
         config: PathBuf,
     },
-    /// List the cameras plugged in: each one's device to give Visor, and the formats and sizes it
-    /// offers. Works while the service runs.
+    /// List the cameras plugged in: each one's device to give Visor, the formats and sizes it
+    /// offers, and its controls, with their ranges and defaults. Works while the service runs.
     Cameras,
     /// Print the version, its version ID, and the licence notices.
     Version,
@@ -347,8 +347,8 @@ fn record_configured(
     record(camera, out, count, every)
 }
 
-/// A camera by its device alone, before any robot has configured the board: no controls, no lens.
-/// Its frames are named after the device.
+/// A camera by its device alone, before any robot has configured the board: its own exposure and
+/// gain, no controls, no lens. Its frames are named after the device.
 fn unconfigured(
     device: PathBuf,
     width: u32,
@@ -373,6 +373,8 @@ fn unconfigured(
         },
         min_tag_px: visor::config::DEFAULT_MIN_TAG_PX,
         time_offset_nanos: 0,
+        exposure_us: None,
+        gain: None,
         controls: Vec::new(),
         lens: None,
         tag_size_m: visor::config::DEFAULT_TAG_SIZE_M,
@@ -420,8 +422,8 @@ fn save_frames(
     Ok(())
 }
 
-/// Each camera plugged in: the device to give Visor, and what it offers. A video device that offers
-/// no capture format (a UVC camera's second, metadata, device) is left out.
+/// Each camera plugged in: the device to give Visor, what it offers, and its controls. A video
+/// device that offers no capture format (a UVC camera's second, metadata, device) is left out.
 fn cameras() -> Result<()> {
     let plugged = cameras::plugged(
         Path::new(cameras::BY_ID),
@@ -451,13 +453,32 @@ fn cameras() -> Result<()> {
         for line in offers {
             println!("  {line}");
         }
+        match controls(&each.device) {
+            Ok(lines) if lines.is_empty() => println!("  no controls"),
+            Ok(lines) => {
+                println!("  controls, as v4l2-ctl names them:");
+                for line in lines {
+                    println!("    {line}");
+                }
+            }
+            Err(why) => println!("  its controls can't be read: {why}"),
+        }
     }
     if listed == 0 {
         println!("no cameras plugged in");
     } else {
-        println!("Visor reads GREY and YUYV; give a camera its device and one of these sizes.");
+        println!(
+            "Visor reads GREY and YUYV; give a camera its device and one of these sizes. Its \
+             exposure and gain are set by the robot's configuration (exposure_us, gain)."
+        );
     }
     Ok(())
+}
+
+/// A device's controls: each one's range, default and value now.
+fn controls(device: &Path) -> Result<Vec<String>> {
+    let opened = v4l::Device::with_path(device)?;
+    Ok(visor::settings::describe(&opened)?)
 }
 
 /// A device's capture formats, each with its frame sizes.
@@ -492,8 +513,16 @@ fn check(path: &Path) -> Result<()> {
         config.robot
     );
     for camera in &config.cameras {
+        let exposure = match camera.exposure_us {
+            Some(us) => format!("exposure {:.1} ms", f64::from(us) / 1000.0),
+            None => "the camera's own exposure".to_string(),
+        };
+        let gain = match camera.gain {
+            Some(gain) => format!("gain {gain}"),
+            None => "its own gain".to_string(),
+        };
         println!(
-            "  camera {} {:?}: {}x{} at {} fps, {}, {}",
+            "  camera {} {:?}: {}x{} at {} fps, {}, {exposure}, {gain}, {}",
             camera.index,
             camera.name,
             camera.width,

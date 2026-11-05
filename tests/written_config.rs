@@ -22,19 +22,13 @@ fn the_clients_file_reads_setting_by_setting() {
     assert_eq!((front.width, front.height, front.fps), (1600, 1304, 60));
     assert_eq!(front.min_tag_px, 18);
     assert_eq!(front.time_offset_nanos, -1_500_000);
+    assert_eq!((front.exposure_us, front.gain), (Some(1000), Some(40)));
     let controls: Vec<(&str, i64)> = front
         .controls
         .iter()
         .map(|(k, v)| (k.as_str(), *v))
         .collect();
-    assert_eq!(
-        controls,
-        [
-            ("auto_exposure", 1),
-            ("exposure_time_absolute", 10),
-            ("gain", 0)
-        ]
-    );
+    assert_eq!(controls, [("power_line_frequency", 2), ("brightness", -10)]);
     let lens = front.lens.as_ref().unwrap();
     assert_eq!(
         (lens.fx, lens.fy, lens.cx, lens.cy),
@@ -50,10 +44,11 @@ fn the_clients_file_reads_setting_by_setting() {
         (back.name.as_str(), back.index, back.width, back.height),
         ("back", 3, 1280, 800)
     );
-    // Left out, so Visor's defaults.
+    // Left out, so Visor's defaults: the camera's own exposure and gain.
     assert_eq!(
         (back.fps, back.min_tag_px, back.time_offset_nanos),
         (60, 16, 0)
     );
+    assert_eq!((back.exposure_us, back.gain), (None, None));
     assert!(back.controls.is_empty() && back.lens.is_none());
 }

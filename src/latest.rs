@@ -6,6 +6,7 @@ use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use crate::image::GrayImage;
+use crate::settings::InEffect;
 
 /// A frame as the camera gave it.
 #[derive(Debug)]
@@ -15,6 +16,8 @@ pub struct Captured {
     pub monotonic_nanos: i64,
     /// Whether that's when Visor got it, because the driver gave no timestamp.
     pub dequeue_time: bool,
+    /// The exposure and gain it was taken at.
+    pub settings: InEffect,
 }
 
 /// The slot.
@@ -93,6 +96,7 @@ mod tests {
             image: latest.spare(4, 2),
             monotonic_nanos: at,
             dequeue_time: false,
+            settings: InEffect::default(),
         }
     }
 

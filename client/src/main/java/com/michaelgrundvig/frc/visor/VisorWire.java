@@ -4,7 +4,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 /**
- * Visor's datagram: one frame, little-endian, fixed sizes, no padding; a 28-byte header and 96
+ * Visor's datagram: one frame, little-endian, fixed sizes, no padding; a 40-byte header and 96
  * bytes per tag. The layout is the repository's docs/wire.md, and testdata/golden-frame.bin holds
  * one frame both sides' tests check. Decoding and encoding allocate nothing.
  */
@@ -13,7 +13,7 @@ public final class VisorWire {
   public static final int MAGIC = 0x52534956;
 
   /** The header's size, in bytes. */
-  public static final int HEADER_BYTES = 28;
+  public static final int HEADER_BYTES = 40;
 
   /** Each tag's size, in bytes. */
   public static final int TAG_BYTES = 96;
@@ -23,6 +23,9 @@ public final class VisorWire {
 
   private static final int FLAG_CLOCK_SYNCED = 1;
   private static final int FLAG_DEQUEUE_TIME = 2;
+  private static final int FLAG_EXPOSURE = 4;
+  private static final int FLAG_GAIN = 8;
+  private static final int FLAG_AUTO_EXPOSURE = 16;
   private static final int TAG_FLAG_POSES = 1;
 
   private VisorWire() {}
@@ -71,6 +74,14 @@ public final class VisorWire {
     int flags = datagram.get(start + 25);
     into.clockSynced = (flags & FLAG_CLOCK_SYNCED) != 0;
     into.dequeueTime = (flags & FLAG_DEQUEUE_TIME) != 0;
+    into.exposureKnown = (flags & FLAG_EXPOSURE) != 0;
+    into.gainKnown = (flags & FLAG_GAIN) != 0;
+    into.autoExposure = (flags & FLAG_AUTO_EXPOSURE) != 0;
+    into.exposureMicros = Integer.toUnsignedLong(i32(datagram, start + 28));
+    into.gain = i32(datagram, start + 32);
+    into.medianBrightness = Byte.toUnsignedInt(datagram.get(start + 36));
+    into.highBrightness = Byte.toUnsignedInt(datagram.get(start + 37));
+    into.clipped = u16(datagram, start + 38);
     into.tagCount = tagCount;
     for (int tag = 0; tag < tagCount; tag++) {
       int at = start + HEADER_BYTES + tag * TAG_BYTES;
@@ -107,11 +118,31 @@ public final class VisorWire {
     putU16(out, start + 14, frame.height);
     putI64(out, start + 16, frame.captureNanos);
     out.put(start + 24, (byte) frame.camera);
-    int flags =
-        (frame.clockSynced ? FLAG_CLOCK_SYNCED : 0) | (frame.dequeueTime ? FLAG_DEQUEUE_TIME : 0);
+    int flags = 0;
+    if (frame.clockSynced) {
+      flags |= FLAG_CLOCK_SYNCED;
+    }
+    if (frame.dequeueTime) {
+      flags |= FLAG_DEQUEUE_TIME;
+    }
+    if (frame.exposureKnown) {
+      flags |= FLAG_EXPOSURE;
+    }
+    if (frame.gainKnown) {
+      flags |= FLAG_GAIN;
+    }
+    if (frame.autoExposure) {
+      flags |= FLAG_AUTO_EXPOSURE;
+    }
     out.put(start + 25, (byte) flags);
     out.put(start + 26, (byte) frame.tagCount);
     out.put(start + 27, (byte) 0);
+    // Without its flag, a value's bytes are zero.
+    putI32(out, start + 28, frame.exposureKnown ? (int) frame.exposureMicros : 0);
+    putI32(out, start + 32, frame.gainKnown ? frame.gain : 0);
+    out.put(start + 36, (byte) frame.medianBrightness);
+    out.put(start + 37, (byte) frame.highBrightness);
+    putU16(out, start + 38, frame.clipped);
     for (int tag = 0; tag < frame.tagCount; tag++) {
       int at = start + HEADER_BYTES + tag * TAG_BYTES;
       putU16(out, at, frame.ids[tag]);

@@ -9,11 +9,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use visor::brightness::Brightness;
 use visor::clock::{Clocks, EPOCH_NANOS};
 use visor::config::Camera;
 use visor::latest::{Captured, Latest};
 use visor::napa::Detector;
 use visor::pipeline;
+use visor::settings::InEffect;
 use visor::wire::{Frame, VERSION_ID};
 
 /// Clocks with the robot exactly 1,000 s behind the monotonic clock, synced or not.
@@ -46,6 +48,8 @@ fn camera() -> Camera {
         format: None,
         min_tag_px: 16,
         time_offset_nanos: -2_000_000,
+        exposure_us: Some(1000),
+        gain: Some(40),
         controls: Vec::new(),
         lens: Some(common::rendered_lens()),
         tag_size_m: 0.1651,
@@ -96,8 +100,17 @@ fn captured(scene: &common::Scene, at: i64, dequeue_time: bool) -> Captured {
         image: scene.image.clone(),
         monotonic_nanos: at,
         dequeue_time,
+        settings: AT_1_MS,
     }
 }
+
+/// The capture thread's settings, as read back: 1 ms and gain 40, the camera's automatic exposure
+/// off.
+const AT_1_MS: InEffect = InEffect {
+    exposure_us: Some(1000),
+    gain: Some(40),
+    auto_exposure: Some(false),
+};
 
 #[test]
 fn each_frame_reaches_the_robot_with_its_tags_and_robot_time() {
@@ -120,6 +133,17 @@ fn each_frame_reaches_the_robot_with_its_tags_and_robot_time() {
         );
         assert!(frame.clock_synced);
         assert_eq!(frame.dequeue_time, i == 3);
+        // The exposure and gain it was taken at, and how bright it is, measured from the image.
+        assert_eq!(
+            (frame.exposure_us, frame.gain, frame.auto_exposure),
+            (Some(1000), Some(40), false)
+        );
+        assert_eq!(
+            frame.brightness,
+            Brightness::of(&scene.image),
+            "{}",
+            scene.name
+        );
         assert_eq!(
             frame.tags.len(),
             scene.tags.len(),

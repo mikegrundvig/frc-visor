@@ -1,20 +1,25 @@
 //! The datagram Visor sends the robot for each frame. The layout is in docs/wire.md: little-endian,
-//! fixed sizes, no padding, a 28-byte header and 96 bytes per tag.
+//! fixed sizes, no padding, a 40-byte header and 96 bytes per tag.
 
 use std::fmt;
 
+use crate::brightness::Brightness;
+
 /// "VISR" in byte order, so a stray packet on the port is dropped, not misread.
 pub const MAGIC: u32 = 0x5253_4956;
-pub const HEADER_BYTES: usize = 28;
+pub const HEADER_BYTES: usize = 40;
 pub const TAG_BYTES: usize = 96;
 /// The most tags one frame carries: as many as fit one Ethernet packet's 1,472 bytes of UDP payload.
-pub const MAX_TAGS: usize = 15;
+pub const MAX_TAGS: usize = 14;
 
 /// This build's version ID, from its version: 2026.11.2 is 20261102.
 pub const VERSION_ID: u32 = parse_version_id(env!("VISOR_VERSION_ID"));
 
 const FLAG_CLOCK_SYNCED: u8 = 1 << 0;
 const FLAG_DEQUEUE_TIME: u8 = 1 << 1;
+const FLAG_EXPOSURE: u8 = 1 << 2;
+const FLAG_GAIN: u8 = 1 << 3;
+const FLAG_AUTO_EXPOSURE: u8 = 1 << 4;
 const TAG_FLAG_POSES: u8 = 1 << 0;
 
 /// One frame from one camera, and every tag NAPA found in it.
@@ -33,6 +38,15 @@ pub struct Frame {
     pub clock_synced: bool,
     /// Whether the capture time is when Visor got the frame, because the driver gave no timestamp.
     pub dequeue_time: bool,
+    /// The exposure the image was taken at, in microseconds, as read back from the camera; none
+    /// while the camera chose it (its automatic exposure on), or where it couldn't be read.
+    pub exposure_us: Option<u32>,
+    /// The camera's `gain` control as read back; none where it has none.
+    pub gain: Option<i32>,
+    /// Whether the camera's own automatic exposure was on.
+    pub auto_exposure: bool,
+    /// How bright the image is.
+    pub brightness: Brightness,
     pub tags: Vec<Tag>,
 }
 
@@ -107,6 +121,11 @@ impl Frame {
         out.push(self.flags());
         out.push(self.tags.len() as u8);
         out.push(0);
+        out.extend_from_slice(&self.exposure_us.unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(&self.gain.unwrap_or(0).to_le_bytes());
+        out.push(self.brightness.median);
+        out.push(self.brightness.high);
+        out.extend_from_slice(&self.brightness.clipped.to_le_bytes());
         for tag in &self.tags {
             out.extend_from_slice(&tag.id.to_le_bytes());
             out.push(tag.hamming);
@@ -151,6 +170,13 @@ impl Frame {
         let flags = read.u8();
         let tag_count = read.u8() as usize;
         read.u8();
+        let exposure_us = read.u32();
+        let gain = read.i32();
+        let brightness = Brightness {
+            median: read.u8(),
+            high: read.u8(),
+            clipped: read.u16(),
+        };
         if tag_count > MAX_TAGS {
             return Err(WireError::TooManyTags(tag_count));
         }
@@ -194,6 +220,10 @@ impl Frame {
             camera,
             clock_synced: flags & FLAG_CLOCK_SYNCED != 0,
             dequeue_time: flags & FLAG_DEQUEUE_TIME != 0,
+            exposure_us: (flags & FLAG_EXPOSURE != 0).then_some(exposure_us),
+            gain: (flags & FLAG_GAIN != 0).then_some(gain),
+            auto_exposure: flags & FLAG_AUTO_EXPOSURE != 0,
+            brightness,
             tags,
         })
     }
@@ -205,6 +235,15 @@ impl Frame {
         }
         if self.dequeue_time {
             flags |= FLAG_DEQUEUE_TIME;
+        }
+        if self.exposure_us.is_some() {
+            flags |= FLAG_EXPOSURE;
+        }
+        if self.gain.is_some() {
+            flags |= FLAG_GAIN;
+        }
+        if self.auto_exposure {
+            flags |= FLAG_AUTO_EXPOSURE;
         }
         flags
     }
@@ -232,6 +271,9 @@ impl Reader<'_> {
     }
     fn u32(&mut self) -> u32 {
         u32::from_le_bytes(self.take())
+    }
+    fn i32(&mut self) -> i32 {
+        i32::from_le_bytes(self.take())
     }
     fn i64(&mut self) -> i64 {
         i64::from_le_bytes(self.take())
@@ -267,6 +309,14 @@ mod tests {
             camera: 3,
             clock_synced: true,
             dequeue_time: false,
+            exposure_us: Some(1000),
+            gain: Some(40),
+            auto_exposure: false,
+            brightness: Brightness {
+                median: 37,
+                high: 201,
+                clipped: 125,
+            },
             tags: vec![
                 Tag {
                     id: 7,
@@ -325,6 +375,17 @@ mod tests {
         empty.dequeue_time = true;
         empty.capture_nanos = -5;
         cases.push(empty);
+        // The camera's own exposure, and no gain control.
+        let mut automatic = golden();
+        automatic.exposure_us = None;
+        automatic.gain = None;
+        automatic.auto_exposure = true;
+        automatic.brightness = Brightness {
+            median: 255,
+            high: 255,
+            clipped: 10_000,
+        };
+        cases.push(automatic);
         let mut full = golden();
         full.tags = vec![golden().tags[0]; MAX_TAGS];
         cases.push(full);
@@ -341,22 +402,22 @@ mod tests {
         let mut wrong_magic = good.clone();
         wrong_magic[0] ^= 0xff;
         let mut too_many = good.clone();
-        too_many[26] = 16;
+        too_many[26] = 15;
         let cases: Vec<(&str, Vec<u8>, WireError)> = vec![
             ("empty", vec![], WireError::TooShort(0)),
-            ("header cut", good[..27].to_vec(), WireError::TooShort(27)),
+            ("header cut", good[..39].to_vec(), WireError::TooShort(39)),
             (
                 "wrong magic",
                 wrong_magic,
                 WireError::NotVisor(MAGIC ^ 0xff),
             ),
-            ("too many tags", too_many, WireError::TooManyTags(16)),
+            ("too many tags", too_many, WireError::TooManyTags(15)),
             (
                 "a tag cut off",
                 good[..good.len() - 1].to_vec(),
                 WireError::WrongLength {
-                    expected: 220,
-                    actual: 219,
+                    expected: 232,
+                    actual: 231,
                 },
             ),
         ];

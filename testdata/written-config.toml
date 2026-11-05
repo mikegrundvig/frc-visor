@@ -10,10 +10,11 @@ height = 1304
 fps = 60
 min_tag_px = 18
 time_offset_us = -1500
+exposure_us = 1000
+gain = 40
 [camera.controls]
-"auto_exposure" = 1
-"exposure_time_absolute" = 10
-"gain" = 0
+"power_line_frequency" = 2
+"brightness" = -10
 [camera.lens]
 width = 1600
 height = 1304
