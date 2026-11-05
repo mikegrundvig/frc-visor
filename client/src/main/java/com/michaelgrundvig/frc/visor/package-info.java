@@ -9,6 +9,8 @@
  *   <li>{@link com.michaelgrundvig.frc.visor.NtpResponder} keeps the coprocessors' clocks on the
  *       robot's, through chrony.
  *   <li>{@link com.michaelgrundvig.frc.visor.VisorWire} is the datagram's layout.
+ *   <li>{@link com.michaelgrundvig.frc.visor.VisorStream} names a camera's live view on its
+ *       coprocessor.
  * </ul>
  */
 @NullMarked

@@ -25,6 +25,13 @@ time_offset_us = 0      # from the spin test
 exposure_us = 1000      # a fixed exposure: the camera's automatic exposure off, then this
 # gain = 40             # the camera's `gain` control, in its own units (`visor cameras` lists its range)
 
+# The live view, on port 5809 (/stream/<name>): its size as a share of the camera's, its frames a
+# second (at most the camera's), and its JPEG quality, 1 to 100. Left out, these: 800 x 652 of a
+# 1600 x 1304 camera, about 2 Mbit/s while someone watches, and nothing while no one does.
+# stream_scale = 0.5
+# stream_fps = 10
+# stream_quality = 60
+
 # Any other control, by the name `v4l2-ctl --list-ctrls` prints, set in this order after the exposure
 # and gain. A name the camera doesn't have stops it opening, so `visor check` and the log say which.
 # [camera.controls]

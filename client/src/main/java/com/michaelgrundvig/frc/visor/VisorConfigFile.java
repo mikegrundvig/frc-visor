@@ -18,6 +18,7 @@ import org.jspecify.annotations.Nullable;
  *     .fps(60)
  *     .exposureMicros(1000)
  *     .gain(40)
+ *     .stream(0.5, 10, 60)
  *     .lens(1600, 1304, 1229.7, 1229.9, 801.2, 650.4, -0.31, 0.12, 0.0004, -0.0002, -0.02);
  * String toml = file.toToml();
  * }</pre>
@@ -70,6 +71,9 @@ public final class VisorConfigFile {
     private long timeOffsetMicros;
     private long exposureMicros;
     private @Nullable Long gain;
+    private double streamScale;
+    private int streamFps;
+    private int streamQuality;
     private final Map<String, Long> controls = new LinkedHashMap<>();
     private double[] lens = new double[0];
 
@@ -117,6 +121,32 @@ public final class VisorConfigFile {
      */
     public Camera gain(long gain) {
       this.gain = gain;
+      return this;
+    }
+
+    /**
+     * The camera's live view ({@link VisorStream}). Without one, Visor's own: half the camera's
+     * size, 10 a second, quality 60.
+     *
+     * @param scale its size as a share of the camera's, across and down: 0.5 is half
+     * @param fps pictures a second while someone watches, at most the camera's
+     * @param quality JPEG quality, 1 to 100
+     */
+    public Camera stream(double scale, int fps, int quality) {
+      if (!(scale > 0 && scale <= 1)) {
+        throw new IllegalArgumentException(
+            "a live view's scale is a share of the camera's size, above 0 and at most 1, not "
+                + scale);
+      }
+      if (fps <= 0) {
+        throw new IllegalArgumentException("a live view's rate is positive, not " + fps);
+      }
+      if (quality < 1 || quality > 100) {
+        throw new IllegalArgumentException("a JPEG quality is 1 to 100, not " + quality);
+      }
+      this.streamScale = scale;
+      this.streamFps = fps;
+      this.streamQuality = quality;
       return this;
     }
 
@@ -180,6 +210,11 @@ public final class VisorConfigFile {
       Long gain = this.gain;
       if (gain != null) {
         out.append("gain = ").append(gain).append('\n');
+      }
+      if (streamFps > 0) {
+        out.append("stream_scale = ").append(number(streamScale)).append('\n');
+        out.append("stream_fps = ").append(streamFps).append('\n');
+        out.append("stream_quality = ").append(streamQuality).append('\n');
       }
       if (!controls.isEmpty()) {
         out.append("[camera.controls]\n");

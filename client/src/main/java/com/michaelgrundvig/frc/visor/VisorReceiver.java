@@ -2,7 +2,9 @@ package com.michaelgrundvig.frc.visor;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
@@ -116,7 +118,7 @@ public final class VisorReceiver implements AutoCloseable {
    */
   public void offer(ByteBuffer datagram) {
     requireInMemory();
-    accept(datagram);
+    accept(datagram, null);
   }
 
   /**
@@ -128,7 +130,7 @@ public final class VisorReceiver implements AutoCloseable {
     encoded.clear();
     VisorWire.encode(frame, encoded);
     encoded.flip();
-    accept(encoded);
+    accept(encoded, null);
   }
 
   /** Frames delivered to the ring. */
@@ -195,8 +197,9 @@ public final class VisorReceiver implements AutoCloseable {
     ByteBuffer buffer = ByteBuffer.allocateDirect(VisorWire.MAX_BYTES + 1);
     while (channel.isOpen()) {
       buffer.clear();
+      SocketAddress from;
       try {
-        channel.receive(buffer);
+        from = channel.receive(buffer);
       } catch (ClosedChannelException e) {
         return;
       } catch (IOException e) {
@@ -205,12 +208,16 @@ public final class VisorReceiver implements AutoCloseable {
         continue;
       }
       buffer.flip();
-      accept(buffer);
+      // The channel gives the same address object while the sender is the same: no allocation.
+      accept(buffer, from instanceof InetSocketAddress inet ? inet.getAddress() : null);
     }
   }
 
-  /** Decodes one datagram into the ring, and counts what it was. The writer's alone. */
-  private void accept(ByteBuffer datagram) {
+  /**
+   * Decodes one datagram into the ring, with the address it came from, and counts what it was. The
+   * writer's alone.
+   */
+  private void accept(ByteBuffer datagram, @Nullable InetAddress sender) {
     VisorFrame slot = ring.claim();
     if (slot == null) {
       dropped++;
@@ -220,6 +227,7 @@ public final class VisorReceiver implements AutoCloseable {
       malformed++;
       return;
     }
+    slot.sender = sender;
     if (slot.versionId != VisorVersion.ID) {
       lastOtherVersionId = slot.versionId;
       otherVersion++;

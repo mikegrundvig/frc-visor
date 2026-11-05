@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
@@ -44,6 +45,32 @@ class VisorReceiverTest {
       assertThat(receiver.poll(frame)).isFalse();
       assertThat(receiver.frames()).isEqualTo(3);
     }
+  }
+
+  /**
+   * A frame says which coprocessor sent it, where its camera's live view is; one in memory, none.
+   */
+  @Test
+  void aFrameSaysWhereItCameFrom() throws IOException, InterruptedException {
+    try (VisorReceiver receiver = VisorReceiver.listen(0);
+        DatagramChannel visor = DatagramChannel.open()) {
+      ByteBuffer bytes = ByteBuffer.allocate(VisorWire.MAX_BYTES);
+      VisorWire.encode(VisorWireTest.built(0, 1), bytes);
+      bytes.flip();
+      visor.send(bytes, new InetSocketAddress("127.0.0.1", receiver.port()));
+      VisorFrame frame = new VisorFrame();
+      assertThat(pollWithin(receiver, frame)).isTrue();
+      InetAddress sender = java.util.Objects.requireNonNull(frame.sender());
+      assertThat(sender.getHostAddress()).isEqualTo("127.0.0.1");
+      // Decoded again from bytes alone, it says nothing of where.
+      VisorWire.decode(VisorWireTest.golden(), frame);
+      assertThat(frame.sender()).isNull();
+    }
+    VisorReceiver simulated = VisorReceiver.inMemory();
+    simulated.offer(VisorWireTest.built(0, 1));
+    VisorFrame frame = new VisorFrame();
+    assertThat(simulated.poll(frame)).isTrue();
+    assertThat(frame.sender()).isNull();
   }
 
   @Test

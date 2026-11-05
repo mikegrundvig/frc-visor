@@ -507,6 +507,7 @@ mod tests {
             controls: Vec::new(),
             lens: None,
             tag_size_m: 0.1651,
+            stream: crate::config::Stream::default(),
         }
     }
 

@@ -17,12 +17,14 @@ class VisorConfigFileTest {
   /** Every setting, an awkward name and a value only an exponent writes. */
   static VisorConfigFile written() {
     VisorConfigFile file = VisorConfigFile.forTeam(1234);
-    file.camera("front \"left\" \\ 1", 0, "/dev/v4l/by-id/usb-cam-video-index0", 1600, 1304)
+    file
+        .camera("front \"left\" \\ 1", 0, "/dev/v4l/by-id/usb-cam-video-index0", 1600, 1304)
         .fps(60)
         .minTagPixels(18)
         .timeOffsetMicros(-1500)
         .exposureMicros(1000)
         .gain(40)
+        .stream(0.25, 15, 80)
         .control("power_line_frequency", 2)
         .control("brightness", -10)
         .lens(1600, 1304, 1229.75, 1230.125, 801.5, 650.25, -0.3125, 0.125, 1.0e-4, -2.5e-4, -0.03);
@@ -54,5 +56,9 @@ class VisorConfigFileTest {
     VisorConfigFile.Camera camera = VisorConfigFile.forTeam(1).camera("c", 0, "/dev/video0", 4, 4);
     assertThatThrownBy(() -> camera.lens(4, 4, 1, 1, 2, 2, Double.NaN)).hasMessageContaining("NaN");
     assertThatThrownBy(() -> camera.exposureMicros(0)).hasMessageContaining("positive time");
+    assertThatThrownBy(() -> camera.stream(0, 10, 60)).hasMessageContaining("not 0.0");
+    assertThatThrownBy(() -> camera.stream(1.5, 10, 60)).hasMessageContaining("at most 1");
+    assertThatThrownBy(() -> camera.stream(0.5, 0, 60)).hasMessageContaining("positive");
+    assertThatThrownBy(() -> camera.stream(0.5, 10, 101)).hasMessageContaining("1 to 100");
   }
 }

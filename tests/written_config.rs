@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use visor::config::Config;
+use visor::config::{Config, Stream};
 
 #[test]
 fn the_clients_file_reads_setting_by_setting() {
@@ -23,6 +23,14 @@ fn the_clients_file_reads_setting_by_setting() {
     assert_eq!(front.min_tag_px, 18);
     assert_eq!(front.time_offset_nanos, -1_500_000);
     assert_eq!((front.exposure_us, front.gain), (Some(1000), Some(40)));
+    assert_eq!(
+        front.stream,
+        Stream {
+            scale: 0.25,
+            fps: 15,
+            quality: 80
+        }
+    );
     let controls: Vec<(&str, i64)> = front
         .controls
         .iter()
@@ -50,5 +58,6 @@ fn the_clients_file_reads_setting_by_setting() {
         (60, 16, 0)
     );
     assert_eq!((back.exposure_us, back.gain), (None, None));
+    assert_eq!(back.stream, Stream::default());
     assert!(back.controls.is_empty() && back.lens.is_none());
 }

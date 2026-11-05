@@ -1,5 +1,8 @@
 package com.michaelgrundvig.frc.visor;
 
+import java.net.InetAddress;
+import org.jspecify.annotations.Nullable;
+
 /**
  * One frame from one of Visor's cameras, and the tags in it.
  *
@@ -48,6 +51,9 @@ public final class VisorFrame {
 
   long detectMicros;
   long dropped;
+
+  /** The coprocessor it came from; null for a frame offered in memory. Not on the wire. */
+  @Nullable InetAddress sender;
 
   int tagCount;
   final int[] ids = new int[MAX_TAGS];
@@ -165,6 +171,15 @@ public final class VisorFrame {
     return dropped;
   }
 
+  /**
+   * The coprocessor's address the frame came from: where its camera's live view is served ({@link
+   * VisorStream}). Null for a frame offered in memory, as a simulation's are, and for one decoded
+   * from bytes alone.
+   */
+  public @Nullable InetAddress sender() {
+    return sender;
+  }
+
   /** How many tags are in the frame. */
   public int tagCount() {
     return tagCount;
@@ -259,6 +274,7 @@ public final class VisorFrame {
     clipped = other.clipped;
     detectMicros = other.detectMicros;
     dropped = other.dropped;
+    sender = other.sender;
     tagCount = other.tagCount;
     int n = other.tagCount;
     System.arraycopy(other.ids, 0, ids, 0, n);

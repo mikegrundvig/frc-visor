@@ -12,6 +12,9 @@ min_tag_px = 18
 time_offset_us = -1500
 exposure_us = 1000
 gain = 40
+stream_scale = 0.25
+stream_fps = 15
+stream_quality = 80
 [camera.controls]
 "power_line_frequency" = 2
 "brightness" = -10

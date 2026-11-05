@@ -80,8 +80,9 @@ impl Latest {
     /// Gives back a taken frame's image for reuse.
     pub fn recycle(&self, image: GrayImage) {
         let mut state = self.state.lock().unwrap();
-        // Two spares cover one in the camera's hands and one waiting.
-        if state.spares.len() < 2 {
+        // Two spares cover one in the camera's hands and one waiting; the third, one in the live
+        // view's.
+        if state.spares.len() < 3 {
             state.spares.push(image);
         }
     }

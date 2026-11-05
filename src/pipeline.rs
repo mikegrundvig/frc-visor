@@ -2,7 +2,8 @@
 //! it with robot time and sends it, with the exposure and gain it was taken at. Every frame is sent,
 //! with or without tags, so silence means the camera is down. Each frame also says how long its
 //! detection took and how many of the camera's frames were dropped so far, from which the robot
-//! works out the camera's frame rate, drops and load.
+//! works out the camera's frame rate, drops and load. Once a frame is sent, it goes to the camera's
+//! live view if the view asked for one, without waiting ([`crate::stream`]).
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,18 +19,21 @@ use crate::lens::Lens;
 use crate::napa::{Detection, Detector};
 use crate::pose::{TagPose, solve_square};
 use crate::settings::InEffect;
+use crate::stream::feed::{Detected, Feed};
 use crate::wire::{self, Frame, MAX_TAGS, Pose, Tag};
 
 /// How often each camera logs its numbers.
 const REPORT_EVERY: Duration = Duration::from_secs(10);
 
-/// Detects and sends until `stop` is set. `send` gets each frame's bytes.
+/// Detects and sends until `stop` is set. `send` gets each frame's bytes; `view` gets a frame after
+/// it's sent, when the live view asks.
 pub fn run(
     camera: &Camera,
     latest: &Latest,
     detector: &mut Detector,
     clocks: &impl Clocks,
     send: &mut impl FnMut(&[u8]) -> io::Result<()>,
+    view: &Feed,
     stop: &AtomicBool,
 ) {
     let mut sequence: u32 = 0;
@@ -75,11 +79,24 @@ pub fn run(
             dropped: latest.dropped() as u32,
             tags,
         };
-        latest.recycle(captured.image);
         frame.encode(&mut bytes);
         let sent = send(&bytes).is_ok();
         numbers.add(detect_time, frame.tags.len(), sent, frame.clock_synced);
         numbers.light(brightness, settings);
+        let mut image = Some(captured.image);
+        if view.wants() {
+            image = view.give(Detected {
+                image: image.take().expect("the frame's image"),
+                tags: frame.tags,
+                settings,
+                brightness,
+                sequence,
+                monotonic_nanos: captured.monotonic_nanos,
+            });
+        }
+        if let Some(image) = image {
+            latest.recycle(image);
+        }
         sequence = sequence.wrapping_add(1);
     }
 }

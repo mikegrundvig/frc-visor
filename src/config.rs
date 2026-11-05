@@ -15,6 +15,14 @@ pub const DEFAULT_FPS: u32 = 60;
 pub const DEFAULT_MIN_TAG_PX: i32 = 16;
 /// An FRC AprilTag's black square since 2024: 6.5 inches.
 pub const DEFAULT_TAG_SIZE_M: f64 = 0.1651;
+/// The live view's size, as a share of the camera's across and down: 800 x 652 of a 1600 x 1304
+/// camera, enough to aim it and read its tags' IDs.
+pub const DEFAULT_STREAM_SCALE: f64 = 0.5;
+/// The live view's frames a second: enough to aim a camera by, at a sixth of a 60 fps camera's.
+pub const DEFAULT_STREAM_FPS: u32 = 10;
+/// The live view's JPEG quality, 1 to 100: its tags' edges and IDs stay sharp, at 20 to 25 KB a
+/// picture of 800 x 652, about 2 Mbit/s at 10 a second.
+pub const DEFAULT_STREAM_QUALITY: u8 = 60;
 
 /// The checked configuration.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +62,37 @@ pub struct Camera {
     pub lens: Option<Lens>,
     /// The side of the tags' black square, in metres.
     pub tag_size_m: f64,
+    /// Its live view, served over HTTP while someone watches.
+    pub stream: Stream,
+}
+
+/// A camera's live view: its frames, made smaller, as JPEGs ([`crate::stream`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stream {
+    /// Its size as a share of the camera's, across and down: 0.5 is half.
+    pub scale: f64,
+    /// Frames a second, at most the camera's.
+    pub fps: u32,
+    /// JPEG quality, 1 to 100: higher is sharper, and more bytes a frame.
+    pub quality: u8,
+}
+
+impl Default for Stream {
+    fn default() -> Stream {
+        Stream {
+            scale: DEFAULT_STREAM_SCALE,
+            fps: DEFAULT_STREAM_FPS,
+            quality: DEFAULT_STREAM_QUALITY,
+        }
+    }
+}
+
+impl Stream {
+    /// The view's size for a camera's frames of this size: at least a pixel each way.
+    pub fn size(&self, width: u32, height: u32) -> (u32, u32) {
+        let scaled = |n: u32| ((f64::from(n) * self.scale).round() as u32).max(1);
+        (scaled(width), scaled(height))
+    }
 }
 
 /// The pixel formats Visor reads.
@@ -113,6 +152,9 @@ struct CameraFile {
     time_offset_us: Option<i64>,
     exposure_us: Option<u32>,
     gain: Option<i64>,
+    stream_scale: Option<f64>,
+    stream_fps: Option<u32>,
+    stream_quality: Option<u8>,
     #[serde(default)]
     controls: toml::Table,
     lens: Option<LensFile>,
@@ -228,6 +270,8 @@ fn check_camera(file: CameraFile, tag_size_m: f64) -> Result<Camera, ConfigError
             "exposure_us is the exposure in microseconds, 1 to 10000000, not {us}"
         )));
     }
+    let stream =
+        check_stream(file.stream_scale, file.stream_fps, file.stream_quality, fps).map_err(fail)?;
     let mut controls = Vec::new();
     for (key, value) in file.controls {
         let value = match value {
@@ -268,7 +312,41 @@ fn check_camera(file: CameraFile, tag_size_m: f64) -> Result<Camera, ConfigError
         controls,
         lens,
         tag_size_m,
+        stream,
         name,
+    })
+}
+
+/// The live view's settings, each Visor's default where it's left out.
+fn check_stream(
+    scale: Option<f64>,
+    stream_fps: Option<u32>,
+    quality: Option<u8>,
+    fps: u32,
+) -> Result<Stream, String> {
+    let defaults = Stream::default();
+    let scale = scale.unwrap_or(defaults.scale);
+    if !(0.05..=1.0).contains(&scale) {
+        return Err(format!(
+            "stream_scale is the live view's share of the camera's size, 0.05 to 1, not {scale}"
+        ));
+    }
+    let stream_fps = stream_fps.unwrap_or(defaults.fps.min(fps));
+    if !(1..=fps).contains(&stream_fps) {
+        return Err(format!(
+            "stream_fps is from 1 to the camera's fps ({fps}), not {stream_fps}"
+        ));
+    }
+    let quality = quality.unwrap_or(defaults.quality);
+    if !(1..=100).contains(&quality) {
+        return Err(format!(
+            "stream_quality is a JPEG quality, 1 to 100, not {quality}"
+        ));
+    }
+    Ok(Stream {
+        scale,
+        fps: stream_fps,
+        quality,
     })
 }
 
@@ -299,6 +377,16 @@ mod tests {
         assert_eq!((camera.exposure_us, camera.gain), (None, None));
         assert!(camera.controls.is_empty());
         assert_eq!((camera.lens.as_ref(), camera.tag_size_m), (None, 0.1651));
+        // Half the camera's size, at 10 fps.
+        assert_eq!(camera.stream, Stream::default());
+        assert_eq!(camera.stream.size(1600, 1304), (800, 652));
+        assert_eq!((camera.stream.fps, camera.stream.quality), (10, 60));
+    }
+
+    #[test]
+    fn a_slow_camera_s_live_view_is_at_most_its_rate() {
+        let config = Config::parse(&format!("team = 1234\n{CAMERA}fps = 5\n")).unwrap();
+        assert_eq!(config.cameras[0].stream.fps, 5);
     }
 
     #[test]
@@ -319,6 +407,9 @@ mod tests {
             time_offset_us = -1500
             exposure_us = 1000
             gain = 40
+            stream_scale = 0.25
+            stream_fps = 15
+            stream_quality = 80
             [camera.controls]
             power_line_frequency = 2
             brightness = -10
@@ -339,6 +430,15 @@ mod tests {
         assert_eq!(camera.time_offset_nanos, -1_500_000);
         assert_eq!(camera.tag_size_m, 0.15);
         assert_eq!((camera.exposure_us, camera.gain), (Some(1000), Some(40)));
+        assert_eq!(
+            camera.stream,
+            Stream {
+                scale: 0.25,
+                fps: 15,
+                quality: 80
+            }
+        );
+        assert_eq!(camera.stream.size(1280, 720), (320, 180));
         let lens = camera.lens.as_ref().unwrap();
         assert_eq!(
             (lens.fx, lens.cy, lens.distortion[4], lens.distortion[5]),
@@ -419,6 +519,26 @@ mod tests {
             (
                 format!("tag_size_m = 0.0\nteam = 1234\n{CAMERA}"),
                 "tag_size_m",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}stream_scale = 2.0\n"),
+                "stream_scale is the live view's share of the camera's size, 0.05 to 1, not 2",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}stream_fps = 90\n"),
+                "stream_fps is from 1 to the camera's fps (60), not 90",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}stream_fps = 0\n"),
+                "stream_fps is from 1",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}stream_quality = 0\n"),
+                "stream_quality is a JPEG quality, 1 to 100, not 0",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}stream_quality = 101\n"),
+                "stream_quality is a JPEG quality",
             ),
         ];
         for (text, why) in cases {

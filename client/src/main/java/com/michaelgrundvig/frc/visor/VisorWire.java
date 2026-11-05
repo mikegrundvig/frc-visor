@@ -65,6 +65,8 @@ public final class VisorWire {
     if (length != HEADER_BYTES + tagCount * TAG_BYTES) {
       return Decoded.WRONG_LENGTH;
     }
+    // The bytes don't say where they came from: the receiver sets it.
+    into.sender = null;
     into.versionId = i32(datagram, start + 4);
     into.sequence = Integer.toUnsignedLong(i32(datagram, start + 8));
     into.width = u16(datagram, start + 12);

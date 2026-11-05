@@ -1,8 +1,9 @@
 //! The `visor` command.
 
-use std::net::UdpSocket;
+use std::net::{Ipv4Addr, TcpListener, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,6 +19,9 @@ use visor::latest::Latest;
 use visor::lens::Lens;
 use visor::napa::Detector;
 use visor::pose::solve_square;
+use visor::stream::feed::Feed;
+use visor::stream::view::{self, View};
+use visor::stream::{self, server};
 use visor::{capture, pipeline, wire};
 
 /// Where the robot's deploy puts the configuration, beside the program (deploy/visor.service).
@@ -157,8 +161,8 @@ fn main() -> ExitCode {
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// Two threads per camera, until the process is stopped. A thread that panics ends the process, and
-/// systemd restarts it.
+/// Three threads per camera (capture, detect, live view) and the live view's server, until the
+/// process is stopped. A thread that panics ends the process, and systemd restarts it.
 fn run(path: &Path) -> Result<()> {
     let config = Config::load(path)?;
     info!(
@@ -177,16 +181,36 @@ fn run(path: &Path) -> Result<()> {
         sockets.push(socket);
     }
     let slots: Vec<Latest> = config.cameras.iter().map(|_| Latest::new()).collect();
+    let feeds: Vec<Feed> = config.cameras.iter().map(|_| Feed::new()).collect();
+    let views: Arc<Vec<View>> =
+        Arc::new(config.cameras.iter().map(|c| View::new(&c.name)).collect());
+    // Without its port, Visor detects all the same.
+    let listener = match TcpListener::bind((Ipv4Addr::UNSPECIFIED, stream::PORT)) {
+        Ok(listener) => Some(listener),
+        Err(why) => {
+            error!(
+                "the live view can't have port {} ({why}): detection goes on without it",
+                stream::PORT
+            );
+            None
+        }
+    };
     let stop = AtomicBool::new(false);
     let stop = &stop;
     thread::scope(|scope| {
+        if let Some(listener) = listener {
+            let views = Arc::clone(&views);
+            scope.spawn(move || server::run(listener, views, server::Options::default(), stop));
+        }
         let cameras = config
             .cameras
             .iter()
             .zip(detectors)
             .zip(&slots)
-            .zip(sockets);
-        for (((camera, mut detector), latest), socket) in cameras {
+            .zip(sockets)
+            .zip(&feeds)
+            .zip(views.iter());
+        for (((((camera, mut detector), latest), socket), feed), shown) in cameras {
             scope.spawn(move || capture::run(camera, latest, &SystemClocks, stop));
             scope.spawn(move || {
                 let mut send = |bytes: &[u8]| socket.send(bytes).map(|_| ());
@@ -196,9 +220,11 @@ fn run(path: &Path) -> Result<()> {
                     &mut detector,
                     &SystemClocks,
                     &mut send,
+                    feed,
                     stop,
                 )
             });
+            scope.spawn(move || view::run(camera, feed, latest, shown, stop));
         }
     });
     Ok(())
@@ -378,6 +404,7 @@ fn unconfigured(
         controls: Vec::new(),
         lens: None,
         tag_size_m: visor::config::DEFAULT_TAG_SIZE_M,
+        stream: visor::config::Stream::default(),
     }
 }
 
@@ -521,8 +548,10 @@ fn check(path: &Path) -> Result<()> {
             Some(gain) => format!("gain {gain}"),
             None => "its own gain".to_string(),
         };
+        let (width, height) = camera.stream.size(camera.width, camera.height);
         println!(
-            "  camera {} {:?}: {}x{} at {} fps, {}, {exposure}, {gain}, {}",
+            "  camera {} {:?}: {}x{} at {} fps, {}, {exposure}, {gain}, {}; live view {width}x{height} \
+             at {} fps, quality {}",
             camera.index,
             camera.name,
             camera.width,
@@ -533,9 +562,15 @@ fn check(path: &Path) -> Result<()> {
                 "lens calibrated"
             } else {
                 "no lens: corners only"
-            }
+            },
+            camera.stream.fps,
+            camera.stream.quality
         );
     }
+    println!(
+        "  live view on port {}: /stream/<camera>, and / lists them",
+        stream::PORT
+    );
     Ok(())
 }
 

@@ -15,8 +15,8 @@ NAPA finds tags much faster than WPILib's AprilTag detector, and much farther aw
 detector at decimate 2 found them to about 3 m. On a
 coprocessor that range is the difference between seeing a tag from most of the field and not.
 
-Visor is deliberately small: capture, detect, solve, send. No web UI, no NetworkTables, no field
-layout, no multi-tag solving.
+Visor is deliberately small: capture, detect, solve, send. No settings UI, no NetworkTables, no
+field layout, no multi-tag solving. Its one page is each camera's live view, to aim and focus by.
 
 ## How it works
 
@@ -36,6 +36,10 @@ layout, no multi-tag solving.
   camera's frame rate, drops and load ([docs/wire.md](docs/wire.md#the-cameras-health)). Every
   10 s Visor's journal says the same, one line per camera: `front: 59.8 fps, 0 dropped, detect 4.2
   ms mean, 9.8 ms worst, ...`.
+
+- **Live view.** Each camera's frames, made smaller, with its tags outlined and a line of its
+  numbers, over HTTP on port 5809 while anyone watches: nothing is made while no one does, and
+  detection never waits for it ([below](#the-live-view)).
 
 ## Building
 
@@ -117,6 +121,25 @@ is: the median and 99th percentile of a sample of its pixels, and the share at f
 too dark to read tags far (the brightest 1% under 64 of 255) or had their whites clipping (over 1%
 of the frame at 250 or more), Visor's log says so, with the exposure and gain, and what to change:
 the exposure, the gain, or the light.
+
+### The live view
+
+`http://<coprocessor>:5809/` shows every camera's live view, and `/stream/<camera>` is one camera's
+by its name (escaped as an address needs: `/stream/front%20left`), an MJPEG stream any browser
+shows in an `<img>`. A robot's Pitwall shows each camera's on its card. The picture is the camera's
+frame at half its size (800 x 652 of a ThriftyCam), 10 a second at JPEG quality 60: about 2 Mbit/s,
+20 to 25 KB a picture. Each tag found is outlined with its ID, and the line along the top gives
+detection's frame rate, the exposure and gain, and the brightness (median / 99th percentile). Each
+camera's `stream_scale`, `stream_fps` and `stream_quality` change it
+([deploy/visor.example.toml](deploy/visor.example.toml)).
+
+It never costs detection. With no one watching, nothing is made. While someone watches, the view's
+own thread asks for a frame at the view's rate, the detect thread hands over its next one after
+sending it to the robot, without waiting, and the picture is made on that thread at a lower
+priority (nice 10): about 2.2 ms a picture on a laptop core, about 2% of one core at the defaults.
+Each watcher gets the newest picture when its connection is ready for one, so a slow watcher skips
+pictures; one that stops reading is closed after 5 s, and at most 8 watch at once. More in
+[docs/live-view.md](docs/live-view.md).
 
 ## Releases
 

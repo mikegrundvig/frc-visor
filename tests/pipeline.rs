@@ -16,6 +16,7 @@ use visor::latest::{Captured, Latest};
 use visor::napa::Detector;
 use visor::pipeline;
 use visor::settings::InEffect;
+use visor::stream::feed::Feed;
 use visor::wire::{Frame, VERSION_ID};
 
 /// Clocks with the robot exactly 1,000 s behind the monotonic clock, synced or not.
@@ -53,6 +54,7 @@ fn camera() -> Camera {
         controls: Vec::new(),
         lens: Some(common::rendered_lens()),
         tag_size_m: 0.1651,
+        stream: visor::config::Stream::default(),
     }
 }
 
@@ -79,6 +81,7 @@ fn send_through(frames: Vec<Captured>, synced: bool) -> Vec<Frame> {
                 &mut detector,
                 &Clocks1000 { synced },
                 &mut send,
+                &Feed::new(),
                 &stop,
             );
         });
@@ -221,6 +224,7 @@ fn frames_replaced_before_detection_got_to_them_are_counted_in_the_next() {
                 &mut detector,
                 &Clocks1000 { synced: true },
                 &mut send,
+                &Feed::new(),
                 &stop,
             );
         });
