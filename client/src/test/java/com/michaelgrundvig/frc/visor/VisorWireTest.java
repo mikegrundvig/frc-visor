@@ -37,6 +37,7 @@ class VisorWireTest {
     frame.setExposure(1300);
     frame.setGain(55);
     frame.setBrightness(41, 187, 0.0042);
+    frame.setHealth(3_900, 4_294_967_295L);
     return frame;
   }
 
@@ -61,6 +62,8 @@ class VisorWireTest {
     assertThat(frame.medianBrightness()).isEqualTo(37);
     assertThat(frame.highBrightness()).isEqualTo(201);
     assertThat(frame.clippedShare()).isEqualTo(0.0125);
+    assertThat(frame.detectMicros()).isEqualTo(4250);
+    assertThat(frame.dropped()).isEqualTo(17);
     assertThat(frame.tagCount()).isEqualTo(2);
 
     assertThat(frame.tagId(0)).isEqualTo(7);
@@ -138,6 +141,8 @@ class VisorWireTest {
     assertThatThrownBy(() -> sent.setBrightness(256, 0, 0)).hasMessageContaining("0 to 255");
     assertThatThrownBy(() -> sent.setBrightness(0, 0, 1.5)).hasMessageContaining("0 to 1");
     assertThatThrownBy(() -> sent.setExposure(0)).hasMessageContaining("microseconds");
+    assertThatThrownBy(() -> sent.setHealth(-1, 0)).hasMessageContaining("microseconds");
+    assertThatThrownBy(() -> sent.setHealth(0, 1L << 32)).hasMessageContaining("2^32");
   }
 
   @Test
@@ -168,7 +173,7 @@ class VisorWireTest {
     List<Case> cases =
         List.of(
             new Case("empty", new byte[0], VisorWire.Decoded.TOO_SHORT),
-            new Case("header cut", Arrays.copyOf(good, 39), VisorWire.Decoded.TOO_SHORT),
+            new Case("header cut", Arrays.copyOf(good, 47), VisorWire.Decoded.TOO_SHORT),
             new Case("wrong magic", wrongMagic, VisorWire.Decoded.NOT_VISOR),
             new Case("too many tags", tooManyTags, VisorWire.Decoded.TOO_MANY_TAGS),
             new Case(
@@ -235,6 +240,8 @@ class VisorWireTest {
     assertThat(actual.medianBrightness()).isEqualTo(expected.medianBrightness());
     assertThat(actual.highBrightness()).isEqualTo(expected.highBrightness());
     assertThat(actual.clippedShare()).isEqualTo(expected.clippedShare());
+    assertThat(actual.detectMicros()).isEqualTo(expected.detectMicros());
+    assertThat(actual.dropped()).isEqualTo(expected.dropped());
     assertThat(actual.tagCount()).isEqualTo(expected.tagCount());
     for (int tag = 0; tag < expected.tagCount(); tag++) {
       assertThat(actual.tagId(tag)).isEqualTo(expected.tagId(tag));

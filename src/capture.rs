@@ -79,6 +79,7 @@ fn capture(
     while !stop.load(Ordering::Relaxed) {
         let (data, meta) = stream.next()?;
         if meta.flags.contains(Flags::ERROR) {
+            latest.broken();
             continue;
         }
         let stamped = meta.flags.contains(Flags::TIMESTAMP_MONOTONIC);
@@ -111,6 +112,7 @@ fn capture(
             // A short frame is skipped, not a reason to reconnect.
             Err(error) => {
                 warn!("{}: skipped a frame: {error}", camera.name);
+                latest.broken();
                 latest.recycle(image);
             }
         }

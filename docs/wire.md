@@ -4,9 +4,9 @@ Visor sends one UDP datagram per captured frame to the robot controller, port 58
 frame is sent for every image, with or without tags, so silence means a camera or Visor is down.
 A lost datagram is simply lost: the next frame is 16 ms behind it.
 
-Everything is little-endian, with fixed sizes and no padding: a 40-byte header, then 96 bytes per
-tag. Eight tags is 808 bytes; 14, the most a frame carries, is 1,384, inside one Ethernet packet's
-1,472 bytes of UDP payload.
+Everything is little-endian, with fixed sizes and no padding: a 48-byte header, then 96 bytes per
+tag. Eight tags is 816 bytes; 14, the most a frame carries, is 1,392, inside one Ethernet packet's
+1,472 bytes of UDP payload (15 would be 1,488).
 
 ## Header
 
@@ -27,6 +27,8 @@ tag. Eight tags is 808 bytes; 14, the most a frame carries, is 1,384, inside one
 | 36 | Median brightness | u8 | The image's middle pixel, 0 (black) to 255 (white), from every fourth pixel of every fourth row |
 | 37 | High brightness | u8 | Its 99th percentile, about a tag's white where one is in view |
 | 38 | Clipped | u16 | The share of those pixels at 250 or brighter, in hundredths of a percent: 0 to 10,000 |
+| 40 | Detect time | u32 | How long finding this frame's tags and solving their poses took, in microseconds |
+| 44 | Dropped | u32 | The camera's frames Visor never sent, from its start: replaced by a newer one before detection got to them, or broken (marked bad by the driver, or short). Wraps, as the sequence does |
 
 ## Each tag
 
@@ -65,6 +67,22 @@ be read back, it's what Visor set. The brightness is the image's own, from a sam
 16, so a log shows whether the exposure and gain suit the light: tag whites at a high brightness of
 100 to 200 with nothing clipped is a well-exposed frame.
 
+## The camera's health
+
+A frame carries what the robot needs to judge its camera, and nothing is sent between frames: the
+robot works the rest out over any window it likes.
+
+- **Frame rate:** the frames that arrive in a window, over its length.
+- **Dropped at Visor:** the dropped count's rise across the window. Above 0, detection didn't keep
+  up (each frame's detect time says whether it ran past the camera's frame period), or the camera
+  sent broken frames (a USB link short of bandwidth).
+- **Lost on the way:** the sequence's rise, less the frames that arrived: datagrams the network
+  lost.
+- **Detect time, mean and worst:** over the frames that arrived.
+- **Visor restarted:** the sequence went back. Each count starts again from 0.
+
+Visor's own journal says the same of each camera every 10 s (its README).
+
 ## The capture time
 
 The robot program answers NTP requests on UDP 5806 with its own clock plus 2026-01-01T00:00:00Z
@@ -82,7 +100,8 @@ values):
 
 - version ID 20261102, sequence 4,000,000,001, 1600 × 1304, capture time 1,234,567,890,123 ns,
   camera 3, clock synced, driver timestamp, exposure 1,000 µs and gain 40 known, the camera's
-  automatic exposure off, median brightness 37, high 201, clipped 125 (1.25%);
+  automatic exposure off, median brightness 37, high 201, clipped 125 (1.25%), detect time 4,250
+  µs, 17 dropped;
 - tag 7, hamming 0, margin 61.25, corners (100.5, 200.25) (180, 201) (179.75, 280.5) (99, 279),
   poses solved: best rvec (0.125, -2.5, 0.0625), tvec (-0.5, 0.25, 3.75), error 0.1875; other
   rvec (-0.25, 2, -0.5), tvec (-0.5, 0.25, 3.5), error 1.5;

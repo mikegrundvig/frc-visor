@@ -1,5 +1,5 @@
 //! The datagram Visor sends the robot for each frame. The layout is in docs/wire.md: little-endian,
-//! fixed sizes, no padding, a 40-byte header and 96 bytes per tag.
+//! fixed sizes, no padding, a 48-byte header and 96 bytes per tag.
 
 use std::fmt;
 
@@ -7,10 +7,15 @@ use crate::brightness::Brightness;
 
 /// "VISR" in byte order, so a stray packet on the port is dropped, not misread.
 pub const MAGIC: u32 = 0x5253_4956;
-pub const HEADER_BYTES: usize = 40;
+pub const HEADER_BYTES: usize = 48;
 pub const TAG_BYTES: usize = 96;
-/// The most tags one frame carries: as many as fit one Ethernet packet's 1,472 bytes of UDP payload.
+/// One Ethernet packet's UDP payload, in bytes: a frame is never split across packets.
+pub const PACKET_BYTES: usize = 1472;
+/// The most tags one frame carries: as many as fit one packet.
 pub const MAX_TAGS: usize = 14;
+// Checked as the program builds: MAX_TAGS fit, and one more wouldn't.
+const _: () = assert!(HEADER_BYTES + MAX_TAGS * TAG_BYTES <= PACKET_BYTES);
+const _: () = assert!(HEADER_BYTES + (MAX_TAGS + 1) * TAG_BYTES > PACKET_BYTES);
 
 /// This build's version ID, from its version: 2026.11.2 is 20261102.
 pub const VERSION_ID: u32 = parse_version_id(env!("VISOR_VERSION_ID"));
@@ -47,6 +52,11 @@ pub struct Frame {
     pub auto_exposure: bool,
     /// How bright the image is.
     pub brightness: Brightness,
+    /// How long finding this frame's tags and solving their poses took, in microseconds.
+    pub detect_us: u32,
+    /// The camera's frames Visor never sent, counted from its start: replaced by a newer one before
+    /// detection got to them, or broken. It wraps at `u32::MAX`, as the sequence does.
+    pub dropped: u32,
     pub tags: Vec<Tag>,
 }
 
@@ -126,6 +136,8 @@ impl Frame {
         out.push(self.brightness.median);
         out.push(self.brightness.high);
         out.extend_from_slice(&self.brightness.clipped.to_le_bytes());
+        out.extend_from_slice(&self.detect_us.to_le_bytes());
+        out.extend_from_slice(&self.dropped.to_le_bytes());
         for tag in &self.tags {
             out.extend_from_slice(&tag.id.to_le_bytes());
             out.push(tag.hamming);
@@ -177,6 +189,8 @@ impl Frame {
             high: read.u8(),
             clipped: read.u16(),
         };
+        let detect_us = read.u32();
+        let dropped = read.u32();
         if tag_count > MAX_TAGS {
             return Err(WireError::TooManyTags(tag_count));
         }
@@ -224,6 +238,8 @@ impl Frame {
             gain: (flags & FLAG_GAIN != 0).then_some(gain),
             auto_exposure: flags & FLAG_AUTO_EXPOSURE != 0,
             brightness,
+            detect_us,
+            dropped,
             tags,
         })
     }
@@ -317,6 +333,8 @@ mod tests {
                 high: 201,
                 clipped: 125,
             },
+            detect_us: 4250,
+            dropped: 17,
             tags: vec![
                 Tag {
                     id: 7,
@@ -374,6 +392,8 @@ mod tests {
         empty.clock_synced = false;
         empty.dequeue_time = true;
         empty.capture_nanos = -5;
+        empty.detect_us = u32::MAX;
+        empty.dropped = u32::MAX;
         cases.push(empty);
         // The camera's own exposure, and no gain control.
         let mut automatic = golden();
@@ -405,7 +425,7 @@ mod tests {
         too_many[26] = 15;
         let cases: Vec<(&str, Vec<u8>, WireError)> = vec![
             ("empty", vec![], WireError::TooShort(0)),
-            ("header cut", good[..39].to_vec(), WireError::TooShort(39)),
+            ("header cut", good[..47].to_vec(), WireError::TooShort(47)),
             (
                 "wrong magic",
                 wrong_magic,
@@ -416,8 +436,8 @@ mod tests {
                 "a tag cut off",
                 good[..good.len() - 1].to_vec(),
                 WireError::WrongLength {
-                    expected: 232,
-                    actual: 231,
+                    expected: 240,
+                    actual: 239,
                 },
             ),
         ];

@@ -46,6 +46,9 @@ public final class VisorFrame {
   /** The share of pixels at full white, in hundredths of a percent, as sent. */
   int clipped;
 
+  long detectMicros;
+  long dropped;
+
   int tagCount;
   final int[] ids = new int[MAX_TAGS];
   final int[] hamming = new int[MAX_TAGS];
@@ -147,6 +150,21 @@ public final class VisorFrame {
     return clipped / CLIPPED_UNITS;
   }
 
+  /** How long Visor took to find this frame's tags and solve their poses, in microseconds. */
+  public long detectMicros() {
+    return detectMicros;
+  }
+
+  /**
+   * How many of this camera's frames Visor never sent, counted from its start: replaced by a newer
+   * one before detection got to them, or broken. It wraps past 2<sup>32</sup> - 1, as the sequence
+   * does, so the frames dropped between two frames are the difference of their counts, modulo
+   * 2<sup>32</sup>.
+   */
+  public long dropped() {
+    return dropped;
+  }
+
   /** How many tags are in the frame. */
   public int tagCount() {
     return tagCount;
@@ -239,6 +257,8 @@ public final class VisorFrame {
     medianBrightness = other.medianBrightness;
     highBrightness = other.highBrightness;
     clipped = other.clipped;
+    detectMicros = other.detectMicros;
+    dropped = other.dropped;
     tagCount = other.tagCount;
     int n = other.tagCount;
     System.arraycopy(other.ids, 0, ids, 0, n);
@@ -250,9 +270,9 @@ public final class VisorFrame {
   }
 
   /**
-   * Sets everything but the tags, which it clears, and the camera's settings and the image's
-   * brightness, which it leaves unknown and black: for a simulation or a test building a frame to
-   * send. The version ID is this client's.
+   * Sets everything but the tags, which it clears, the camera's settings and the image's
+   * brightness, which it leaves unknown and black, and the detect time and dropped count, which it
+   * leaves 0: for a simulation or a test building a frame to send. The version ID is this client's.
    */
   public void setHeader(
       long sequence,
@@ -278,7 +298,24 @@ public final class VisorFrame {
     this.medianBrightness = 0;
     this.highBrightness = 0;
     this.clipped = 0;
+    this.detectMicros = 0;
+    this.dropped = 0;
     this.tagCount = 0;
+  }
+
+  /**
+   * Sets how long the frame's detection took, in microseconds, and the camera's dropped frames so
+   * far, as Visor counts them.
+   */
+  public void setHealth(long detectMicros, long dropped) {
+    if (detectMicros < 0 || detectMicros > 0xffff_ffffL) {
+      throw new IllegalArgumentException("a detect time in microseconds, not " + detectMicros);
+    }
+    if (dropped < 0 || dropped > 0xffff_ffffL) {
+      throw new IllegalArgumentException("a count of 0 to 2^32 - 1, not " + dropped);
+    }
+    this.detectMicros = detectMicros;
+    this.dropped = dropped;
   }
 
   /**

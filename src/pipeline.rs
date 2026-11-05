@@ -1,6 +1,8 @@
 //! A camera's detect thread: takes the newest frame, finds its tags, measures its brightness, stamps
 //! it with robot time and sends it, with the exposure and gain it was taken at. Every frame is sent,
-//! with or without tags, so silence means the camera is down.
+//! with or without tags, so silence means the camera is down. Each frame also says how long its
+//! detection took and how many of the camera's frames were dropped so far, from which the robot
+//! works out the camera's frame rate, drops and load.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,11 +34,12 @@ pub fn run(
 ) {
     let mut sequence: u32 = 0;
     let mut bytes = Vec::with_capacity(wire::HEADER_BYTES + MAX_TAGS * wire::TAG_BYTES);
-    let mut numbers = Numbers::new();
+    let mut numbers = Numbers::new(latest.dropped());
     while !stop.load(Ordering::Relaxed) {
         if numbers.started.elapsed() >= REPORT_EVERY {
-            numbers.report(&camera.name, latest.take_dropped());
-            numbers = Numbers::new();
+            let dropped = latest.dropped();
+            numbers.report(&camera.name, dropped - numbers.dropped_before);
+            numbers = Numbers::new(dropped);
         }
         let Some(captured) = latest.take(Duration::from_millis(100)) else {
             continue;
@@ -67,6 +70,9 @@ pub fn run(
             gain: settings.gain,
             auto_exposure: settings.auto_exposure == Some(true),
             brightness,
+            detect_us: u32::try_from(detect_time.as_micros()).unwrap_or(u32::MAX),
+            // Wraps, as the robot reads it: only the difference between two frames' counts matters.
+            dropped: latest.dropped() as u32,
             tags,
         };
         latest.recycle(captured.image);
@@ -123,6 +129,8 @@ fn wire_pose(pose: &TagPose) -> Pose {
 /// What a camera logs every ten seconds.
 struct Numbers {
     started: Instant,
+    /// The camera's dropped frames when these numbers started.
+    dropped_before: u64,
     frames: u32,
     tags: usize,
     detect_total: Duration,
@@ -137,9 +145,10 @@ struct Numbers {
 }
 
 impl Numbers {
-    fn new() -> Numbers {
+    fn new(dropped_before: u64) -> Numbers {
         Numbers {
             started: Instant::now(),
+            dropped_before,
             frames: 0,
             tags: 0,
             detect_total: Duration::ZERO,
@@ -336,7 +345,7 @@ mod tests {
             ("no frames", vec![], fixed, vec![]),
         ];
         for (name, frames, settings, expected) in cases {
-            let mut numbers = Numbers::new();
+            let mut numbers = Numbers::new(0);
             for brightness in frames {
                 numbers.add(Duration::from_millis(3), 0, true, true);
                 numbers.light(brightness, settings);

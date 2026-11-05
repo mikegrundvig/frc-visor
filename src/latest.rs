@@ -1,6 +1,7 @@
 //! The hand-off between a camera's capture thread and its detect thread: one slot holding the
 //! newest frame. The capture thread replaces whatever is waiting, so a slow detection drops frames
-//! rather than falling behind. Images are recycled, so frames don't allocate.
+//! rather than falling behind. Images are recycled, so frames don't allocate. The slot counts the
+//! frames that never went on: replaced before they were taken, or broken.
 
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
@@ -31,6 +32,7 @@ pub struct Latest {
 struct State {
     waiting: Option<Captured>,
     spares: Vec<GrayImage>,
+    /// Since the program started.
     dropped: u64,
 }
 
@@ -70,6 +72,11 @@ impl Latest {
         state.waiting.take()
     }
 
+    /// Counts a frame the camera gave that can't be used: the driver marked it bad, or it was short.
+    pub fn broken(&self) {
+        self.state.lock().unwrap().dropped += 1;
+    }
+
     /// Gives back a taken frame's image for reuse.
     pub fn recycle(&self, image: GrayImage) {
         let mut state = self.state.lock().unwrap();
@@ -79,9 +86,10 @@ impl Latest {
         }
     }
 
-    /// How many frames were dropped since the last call.
-    pub fn take_dropped(&self) -> u64 {
-        std::mem::take(&mut self.state.lock().unwrap().dropped)
+    /// How many frames were dropped since the program started: replaced before they were taken,
+    /// or broken.
+    pub fn dropped(&self) -> u64 {
+        self.state.lock().unwrap().dropped
     }
 }
 
@@ -108,9 +116,13 @@ mod tests {
         }
         let taken = latest.take(Duration::ZERO).unwrap();
         assert_eq!(taken.monotonic_nanos, 3);
-        assert_eq!(latest.take_dropped(), 2);
-        assert_eq!(latest.take_dropped(), 0);
+        assert_eq!(latest.dropped(), 2);
         assert!(latest.take(Duration::ZERO).is_none());
+        // A broken frame counts too, and the count runs on from the start.
+        latest.broken();
+        latest.put(frame(&latest, 4));
+        latest.take(Duration::ZERO).unwrap();
+        assert_eq!(latest.dropped(), 3);
     }
 
     #[test]

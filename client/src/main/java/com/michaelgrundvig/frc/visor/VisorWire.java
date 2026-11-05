@@ -4,7 +4,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 /**
- * Visor's datagram: one frame, little-endian, fixed sizes, no padding; a 40-byte header and 96
+ * Visor's datagram: one frame, little-endian, fixed sizes, no padding; a 48-byte header and 96
  * bytes per tag. The layout is the repository's docs/wire.md, and testdata/golden-frame.bin holds
  * one frame both sides' tests check. Decoding and encoding allocate nothing.
  */
@@ -13,7 +13,7 @@ public final class VisorWire {
   public static final int MAGIC = 0x52534956;
 
   /** The header's size, in bytes. */
-  public static final int HEADER_BYTES = 40;
+  public static final int HEADER_BYTES = 48;
 
   /** Each tag's size, in bytes. */
   public static final int TAG_BYTES = 96;
@@ -82,6 +82,8 @@ public final class VisorWire {
     into.medianBrightness = Byte.toUnsignedInt(datagram.get(start + 36));
     into.highBrightness = Byte.toUnsignedInt(datagram.get(start + 37));
     into.clipped = u16(datagram, start + 38);
+    into.detectMicros = Integer.toUnsignedLong(i32(datagram, start + 40));
+    into.dropped = Integer.toUnsignedLong(i32(datagram, start + 44));
     into.tagCount = tagCount;
     for (int tag = 0; tag < tagCount; tag++) {
       int at = start + HEADER_BYTES + tag * TAG_BYTES;
@@ -143,6 +145,8 @@ public final class VisorWire {
     out.put(start + 36, (byte) frame.medianBrightness);
     out.put(start + 37, (byte) frame.highBrightness);
     putU16(out, start + 38, frame.clipped);
+    putI32(out, start + 40, (int) frame.detectMicros);
+    putI32(out, start + 44, (int) frame.dropped);
     for (int tag = 0; tag < frame.tagCount; tag++) {
       int at = start + HEADER_BYTES + tag * TAG_BYTES;
       putU16(out, at, frame.ids[tag]);

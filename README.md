@@ -31,6 +31,11 @@ layout, no multi-tag solving.
   as OpenCV's IPPE does it (`SOLVEPNP_IPPE_SQUARE`): about 3 µs per tag on a laptop. Visor's
   undistortion runs until it converges, where OpenCV's stops at five steps.
 - **The wire.** One UDP datagram per frame, every frame: [docs/wire.md](docs/wire.md).
+- **Health.** Each frame says how long its detection took and how many of the camera's frames
+  Visor has dropped (replaced before detection got to them, or broken), so the robot logs each
+  camera's frame rate, drops and load ([docs/wire.md](docs/wire.md#the-cameras-health)). Every
+  10 s Visor's journal says the same, one line per camera: `front: 59.8 fps, 0 dropped, detect 4.2
+  ms mean, 9.8 ms worst, ...`.
 
 ## Building
 

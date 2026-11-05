@@ -133,6 +133,9 @@ fn each_frame_reaches_the_robot_with_its_tags_and_robot_time() {
         );
         assert!(frame.clock_synced);
         assert_eq!(frame.dequeue_time, i == 3);
+        // How long its detection took, and none dropped: each was taken before the next came.
+        assert!(frame.detect_us > 0, "{}", scene.name);
+        assert_eq!(frame.dropped, 0);
         // The exposure and gain it was taken at, and how bright it is, measured from the image.
         assert_eq!(
             (frame.exposure_us, frame.gain, frame.auto_exposure),
@@ -187,6 +190,46 @@ fn each_frame_reaches_the_robot_with_its_tags_and_robot_time() {
             );
         }
     }
+}
+
+#[test]
+fn frames_replaced_before_detection_got_to_them_are_counted_in_the_next() {
+    let robot = UdpSocket::bind("127.0.0.1:0").unwrap();
+    robot
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    sender.connect(robot.local_addr().unwrap()).unwrap();
+    let camera = camera();
+    let latest = Latest::new();
+    let scene = common::scene("empty");
+    // Three frames wait before the detect thread starts: the newest replaced two, and a broken one
+    // came after it.
+    for at in 0..3 {
+        latest.put(captured(&scene, at, false));
+    }
+    latest.broken();
+    let stop = AtomicBool::new(false);
+    let mut buffer = [0u8; 2048];
+    let received = thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut detector = Detector::new(camera.min_tag_px).unwrap();
+            let mut send = |bytes: &[u8]| sender.send(bytes).map(|_| ());
+            pipeline::run(
+                &camera,
+                &latest,
+                &mut detector,
+                &Clocks1000 { synced: true },
+                &mut send,
+                &stop,
+            );
+        });
+        let n = robot.recv(&mut buffer).expect("the newest frame");
+        stop.store(true, Ordering::Relaxed);
+        Frame::decode(&buffer[..n]).expect("a frame")
+    });
+    assert_eq!(received.sequence, 0, "the first frame sent");
+    assert_eq!(received.dropped, 3);
 }
 
 #[test]
