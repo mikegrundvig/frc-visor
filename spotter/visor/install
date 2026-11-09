@@ -1,30 +1,48 @@
 #!/bin/sh
-# Installs the Visor release on standard input (visor-<version>-linux-arm64.tar.gz): unpacks it
-# beside the running one, has the new program say its version (so it runs on this board), and
-# only then moves it into place and restarts Visor. A release that won't run leaves the board as
-# it was. VISOR_DIR (/opt/visor) and VISOR_RESTART (a program run in place of
-# `systemctl restart visor.service`) are for an image laid out otherwise, and tests.
+# Installs the Visor release on standard input (visor-<version>-linux-arm64.tar.gz): checks it holds
+# only files and folders, unpacks it beside the running one, has the new program say its version
+# (so it runs on this board), and only then moves it into place and restarts Visor. A release that
+# won't run leaves the board as it was. VISOR_DIR (/opt/visor) and VISOR_RESTART (a program run in
+# place of `systemctl restart visor.service`) are for an image laid out otherwise, and tests.
 set -eu
 # The agent runs its packs with a umask of 0077; Visor runs as its own user, who must read
 # what this writes.
 umask 022
 dir=${VISOR_DIR:-/opt/visor}
 work="$dir/.install"
+# What one cut off left goes, and so does this one's, however it ends.
 rm -rf "$work"
 mkdir -p "$work"
-tar -xzf - -C "$work"
-if [ ! -f "$work/visor" ]; then
+trap 'rm -rf "$work"' EXIT
+archive="$work/release.tar.gz"
+cat > "$archive"
+
+# Every member a file or a folder, by the type tar lists first ('-' and 'd'): a link could lead
+# the program, or what's unpacked, outside the folder, and a device or a pipe has no place in a
+# release. Checked before anything is unpacked, so nothing in the archive runs before then.
+if ! listed=$(tar -tvzf "$archive" 2>&1); then
+  echo "the archive can't be read, so it's damaged or cut short: $listed" >&2
+  exit 1
+fi
+if printf '%s\n' "$listed" | grep -q -v '^[-d]'; then
+  echo "a release holds only files and folders, and this one has more:" >&2
+  printf '%s\n' "$listed" | grep -v '^[-d]' >&2
+  exit 1
+fi
+mkdir "$work/release"
+tar -xzf "$archive" -C "$work/release" --no-same-owner --no-same-permissions --no-overwrite-dir
+if [ ! -f "$work/release/visor" ]; then
   echo "the archive has no visor program" >&2
   exit 1
 fi
-chmod 755 "$work/visor"
+chmod 755 "$work/release/visor"
 # Its own exit status, not a pipe's: a program that fails here must stop the install.
-if ! said=$("$work/visor" version 2>&1); then
+if ! said=$("$work/release/visor" version 2>&1); then
   echo "the new program doesn't run here: $said" >&2
   exit 1
 fi
 version=$(echo "$said" | head -n 1)
-mv -f "$work/visor" "$dir/visor"
+mv -f "$work/release/visor" "$dir/visor"
 rm -rf "$work"
 echo "installed $version" >&2
 if [ -n "${VISOR_RESTART:-}" ]; then "$VISOR_RESTART"; else systemctl restart visor.service; fi
