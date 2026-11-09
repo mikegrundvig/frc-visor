@@ -92,6 +92,20 @@ class RegionCounts(unittest.TestCase):
         corners = rng.uniform((0, 0), (W, H), (400, 2))
         view = calibrate.View("v", corners, np.zeros((400, 3)))
         np.testing.assert_array_equal(capture.region_counts([{"corners": corners}], W, H), calibrate.coverage([view], W, H))
+        # Toward the frame's corners, the live view's count and its "enough" are the solver's.
+        limits = calibrate.Limits()
+        cases = [
+            ("spread over the frame", [corners]),
+            ("kept in from the corners", [corners[np.hypot(corners[:, 0] / W - 0.5, corners[:, 1] / H - 0.5) < 0.45]]),
+            ("nothing saved", []),
+        ]
+        for name, saved in cases:
+            with self.subTest(name):
+                views = [calibrate.View("v", c, np.zeros((len(c), 3))) for c in saved]
+                toward = capture.reach_counts([{"corners": c} for c in saved], W, H)
+                stacked = np.vstack(saved) if saved else np.zeros((0, 2))
+                self.assertEqual(toward, calibrate.reach(stacked, (W, H), limits))
+                self.assertEqual(calibrate.short_corners(toward, capture.LIMITS), calibrate.unreached(views, (W, H), limits))
 
 
 class Speed(unittest.TestCase):

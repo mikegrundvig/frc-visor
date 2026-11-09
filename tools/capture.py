@@ -13,7 +13,9 @@ seen, and f zooms the middle to full size. Point the camera at a tag at the dist
 turn the lens to the bar's peak, and lock it. r resets the peak.
 
 Then s starts recording. It shows the board's corners on the view, roughly how far away the board
-is and how far it's tilted, and how many corners each ninth of the frame has so far. It saves a
+is and how far it's tilted, how many corners each ninth of the frame has so far, and how many
+reach out toward each corner of the frame, past the arc drawn there (green once there are as many
+as calibrate.py asks for; a partly visible board counts). It saves a
 frame every --every seconds (1.5) while the board is in view and steady enough not to blur, and
 says when one is much like a frame saved before: move it somewhere new. s pauses it again, space saves one by hand at any time, u drops the
 last, q quits. Frames already in --out count, so a run that stopped carries on: give each camera a
@@ -37,10 +39,11 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from calibrate import Limits, board_arguments, board_from  # noqa: E402
+from calibrate import CORNER_NAMES, Limits, board_arguments, board_from, reach, short_corners  # noqa: E402
 
+LIMITS = Limits()
 # A ninth of the frame is covered once it has this many corners: well over the solver's floor.
-REGION_AIM = 3 * Limits().min_per_region
+REGION_AIM = 3 * LIMITS.min_per_region
 REGION_LIST = ["top left", "top", "top right", "left", "middle", "right", "bottom left", "bottom", "bottom right"]
 # Steady: the board's corners moving slower than this, in pixels a second. At a 10 ms exposure that
 # smears a corner by 0.3 px at most, well under what the solve tolerates; a hand-held board drifts.
@@ -121,7 +124,7 @@ def found_board(gray, board, detector, lens):
     """The board in one frame: its corners, where it is, its rough distance and tilt, and how sharp
     it is; None when too little of it is seen to count."""
     corners, ids, _, _ = detector.detectBoard(gray)
-    if ids is None or len(ids) < Limits().min_corners or board.checkCharucoCornersCollinear(ids):
+    if ids is None or len(ids) < LIMITS.min_corners or board.checkCharucoCornersCollinear(ids):
         return None
     object_points, image_points = board.matchImagePoints(corners, ids)
     image_points = image_points.reshape(-1, 2)
@@ -147,6 +150,30 @@ def region_counts(saved, width, height):
     return counts
 
 
+def reach_counts(saved, width, height):
+    """Corners saved out toward each of the frame's four corners, counted as calibrate.py counts
+    them, in its CORNER_NAMES' order."""
+    corners = np.vstack([frame["corners"] for frame in saved]) if saved else np.zeros((0, 2))
+    return reach(corners, (width, height), LIMITS)
+
+
+def draw_reach(image, toward):
+    """The line the corners must get beyond toward each corner of the frame, green once enough
+    have, with how many have."""
+    height, width = image.shape[:2]
+    centre = ((width - 1) / 2, (height - 1) / 2)
+    axes = (round(LIMITS.corner_reach * math.sqrt(2) * centre[0]), round(LIMITS.corner_reach * math.sqrt(2) * centre[1]))
+    # OpenCV's ellipse angles run from the right toward the bottom, in CORNER_NAMES' order.
+    arcs = [(180, 270), (270, 360), (90, 180), (0, 90)]
+    signs = [(-1, -1), (1, -1), (-1, 1), (1, 1)]
+    for (start, end), (across, down), count in zip(arcs, signs, toward):
+        color = GREEN if count >= LIMITS.min_per_corner else ORANGE
+        cv2.ellipse(image, (round(centre[0]), round(centre[1])), axes, 0, start, end, color, 3)
+        x = centre[0] + across * 0.85 * centre[0] - (110 if across > 0 else 0)
+        y = centre[1] + down * 0.85 * centre[1] + 15
+        cv2.putText(image, f"{count}/{LIMITS.min_per_corner}", (round(x), round(y)), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+
+
 def is_new(candidate, saved, diagonal):
     for frame in saved:
         near = np.hypot(*(candidate["center"] - frame["center"])) < NEW_CENTER * diagonal
@@ -164,7 +191,7 @@ def speed(before, after, seconds):
         return None
     earlier = dict(zip(before["ids"].tolist(), before["corners"]))
     moved = [np.hypot(*(corner - earlier[i])) for i, corner in zip(after["ids"].tolist(), after["corners"]) if i in earlier]
-    if len(moved) < Limits().min_corners:
+    if len(moved) < LIMITS.min_corners:
         return None
     return float(np.median(moved)) / seconds
 
@@ -356,7 +383,7 @@ def bar(panel, y, value, peak, label):
     cv2.putText(panel, label, (620, y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 1)
 
 
-def draw(gray, session, found, counts, args):
+def draw(gray, session, found, counts, toward, args):
     height, width = gray.shape
     if session.shown == Shown.MIDDLE:
         # The middle at full size, where focus is judged, with its outline on a small whole frame.
@@ -372,6 +399,7 @@ def draw(gray, session, found, counts, args):
                 color = GREEN if share >= 1.0 else (0, int(200 * share), 255)
                 cv2.rectangle(image, (x0 + 4, y0 + 4), (x0 + width // 3 - 4, y0 + height // 3 - 4), color, 2)
                 cv2.putText(image, str(counts[row, column]), (x0 + 14, y0 + 44), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+        draw_reach(image, toward)
         if found is not None:
             for x, y in found["corners"]:
                 cv2.circle(image, (int(x), int(y)), 5, YELLOW, -1)
@@ -388,7 +416,10 @@ def draw(gray, session, found, counts, args):
     else:
         lines.append("no board in view")
     short = [name for name, count in zip(REGION_LIST, counts.flatten()) if count < REGION_AIM]
-    lines.append("needs: " + (", ".join(short) if short else "every ninth covered"))
+    corners = short_corners(toward, LIMITS)
+    needs = (", ".join(short) if short else "every ninth covered") + "   |   "
+    needs += ("out toward: " + ", ".join(corners)) if corners else "every corner reached"
+    lines.append("needs: " + needs)
     lines.append("s start/pause   space save   u undo   f zoom (focus)   r reset peak   q quit")
     for i, text in enumerate(lines):
         cv2.putText(panel, text, (10, 26 + 28 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.62, ORANGE, 2)
@@ -417,7 +448,8 @@ def step(session, source, gray, board, detector, lens, args, diagonal):
     if key == ord("q"):
         raise Stop()
     counts = region_counts(session.saved, args.width, args.height)
-    source.show(draw(gray, session, found, counts, args))
+    toward = reach_counts(session.saved, args.width, args.height)
+    source.show(draw(gray, session, found, counts, toward, args))
 
 
 def main(argv=None):
@@ -459,6 +491,11 @@ def main(argv=None):
 
     counts = region_counts(session.saved, args.width, args.height)
     print(f"{len(session.saved)} frames in {args.out}. Corners per ninth, top row first: {counts.tolist()}")
+    toward = reach_counts(session.saved, args.width, args.height)
+    print(
+        f"Corners beyond {LIMITS.corner_reach:.0%} of the way to each corner of the frame (each needs "
+        f"{LIMITS.min_per_corner}): " + ", ".join(f"{name} {n}" for name, n in zip(CORNER_NAMES, toward))
+    )
     print(f"Solve: uv run tools/calibrate.py solve {args.out}/*.pgm --squares {args.squares} "
           f"--square-mm {args.square_mm} --marker-mm {args.marker_mm} --dictionary {args.dictionary} --out lens.toml")
 
