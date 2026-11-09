@@ -5,6 +5,11 @@
 //! time comes from the monotonic clock (the kernel stamps frames with it), so each frame is moved
 //! onto the wall clock with the two clocks' current difference, read here.
 
+use std::ffi::c_int;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use log::warn;
+
 /// What the robot adds to its clock when it answers NTP: 2026-01-01T00:00:00Z. Any fixed value
 /// works, since both ends agree on it; a recent date keeps the Pi's logs and chrony unsurprised.
 pub const EPOCH_NANOS: i64 = 1_767_225_600 * 1_000_000_000;
@@ -43,12 +48,53 @@ impl Clocks for SystemClocks {
     }
 
     fn synced(&self) -> bool {
-        // chrony keeps the kernel's sync status: TIME_ERROR, or STA_UNSYNC set, means not synced.
-        // A mode of 0 only reads.
+        // SAFETY: `timex` is a plain C struct, for which all zeroes is a valid value. A mode of 0
+        // only reads, so the call writes into `status` and changes nothing.
         let mut status: libc::timex = unsafe { std::mem::zeroed() };
+        // SAFETY: `status` is a valid, writable `timex` for the length of the call.
         let state = unsafe { libc::ntp_adjtime(&mut status) };
-        state != libc::TIME_ERROR && status.status & libc::STA_UNSYNC == 0
+        match kernel_clock(state, status.status) {
+            KernelClock::Synced => true,
+            KernelClock::Unsynced => false,
+            KernelClock::Unreadable => {
+                if !SAID_UNREADABLE.swap(true, Ordering::Relaxed) {
+                    warn!(
+                        "the kernel's clock status can't be read ({}): every frame is sent as \
+                         not synced",
+                        std::io::Error::last_os_error()
+                    );
+                }
+                false
+            }
+        }
     }
+}
+
+/// Whether the failure to read the kernel's clock status has been logged, so it's said once.
+static SAID_UNREADABLE: AtomicBool = AtomicBool::new(false);
+
+/// What the kernel says of its clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KernelClock {
+    Synced,
+    Unsynced,
+    /// `ntp_adjtime` failed, so nothing is known: never taken as synced.
+    Unreadable,
+}
+
+/// The kernel's clock status from what `ntp_adjtime` returned (`state`) and the status bits it
+/// filled in. chrony keeps that status: TIME_ERROR, or STA_UNSYNC set, means not synced.
+fn kernel_clock(state: c_int, status: c_int) -> KernelClock {
+    if state == -1 {
+        return KernelClock::Unreadable;
+    }
+    if state == libc::TIME_ERROR {
+        return KernelClock::Unsynced;
+    }
+    if status & libc::STA_UNSYNC != 0 {
+        return KernelClock::Unsynced;
+    }
+    KernelClock::Synced
 }
 
 fn read_clock(clock: libc::clockid_t) -> i64 {
@@ -57,6 +103,7 @@ fn read_clock(clock: libc::clockid_t) -> i64 {
         tv_nsec: 0,
     };
     // Can't fail for these two clocks on Linux.
+    // SAFETY: `time` is a valid, writable `timespec` for the length of the call.
     unsafe { libc::clock_gettime(clock, &mut time) };
     time.tv_sec * 1_000_000_000 + time.tv_nsec
 }
@@ -118,6 +165,26 @@ pub mod tests {
             let offset = monotonic_to_robot(&clocks);
             let midpoint = monotonic + step / 2;
             assert_eq!(midpoint + offset, robot_at_midpoint);
+        }
+    }
+
+    #[test]
+    fn the_kernel_s_clock_is_synced_only_when_it_says_so() {
+        // (what ntp_adjtime returned, the status bits, what that means)
+        let cases = [
+            (libc::TIME_OK, 0, KernelClock::Synced),
+            (libc::TIME_OK, libc::STA_PLL, KernelClock::Synced),
+            (libc::TIME_OK, libc::STA_UNSYNC, KernelClock::Unsynced),
+            (libc::TIME_ERROR, 0, KernelClock::Unsynced),
+            // The call failed and left the status zeroed: nothing is known, so not synced.
+            (-1, 0, KernelClock::Unreadable),
+        ];
+        for (state, status, expected) in cases {
+            assert_eq!(
+                kernel_clock(state, status),
+                expected,
+                "state {state}, status {status:#x}"
+            );
         }
     }
 
