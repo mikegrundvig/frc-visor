@@ -150,7 +150,9 @@ the robot client is released at the same version. Pushing the tag `v<version>` r
 arm64 runner and attaches `visor-<version>-linux-arm64.tar.gz` (the program, its licence and
 notices, the systemd unit, the chrony configuration and the Spotter pack) and its SHA-256 to the
 tag's GitHub release. `tools/release.sh` then publishes the client and that archive into the FRC
-libraries' Maven repository, from which a robot's build takes the archive for its client.
+libraries' Maven repository, from which a robot's build takes the archive for its client. It runs
+from a clean checkout of the tag and refuses otherwise, so the client is built from the same code as
+the program.
 
 ## Lens calibration
 
