@@ -35,9 +35,18 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 serde_json = "1"
 ureq = "3"
 
+# A panic in any thread ends the process at once, so systemd restarts Visor (deploy/visor.service)
+# and every camera comes back. Without it, a panicking camera thread would die alone: the other
+# threads never finish, so the process would run on with that camera dead until a power cycle.
 [profile.release]
 lto = "thin"
 codegen-units = 1
+panic = "abort"
+
+# The same in debug builds, so tests/run.rs checks the panic behaviour the release has. Test
+# programs themselves always unwind, whatever this says.
+[profile.dev]
+panic = "abort"
 
 # The live view's resizing and JPEG, optimised in debug builds too, as NAPA is, so the tests' views
 # run at their rate.

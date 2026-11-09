@@ -162,7 +162,9 @@ fn main() -> ExitCode {
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Three threads per camera (capture, detect, live view) and the live view's server, until the
-/// process is stopped. A thread that panics ends the process, and systemd restarts it.
+/// process is stopped. A thread that panics ends the process only because panics abort
+/// (Cargo.toml's profiles): the scope would otherwise wait for the other threads, which never
+/// finish. systemd then restarts Visor (deploy/visor.service).
 fn run(path: &Path) -> Result<()> {
     let config = Config::load(path)?;
     info!(
@@ -213,6 +215,7 @@ fn run(path: &Path) -> Result<()> {
         for (((((camera, mut detector), latest), socket), feed), shown) in cameras {
             scope.spawn(move || capture::run(camera, latest, &SystemClocks, stop));
             scope.spawn(move || {
+                panic_if_a_test_asks(&camera.name);
                 let mut send = |bytes: &[u8]| socket.send(bytes).map(|_| ());
                 pipeline::run(
                     camera,
@@ -229,6 +232,22 @@ fn run(path: &Path) -> Result<()> {
     });
     Ok(())
 }
+
+/// A fault switch for tests/run.rs, in debug builds only: the detect thread of the camera that
+/// VISOR_TEST_PANIC names panics as it starts, so the test can check that a panic ends the process.
+#[cfg(debug_assertions)]
+fn panic_if_a_test_asks(camera: &str) {
+    let Some(asked) = std::env::var_os("VISOR_TEST_PANIC") else {
+        return;
+    };
+    if asked == camera {
+        panic!("{camera}: the panic VISOR_TEST_PANIC asks for");
+    }
+}
+
+/// A release build has no fault switch.
+#[cfg(not(debug_assertions))]
+fn panic_if_a_test_asks(_camera: &str) {}
 
 /// `detect` with a configured camera's settings.
 fn detect_as(files: &[PathBuf], repeat: u32, path: &Path, name: &str) -> Result<()> {
