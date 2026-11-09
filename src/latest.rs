@@ -34,6 +34,17 @@ struct State {
     spares: Vec<GrayImage>,
     /// Since the program started.
     dropped: u64,
+    /// Since the detect thread last asked.
+    short: ShortFrames,
+}
+
+/// The frames the camera gave too short to use, since the detect thread last asked: counted and
+/// reported every ten seconds, not logged one by one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShortFrames {
+    pub count: u32,
+    /// Why the last one was refused.
+    pub last: Option<String>,
 }
 
 impl Latest {
@@ -75,6 +86,19 @@ impl Latest {
     /// Counts a frame the camera gave that can't be used: the driver marked it bad, or it was short.
     pub fn broken(&self) {
         self.state.lock().unwrap().dropped += 1;
+    }
+
+    /// Counts a frame too short for the image, as broken, and keeps why for the report.
+    pub fn short(&self, why: String) {
+        let mut state = self.state.lock().unwrap();
+        state.dropped += 1;
+        state.short.count = state.short.count.saturating_add(1);
+        state.short.last = Some(why);
+    }
+
+    /// The short frames since the last call, which starts the count again.
+    pub fn take_short(&self) -> ShortFrames {
+        std::mem::take(&mut self.state.lock().unwrap().short)
     }
 
     /// Gives back a taken frame's image for reuse.
@@ -124,6 +148,19 @@ mod tests {
         latest.put(frame(&latest, 4));
         latest.take(Duration::ZERO).unwrap();
         assert_eq!(latest.dropped(), 3);
+        // So does a short one, which is also kept for the report until it's taken.
+        latest.short("too small".into());
+        latest.short("too small again".into());
+        assert_eq!(latest.dropped(), 5);
+        assert_eq!(
+            latest.take_short(),
+            ShortFrames {
+                count: 2,
+                last: Some("too small again".into())
+            }
+        );
+        assert_eq!(latest.take_short(), ShortFrames::default());
+        assert_eq!(latest.dropped(), 5);
     }
 
     #[test]

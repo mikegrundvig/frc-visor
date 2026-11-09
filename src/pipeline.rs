@@ -14,9 +14,9 @@ use log::{info, warn};
 use crate::brightness::{self, Brightness};
 use crate::clock::{Clocks, monotonic_to_robot};
 use crate::config::Camera;
-use crate::latest::Latest;
+use crate::latest::{Latest, ShortFrames};
 use crate::lens::Lens;
-use crate::napa::{Detection, Detector};
+use crate::napa::{Detection, Detector, NapaError};
 use crate::pose::{TagPose, solve_square};
 use crate::settings::InEffect;
 use crate::stream::feed::{Detected, Feed};
@@ -42,7 +42,8 @@ pub fn run(
     while !stop.load(Ordering::Relaxed) {
         if numbers.started.elapsed() >= REPORT_EVERY {
             let dropped = latest.dropped();
-            numbers.report(&camera.name, dropped - numbers.dropped_before);
+            let short = latest.take_short();
+            numbers.report(&camera.name, dropped - numbers.dropped_before, &short);
             numbers = Numbers::new(dropped);
         }
         let Some(captured) = latest.take(Duration::from_millis(100)) else {
@@ -51,8 +52,9 @@ pub fn run(
         let started = Instant::now();
         let tags = match detector.detect(&captured.image) {
             Ok(found) => tags_of(found, camera.lens.as_ref(), camera.tag_size_m),
+            // Counted for the report rather than logged: it could happen on every frame.
             Err(error) => {
-                warn!("{}: {error}", camera.name);
+                numbers.detect_failed(error);
                 Vec::new()
             }
         };
@@ -154,6 +156,9 @@ struct Numbers {
     detect_worst: Duration,
     send_failures: u32,
     unsynced: u32,
+    detect_errors: u32,
+    /// Why the last detection failed.
+    last_detect_error: Option<NapaError>,
     dark: u32,
     clipping: u32,
     /// The last frame's, for the report.
@@ -172,6 +177,8 @@ impl Numbers {
             detect_worst: Duration::ZERO,
             send_failures: 0,
             unsynced: 0,
+            detect_errors: 0,
+            last_detect_error: None,
             dark: 0,
             clipping: 0,
             brightness: Brightness::default(),
@@ -186,6 +193,12 @@ impl Numbers {
         self.detect_worst = self.detect_worst.max(detect_time);
         self.send_failures += u32::from(!sent);
         self.unsynced += u32::from(!synced);
+    }
+
+    /// A frame NAPA couldn't detect in.
+    fn detect_failed(&mut self, error: NapaError) {
+        self.detect_errors += 1;
+        self.last_detect_error = Some(error);
     }
 
     /// A frame's brightness, and the exposure and gain it was taken at.
@@ -225,12 +238,52 @@ impl Numbers {
         warnings
     }
 
-    fn report(&self, camera: &str, dropped: u64) {
-        let seconds = self.started.elapsed().as_secs_f64();
-        if self.frames == 0 {
-            warn!("{camera}: no frames for {seconds:.0} s");
-            return;
+    /// What went wrong with frames since the last report, each a warning: frames not sent, sent
+    /// unsynced, NAPA failing, and the camera's `short` frames.
+    fn problems(&self, camera: &str, short: &ShortFrames) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if self.send_failures > 0 {
+            warnings.push(format!(
+                "{camera}: {} frames not sent (is the robot program running?)",
+                self.send_failures
+            ));
         }
+        if self.unsynced > 0 {
+            warnings.push(format!(
+                "{camera}: {} frames with the clock not synced to the robot (chrony)",
+                self.unsynced
+            ));
+        }
+        if let Some(error) = &self.last_detect_error {
+            warnings.push(format!(
+                "{camera}: {} frames sent without tags, as NAPA failed on them (the last: {error})",
+                self.detect_errors
+            ));
+        }
+        if let Some(why) = &short.last {
+            warnings.push(format!(
+                "{camera}: {} frames skipped as too short (the last: {why})",
+                short.count
+            ));
+        }
+        warnings
+    }
+
+    fn report(&self, camera: &str, dropped: u64, short: &ShortFrames) {
+        if self.frames == 0 {
+            let seconds = self.started.elapsed().as_secs_f64();
+            warn!("{camera}: no frames for {seconds:.0} s");
+        } else {
+            self.report_frames(camera, dropped);
+        }
+        for warning in self.problems(camera, short) {
+            warn!("{warning}");
+        }
+    }
+
+    /// The numbers of a report with frames in it.
+    fn report_frames(&self, camera: &str, dropped: u64) {
+        let seconds = self.started.elapsed().as_secs_f64();
         let frames = f64::from(self.frames);
         info!(
             "{camera}: {:.1} fps, {dropped} dropped, detect {:.1} ms mean, {:.1} ms worst, \
@@ -244,18 +297,6 @@ impl Numbers {
         );
         for warning in self.light_warnings(camera) {
             warn!("{warning}");
-        }
-        if self.send_failures > 0 {
-            warn!(
-                "{camera}: {} frames not sent (is the robot program running?)",
-                self.send_failures
-            );
-        }
-        if self.unsynced > 0 {
-            warn!(
-                "{camera}: {} frames with the clock not synced to the robot (chrony)",
-                self.unsynced
-            );
         }
     }
 }
@@ -372,6 +413,74 @@ mod tests {
             for (warning, part) in warnings.iter().zip(&expected) {
                 assert!(warning.starts_with("front-left: "), "{name}: {warning}");
                 assert!(warning.contains(part), "{name}: {warning}");
+            }
+        }
+    }
+
+    #[test]
+    fn what_went_wrong_is_counted_for_the_report() {
+        // (what happened since the last report, the camera's short frames, each warning's start)
+        type Case = (
+            &'static str,
+            fn(&mut Numbers),
+            ShortFrames,
+            Vec<&'static str>,
+        );
+        let none = ShortFrames::default();
+        let cases: [Case; 5] = [
+            (
+                "every frame fine",
+                |n| n.add(Duration::ZERO, 0, true, true),
+                none.clone(),
+                vec![],
+            ),
+            (
+                "unsent and unsynced",
+                |n| {
+                    n.add(Duration::ZERO, 0, false, false);
+                    n.add(Duration::ZERO, 0, false, true);
+                },
+                none.clone(),
+                vec![
+                    "front-left: 2 frames not sent",
+                    "front-left: 1 frames with the clock not synced",
+                ],
+            ),
+            (
+                "NAPA failing",
+                |n| {
+                    for _ in 0..60 {
+                        n.add(Duration::ZERO, 0, true, true);
+                        n.detect_failed(NapaError::OutOfMemory);
+                    }
+                },
+                none.clone(),
+                vec![
+                    "front-left: 60 frames sent without tags, as NAPA failed on them (the last: \
+                     NAPA ran out of memory)",
+                ],
+            ),
+            (
+                "short frames alone",
+                |_| {},
+                ShortFrames {
+                    count: 600,
+                    last: Some("a 10 byte frame is too small".into()),
+                },
+                vec![
+                    "front-left: 600 frames skipped as too short (the last: a 10 byte frame is \
+                     too small)",
+                ],
+            ),
+            ("nothing at all", |_| {}, none.clone(), vec![]),
+        ];
+        for (name, happened, short, expected) in cases {
+            let mut numbers = Numbers::new(0);
+            happened(&mut numbers);
+            let warnings = numbers.problems("front-left", &short);
+            assert_eq!(warnings.len(), expected.len(), "{name}: {warnings:?}");
+            for (warning, start) in warnings.iter().zip(&expected) {
+                assert!(warning.starts_with(start), "{name}: {warning}");
             }
         }
     }

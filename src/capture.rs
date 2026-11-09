@@ -109,10 +109,10 @@ fn capture(
                 dequeue_time: !stamped,
                 settings: in_effect,
             }),
-            // A short frame is skipped, not a reason to reconnect.
+            // A short frame is skipped, not a reason to reconnect, and counted for the detect
+            // thread's report rather than logged: a struggling camera can send dozens a second.
             Err(error) => {
-                warn!("{}: skipped a frame: {error}", camera.name);
-                latest.broken();
+                latest.short(error.to_string());
                 latest.recycle(image);
             }
         }
