@@ -172,23 +172,24 @@ def renderer_for(lens):
 
 
 class GoodSessions(unittest.TestCase):
-    """40 frames reaching every part of the frame: the lens comes back, solved with the terms it has."""
+    """40 frames reaching every part of the frame: the lens comes back, and the tool chooses the
+    terms it has with no flag given."""
 
     def test_each_lens_is_recovered(self):
         mild, strong = LENSES
         cases = [
-            # A lens with no k3 is recovered with k3 held at 0, the default.
-            (mild, calibrate.Model.K3_FIXED),
-            # A lens with a real k3 is recovered once k3 is free (--free-k3).
-            (strong, calibrate.Model.FIVE),
+            # Each row: the true lens, the terms the tool should choose, and what its report says.
+            (mild, calibrate.Model.K3_FIXED, "isn't needed"),
+            (strong, calibrate.Model.FIVE, "needs its fifth distortion term"),
         ]
-        for truth, model in cases:
-            with self.subTest(f"{truth.name}, {model.value}"):
+        for truth, model, says in cases:
+            with self.subTest(truth.name):
                 renderer = renderer_for(truth)
                 self.assertLess(renderer.worst_ray_px(), 1e-3, "the renderer's rays")
                 frames = frames_for(truth)
-                lens = calibrate.solve([(name, image) for name, image, _, _ in frames], model=model)
+                lens = calibrate.solve([(name, image) for name, image, _, _ in frames])
                 self.assertEqual(lens.model, model)
+                self.assertIn(says, calibrate.report(lens))
 
                 # The corners the board was found at are where the true lens puts them: no offset (a
                 # half-pixel slip in the renderer or the tool would show here), only the detector's noise.
@@ -205,7 +206,8 @@ class GoodSessions(unittest.TestCase):
 
                 error = pixel_error(truth, lens)
                 print(
-                    f"\n  {truth.name}, {model.value}: {len(lens.views)} views, RMS {lens.rms_px:.3f} px; "
+                    f"\n  {truth.name}, {lens.terms}: {len(lens.views)} views, RMS {lens.rms_px:.3f} px, the two solves "
+                    f"{lens.k3_difference_px:.2f} px apart; "
                     f"against the true lens, median {np.median(error):.3f} px, worst {error.max():.3f} px; "
                     f"fx {lens.fx:.1f} (true {truth.camera_matrix[0, 0]:.1f})",
                     file=sys.stderr,
@@ -221,19 +223,41 @@ class GoodSessions(unittest.TestCase):
                 # Under a pixel apart anywhere in the frame: at 4 m, under 3 mm across the line of sight.
                 self.assertLess(float(error.max()), 1.0, "worst over the frame, px")
 
-    def test_the_blocks_keep_five_terms(self):
-        """Whichever five-term solve, both printed blocks carry five coefficients, the last 0 when
-        k3 is held; eight terms print eight."""
+    def test_the_limit_decides(self):
+        """k3 is held when the two solves are within the limit of each other, and kept past it."""
         frames = [(name, image) for name, image, _, _ in frames_for(LENSES[0])]
-        cases = [(calibrate.Model.K3_FIXED, 5, True), (calibrate.Model.FIVE, 5, False), (calibrate.Model.RATIONAL, 8, False)]
-        for model, terms, k3_zero in cases:
-            with self.subTest(model.value):
+        apart = calibrate.solve(frames).k3_difference_px
+        self.assertGreater(apart, 0.01)
+        cases = [
+            ("just inside the limit", 1.05 * apart, calibrate.Model.K3_FIXED),
+            ("just past it", 0.95 * apart, calibrate.Model.FIVE),
+        ]
+        for name, limit, model in cases:
+            with self.subTest(name):
+                lens = calibrate.solve(frames, limits=calibrate.Limits(max_k3_px=limit))
+                self.assertEqual(lens.model, model)
+                self.assertAlmostEqual(lens.k3_difference_px, apart)
+
+    def test_the_blocks_keep_five_terms(self):
+        """Whichever five terms, both printed blocks carry five coefficients, the last 0 when k3 is
+        held, and the TOML's first line says which and why; eight terms print eight."""
+        mild, strong = LENSES
+        cases = [
+            # Each row: the true lens, the terms asked for, then coefficients, k3 held, and the first line.
+            (mild, calibrate.Model.CHOOSE_K3, 5, True, "k3 held at 0 (not needed)"),
+            (strong, calibrate.Model.CHOOSE_K3, 5, False, "k3 solved (needed)"),
+            (mild, calibrate.Model.FIVE, 5, False, "k3 solved (as asked)"),
+            (mild, calibrate.Model.RATIONAL, 8, False, "eight terms (as asked)"),
+        ]
+        for truth, model, terms, k3_zero, first_line in cases:
+            with self.subTest(f"{truth.name}, {model.value}"):
+                frames = [(name, image) for name, image, _, _ in frames_for(truth)]
                 lens = calibrate.solve(frames, model=model)
                 block = tomllib.loads(lens.toml())["camera"]["lens"]
                 self.assertEqual(len(block["distortion"]), terms)
                 java = re.search(r"List\.of\(([^)]*)\)", lens.java()).group(1).split(",")
                 self.assertEqual(len(java), terms)
-                self.assertIn(model.value, lens.toml().splitlines()[0])
+                self.assertIn(first_line, lens.toml().splitlines()[0])
                 if k3_zero:
                     self.assertEqual(block["distortion"][4], 0.0)
                     self.assertEqual(float(java[4]), 0.0)
@@ -527,9 +551,9 @@ class ThroughVisor(unittest.TestCase):
                 cv2.imwrite(str(pgms[-1]), board)
             block = scratch / "lens.toml"
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                # This lens has a real k3, so it is solved free.
-                self.assertEqual(calibrate.main(["solve", "--free-k3", *map(str, pgms), "--out", str(block)]), 0)
-            lens = tomllib.loads(block.read_text())["camera"]["lens"]
+                self.assertEqual(calibrate.main(["solve", *map(str, pgms), "--out", str(block)]), 0)
+            block_text = block.read_text()
+            lens = tomllib.loads(block_text)["camera"]["lens"]
             config = scratch / "visor.toml"
             camera = (REPO / "deploy" / "visor.example.toml").read_text().split("[camera.lens]")[0]
             config.write_text(camera + block.read_text())
@@ -556,7 +580,9 @@ class ThroughVisor(unittest.TestCase):
         )
         self.assertEqual((lens["width"], lens["height"]), (W, H))
         # The same lens as a robot's definition takes it.
-        java = calibrate.solve([(n, i) for n, i, _, _ in frames], model=calibrate.Model.FIVE).java()
+        # This lens has a real k3, and the tool keeps it with no flag given.
+        self.assertIn("k3 solved (needed)", block_text)
+        java = calibrate.solve([(n, i) for n, i, _, _ in frames]).java()
         self.assertIn(f".width({W})", java)
         self.assertAlmostEqual(float(re.search(r"\.fx\(([\d.]+)\)", java).group(1)), lens["fx"], places=5)
         self.assertLess(off, 0.01 * np.linalg.norm(t), "within 1% of the distance")

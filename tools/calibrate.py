@@ -20,9 +20,10 @@ A good session has the board's corners reaching every corner of the frame (a par
 counts), the board tilted 30 to 45 degrees about both axes, top toward and away as well as the
 sides, at several places in the frame, at two distances, and 40 to 60 views.
 
-The distortion is solved with five terms, the fifth (k3) held at 0: a session that doesn't reach the
-frame's corners can't tell k3 from k2, and a free k3 only swings the lens out where no corner was
-seen. --free-k3 solves all five, for a lens that needs it; --rational solves eight, for a wide lens.
+The distortion has five terms. The lens is solved twice, with the fifth (k3) held at 0 and with it
+free, and the two compared over the whole frame: when they agree within a pixel k3 is held at 0, as
+most lenses need, and otherwise it is kept, and the report says which and why. --free-k3 keeps it
+without asking; --rational solves eight terms, for a wide lens.
 """
 
 import argparse
@@ -80,15 +81,21 @@ class Limits:
     # board never left the inner part of the corner ninths, and its lens out there is a guess.
     min_per_corner: int = 10
     corner_reach: float = 0.7
+    # How far apart, anywhere in the frame, the lenses solved with k3 held at 0 and with it free may
+    # put a point for k3 to be held. A lens without a k3 gives a few tenths of a pixel between them;
+    # one with a real k3 gives many pixels near the frame's corners.
+    max_k3_px: float = 1.0
 
 
 class Model(Enum):
     """How many distortion terms the solve fits."""
 
+    # Five terms, solved with k3 held at 0 and with it free, and the one the session supports kept.
+    CHOOSE_K3 = "k3 chosen"
     # Five terms, the fifth (k3) held at 0.
-    K3_FIXED = "k3 fixed"
+    K3_FIXED = "k3 held at 0"
     # Five terms, all free.
-    FIVE = "five terms"
+    FIVE = "k3 solved"
     # Eight terms, for a wide lens.
     RATIONAL = "eight terms"
 
@@ -123,7 +130,10 @@ class Lens:
     views: list
     dropped: list  # (name, why)
     notes: list  # what the solve did that whoever pastes the lens should know
-    model: Model
+    model: Model  # the terms the lens was solved with
+    terms: str  # which terms, and why, for the block's first line
+    terms_note: str | None = None  # why k3 was held or kept, when the tool chose
+    k3_difference_px: float | None = None  # how far apart the two solves put points, when it chose
 
     @property
     def fx(self):
@@ -161,7 +171,7 @@ class Lens:
         """The block for the camera's entry in Visor's configuration."""
         coefficients = ", ".join(f"{c:.9g}" for c in self.distortion)
         return (
-            f"# visor calibrate: {len(self.views)} views, RMS {self.rms_px:.3f} px, {self.model.value}\n"
+            f"# visor calibrate: {len(self.views)} views, RMS {self.rms_px:.3f} px, {self.terms}\n"
             "[camera.lens]\n"
             f"width = {self.width}\n"
             f"height = {self.height}\n"
@@ -313,7 +323,57 @@ def fit(views, size, limits, model):
         views = remaining
 
 
-def solve(images, board=Board(), limits=Limits(), model=Model.K3_FIXED):
+def largest_difference(a, b, size):
+    """How far apart two lenses, each (camera matrix, distortion), put points: the largest over a
+    grid across the whole frame, each pixel's ray through a put back through b, and the ninth of
+    the frame it is in."""
+    width, height = size
+    xs, ys = np.meshgrid(np.linspace(0, width - 1, 81), np.linspace(0, height - 1, 67))
+    pixels = np.stack([xs.ravel(), ys.ravel()], -1)
+    criteria = (cv2.TERM_CRITERIA_COUNT + cv2.TERM_CRITERIA_EPS, 100, 1e-12)
+    rays = cv2.undistortPoints(pixels.reshape(-1, 1, 2), a[0], a[1], criteria=criteria).reshape(-1, 2)
+    back, _ = cv2.projectPoints(np.hstack([rays, np.ones((len(rays), 1))]), np.zeros(3), np.zeros(3), b[0], b[1])
+    gaps = np.linalg.norm(back.reshape(-1, 2) - pixels, axis=1)
+    worst = int(np.argmax(gaps))
+    x, y = pixels[worst]
+    return float(gaps[worst]), REGION_NAMES[min(int(3 * y / height), 2)][min(int(3 * x / width), 2)]
+
+
+@dataclass(frozen=True)
+class K3Choice:
+    solved: tuple  # rms, camera matrix, distortion, deviations
+    model: Model
+    terms: str
+    note: str
+    difference_px: float
+
+
+def choose_k3(views, size, limits, free):
+    """Holds k3 at 0 unless the lens solved with it free puts points somewhere in the frame more
+    than limits.max_k3_px from where the lens with it held does.
+
+    The comparison is only sound because the session has passed the corner-reach rule, after its
+    outliers were dropped: its corners reach out toward every corner of the frame, so the two
+    lenses differ where corners were seen, not in a guess beyond them. Run it after fit()."""
+    errors = [v.error_px for v in views]
+    held = solve_views(views, size, Model.K3_FIXED)
+    difference, where = largest_difference(held[1:3], free[1:3], size)
+    if difference <= limits.max_k3_px:
+        note = (
+            f"the fifth distortion term (k3) isn't needed: held at 0, the lens puts no point more than "
+            f"{difference:.2f} px from where the lens with it solved does"
+        )
+        return K3Choice(held, Model.K3_FIXED, "k3 held at 0 (not needed)", note, difference)
+    for view, error in zip(views, errors):
+        view.error_px = error
+    note = (
+        f"the lens needs its fifth distortion term (k3): held at 0, it would move points up to "
+        f"{difference:.1f} px, near the frame's {where}"
+    )
+    return K3Choice(free, Model.FIVE, "k3 solved (needed)", note, difference)
+
+
+def solve(images, board=Board(), limits=Limits(), model=Model.CHOOSE_K3):
     """The lens from frames of the board: a list of (name, 8-bit image)."""
     if not images:
         raise Refused("no frames")
@@ -347,18 +407,31 @@ def solve(images, board=Board(), limits=Limits(), model=Model.K3_FIXED):
             "away until its corners reach; the lens bends most there"
         )
 
-    solved, views, outliers, notes = fit(views, (width, height), limits, model)
+    # A choice of k3 drops outliers against the lens with k3 free, which fits a lens with or without one.
+    fitted = Model.FIVE if model == Model.CHOOSE_K3 else model
+    solved, views, outliers, notes = fit(views, (width, height), limits, fitted)
+    terms, terms_note, difference = f"{model.value} (as asked)", None, None
+    if model == Model.CHOOSE_K3:
+        choice = choose_k3(views, (width, height), limits, solved)
+        solved = choice.solved
+        fitted = choice.model
+        terms = choice.terms
+        terms_note = choice.note
+        difference = choice.difference_px
     rms, camera_matrix, distortion, deviations = solved
     if rms > limits.max_rms_px:
         raise Refused(
             f"RMS error {rms:.2f} px, over {limits.max_rms_px}: blurred frames, a board that isn't flat, "
             "or a board printed out of square"
         )
-    return Lens(width, height, camera_matrix, distortion, rms, deviations, views, dropped + outliers, notes, model)
+    return Lens(
+        width, height, camera_matrix, distortion, rms, deviations, views, dropped + outliers, notes, fitted,
+        terms, terms_note, difference,
+    )
 
 
 def report(lens, limits=Limits()):
-    lines = [f"{lens.width} × {lens.height}, {len(lens.views)} views, RMS {lens.rms_px:.3f} px, {lens.model.value}"]
+    lines = [f"{lens.width} × {lens.height}, {len(lens.views)} views, RMS {lens.rms_px:.3f} px, {lens.terms}"]
     names = ["fx", "fy", "cx", "cy"]
     values = [lens.fx, lens.fy, lens.cx, lens.cy]
     lines.append("  " + "   ".join(f"{n} {v:.2f} ± {d:.2f}" for n, v, d in zip(names, values, lens.deviations)))
@@ -375,6 +448,8 @@ def report(lens, limits=Limits()):
     lines.append("  worst views: " + ", ".join(f"{v.name} {v.error_px:.2f} px" for v in worst))
     for name, why in lens.dropped:
         lines.append(f"  left out {name}: {why}")
+    if lens.terms_note is not None:
+        lines.append(f"  {lens.terms_note}")
     for note in lens.notes:
         lines.append(f"  note: {note}")
     return "\n".join(lines)
@@ -428,7 +503,7 @@ def model_from(args):
         return Model.RATIONAL
     if args.free_k3:
         return Model.FIVE
-    return Model.K3_FIXED
+    return Model.CHOOSE_K3
 
 
 def main(argv=None):
@@ -442,7 +517,7 @@ def main(argv=None):
     board_arguments(solving)
     solving.add_argument("frames", nargs="+", type=Path)
     terms = solving.add_mutually_exclusive_group()
-    terms.add_argument("--free-k3", action="store_true", help="solve the fifth distortion term too, held at 0 otherwise")
+    terms.add_argument("--free-k3", action="store_true", help="keep the fifth distortion term (k3) without comparing")
     terms.add_argument("--rational", action="store_true", help="eight distortion coefficients, for a wide lens")
     solving.add_argument("--out", type=Path, help="also write the [camera.lens] block here")
     args = parser.parse_args(argv)

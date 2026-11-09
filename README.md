@@ -213,13 +213,15 @@ uv run tools/calibrate.py solve frames/*.pgm --out lens.toml
 It prints the error of each view and how well each part of the frame was covered, and writes a
 `[camera.lens]` block for that camera's entry in the configuration. It refuses a session it can't
 trust (too few frames with the board, part of the frame never reached, too few corners out toward
-one of the frame's corners, or too large an error) and says which. The distortion has five terms,
-the fifth (k3) held at 0, since a session can rarely tell it from the others; add `--free-k3` for a
-lens that needs it, or `--rational` for eight terms, for a wide lens with strong distortion. Then check a tag at a measured
+one of the frame's corners, or too large an error) and says which. The distortion has five terms:
+the tool solves the lens with the fifth (k3) held at 0 and with it free, keeps it at 0 when the two
+put every point within a pixel of each other, and keeps it otherwise, saying which and why.
+`--free-k3` keeps it without comparing, and `--rational` solves eight terms, for a wide lens with
+strong distortion. Then check a tag at a measured
 distance with `visor detect --config ... --camera ...`.
 
 Its tests (`uv run tools/test_calibrate.py`) render boards through lenses whose values are known,
-including a strongly distorted one (solved with `--free-k3`), and check the tool gives them back;
+including a strongly distorted one whose k3 the tool must keep, and check the tool gives them back;
 then a tag drawn through that lens near the frame's corner, solved by Visor with the tool's block,
 lands within 1 mm of its true place 4.3 m out, where leaving the distortion out puts it 63 cm off.
 `uv run tools/test_capture.py` tests the live view's choices of which frames to save.
