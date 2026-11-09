@@ -86,6 +86,7 @@ With the robot program running, on the coprocessor:
 ```bash
 chronyc sources     # the robot's line starts ^*: chrony has chosen it
 chronyc tracking    # Reference ID names 10.TE.AM.2, Leap status Normal, System time under 0.001 s
+timedatectl show -p NTPSynchronized   # yes: the kernel's clock is marked synced, as Visor reads it
 ```
 
 That's the pass: frames are stamped in robot time, to well under the 1 ms Visor aims for (chrony

@@ -122,6 +122,24 @@ pub mod tests {
     }
 
     #[test]
+    fn the_deployed_chrony_clears_the_kernel_s_unsynced_flag() {
+        // On Linux chrony clears STA_UNSYNC, which `synced` reads, only with `rtcsync`: without it
+        // every frame is sent unsynced and the robot discards them all.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/chrony.conf");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let directives: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        assert!(
+            directives.contains(&"rtcsync"),
+            "{} has no rtcsync line",
+            path.display()
+        );
+    }
+
+    #[test]
     fn the_real_clocks_read() {
         let clocks = SystemClocks;
         let a = clocks.monotonic_nanos();
