@@ -1,9 +1,13 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["opencv-python-headless==5.0.0.93", "numpy==2.5.4"]
+# ///
 """Writes testdata/pose-cases.json: tag corners and what OpenCV makes of them, to check Visor's lens
 undistortion and pose solve against.
 
 Run from the repository root:
 
-    uv run --with opencv-python-headless --with numpy tools/pose_cases.py
+    uv run tools/pose_cases.py
 
 Each case is a random lens (five or eight distortion coefficients, OpenCV's order), a tag seen from
 0.5 to 10 m at up to 70 degrees, its corners projected through the lens (OpenCV's corner order),

@@ -1,8 +1,12 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["opencv-python-headless==5.0.0.93", "numpy==2.5.4"]
+# ///
 """Renders the test frames in testdata/: ThriftyCam-sized images of AprilTags with known corners.
 
 Run from the repository root:
 
-    uv run --with opencv-python-headless --with numpy tools/render_frames.py
+    uv run tools/render_frames.py
 
 Each scene writes testdata/<name>.png and testdata/<name>.json. The JSON's corners are in NAPA's
 convention, the one Visor sends: OpenCV's corner order (the printed tag's top-left, top-right,
