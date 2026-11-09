@@ -14,6 +14,11 @@ messages with it, so robot code never links GPL code.
 - `NtpResponder` answers chrony on the coprocessors with the robot's clock (UDP 5806).
 - `VisorConfigFile` writes Visor's configuration for a coprocessor, as a robot's deploy does:
   `testdata/written-config.toml` is its output, which Visor's own tests read back.
+- `VisorPack` names Visor's Spotter pack ([spotter/visor](../spotter/visor/README.md)) for Spotter's
+  manager: its status values, which say what's on disk and what's running, its actions and their
+  responses, the parsing of a status report, a configuration's hash as the status gives it, and a
+  release archive's name. `VisorPackTest` runs the pack's scripts and Spotter's real agent against
+  it.
 
 ```java
 VisorReceiver receiver = VisorReceiver.listen(VisorReceiver.DEFAULT_PORT);

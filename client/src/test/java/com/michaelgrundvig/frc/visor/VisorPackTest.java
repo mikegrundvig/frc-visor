@@ -11,19 +11,23 @@ import com.michaelgrundvig.frc.spotter.manager.RobotSignals;
 import com.michaelgrundvig.frc.spotter.manager.Run;
 import com.michaelgrundvig.frc.spotter.manager.Settings;
 import com.michaelgrundvig.frc.spotter.manager.Value;
-import java.io.File;
+import com.michaelgrundvig.frc.visor.PackBoard.Ran;
+import com.michaelgrundvig.frc.visor.PackBoard.Restart;
 import java.io.IOException;
-import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.security.MessageDigest;
-import java.util.HexFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
@@ -31,13 +35,19 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * Visor's Spotter pack (spotter/visor) on Spotter's real agent, driven by its real manager as the
- * robot program drives it: the robot pushes the pack, reads what the board has, installs a release
- * and configures it, and the pack refuses what would break the board. The board is this computer:
- * the agent runs from its published jar with its files under a folder of the test's, and Visor's
- * program is a script that answers {@code version} and {@code check} as Visor does.
+ * Visor's Spotter pack (spotter/visor), by the names {@link VisorPack} gives the robot. Its scripts
+ * run directly on a board in a folder of the test's ({@link PackBoard}), one row each for what an
+ * install, a configuration or a page of the log can meet; and once on Spotter's real agent, driven
+ * by its real manager as the robot program drives it.
  */
 class VisorPackTest {
+  private static final String OLD = "2099.1.1";
+  private static final String NEW = "2099.1.2";
+  private static final String CONFIG = "team = 1234\n";
+
+  /** The agent's own report of the port it serves on, as it starts. */
+  private static final Pattern SERVING = Pattern.compile("serving protocol 2 on port (\\d+)");
+
   @TempDir Path work;
 
   private @Nullable Process agent;
@@ -45,18 +55,293 @@ class VisorPackTest {
   private @Nullable Thread supervisor;
   private @Nullable Manager manager;
 
-  /** Visor's program, as the pack sees it: its version, and a check refusing what says "bad". */
-  private static String program(String version) {
-    return """
-        #!/bin/sh
-        case "$1" in
-          version) echo "visor %s (version ID 1)" ;;
-          check)
-            if grep -q bad "$3"; then echo "$3: no, this is bad" >&2; exit 1; fi
-            echo "$3: 1 camera" ;;
-        esac
+  /** What a script's run is to end in. */
+  private enum Exit {
+    OK,
+    FAILS;
+
+    static Exit of(Ran ran) {
+      return ran.exit() == 0 ? OK : FAILS;
+    }
+  }
+
+  /** A release archive, made in a folder of the test's. */
+  private interface Archive {
+    byte[] make(Path folder) throws Exception;
+  }
+
+  /**
+   * An install's row: the archive, how the restart goes, what the install ends in and says, then
+   * the Visor on disk, the one running, and how many restarts there were.
+   */
+  private record InstallRow(
+      String why,
+      Archive archive,
+      Restart restart,
+      Exit exit,
+      String says,
+      String installed,
+      String running,
+      long restarts) {}
+
+  @Test
+  void anInstallChangesTheBoardOnlyWhenItsReleaseRunsThere() throws Exception {
+    Path outside = work.resolve("outside");
+    Path ranOutside = work.resolve("outside.ran");
+    PackBoard.executable(outside, "#!/bin/sh\ntouch " + ranOutside + "\necho visor 2099.9.9\n");
+    List<InstallRow> rows =
+        List.of(
+            new InstallRow(
+                "a release installs, and Visor runs it",
+                folder -> release(folder, Map.of("visor", PackBoard.program(NEW))),
+                Restart.STARTS,
+                Exit.OK,
+                "installed visor " + NEW,
+                NEW,
+                NEW,
+                1),
+            new InstallRow(
+                "the same version again: put in place and restarted, so a board whose restart"
+                    + " failed is put right",
+                folder -> release(folder, Map.of("visor", PackBoard.program(OLD))),
+                Restart.STARTS,
+                Exit.OK,
+                "installed visor " + OLD,
+                OLD,
+                OLD,
+                1),
+            new InstallRow(
+                "no visor in the archive",
+                folder -> release(folder, Map.of("README.md", "a release\n")),
+                Restart.STARTS,
+                Exit.FAILS,
+                "the archive has no visor program",
+                OLD,
+                OLD,
+                0),
+            new InstallRow(
+                "a program whose version fails: it doesn't run on this board",
+                folder -> release(folder, Map.of("visor", "#!/bin/sh\nexit 3\n")),
+                Restart.STARTS,
+                Exit.FAILS,
+                "doesn't run here",
+                OLD,
+                OLD,
+                0),
+            new InstallRow(
+                "an archive cut short",
+                folder -> {
+                  byte[] whole = release(folder, Map.of("visor", PackBoard.program(NEW)));
+                  return Arrays.copyOf(whole, whole.length / 2);
+                },
+                Restart.STARTS,
+                Exit.FAILS,
+                "can't be read",
+                OLD,
+                OLD,
+                0),
+            new InstallRow(
+                "a visor that's a link to a program outside the archive: refused before anything"
+                    + " runs",
+                folder -> release(folder, Map.of("visor", "->" + outside)),
+                Restart.STARTS,
+                Exit.FAILS,
+                "only files and folders",
+                OLD,
+                OLD,
+                0),
+            new InstallRow(
+                "a link beside the program",
+                folder -> release(folder, Map.of("visor", PackBoard.program(NEW), "etc", "->/etc")),
+                Restart.STARTS,
+                Exit.FAILS,
+                "only files and folders",
+                OLD,
+                OLD,
+                0),
+            new InstallRow(
+                "a restart that fails once the program is in place: the status says none runs",
+                folder -> release(folder, Map.of("visor", PackBoard.program(NEW))),
+                Restart.FAILS,
+                Exit.FAILS,
+                "installed visor " + NEW,
+                NEW,
+                "",
+                1),
+            new InstallRow(
+                "an install cut off once the program is in place: the old one runs on, and the"
+                    + " status says so",
+                folder -> release(folder, Map.of("visor", PackBoard.program(NEW))),
+                Restart.CUT_OFF,
+                Exit.FAILS,
+                "installed visor " + NEW,
+                NEW,
+                OLD,
+                0));
+    for (int n = 0; n < rows.size(); n++) {
+      InstallRow row = rows.get(n);
+      PackBoard board = board("install-" + n);
+      board.runs(OLD, CONFIG);
+      // What an install cut off while it unpacked left: the next one starts afresh.
+      Files.createDirectories(board.visor.resolve(".install"));
+      Files.writeString(board.visor.resolve(".install/visor"), "#!/bin/sh\nexit 9\n");
+      board.restart(row.restart());
+      byte[] archive = row.archive().make(Files.createDirectories(work.resolve("release-" + n)));
+      Ran ran = board.script("install", archive);
+
+      assertThat(Exit.of(ran)).as(row.why() + ": " + ran).isEqualTo(row.exit());
+      assertThat(ran.err()).as(row.why()).contains(row.says());
+      VisorPack.Report status = board.status();
+      assertThat(status.version()).as(row.why()).isEqualTo(row.installed());
+      assertThat(status.runningVersion()).as(row.why()).isEqualTo(row.running());
+      assertThat(board.restarted()).as(row.why()).isEqualTo(row.restarts());
+      assertThat(ranOutside).as(row.why() + ": ran nothing outside the archive").doesNotExist();
+      assertThat(board.visor.resolve(".install")).as(row.why() + ": left nothing").doesNotExist();
+      if (row.exit() == Exit.OK) {
+        assertThat(ran.out())
+            .as(row.why())
+            .isEqualTo("{\"version\": \"" + row.installed() + "\"}\n");
+        assertThat(permissions(board.visor.resolve("visor"))).isEqualTo("rwxr-xr-x");
+      }
+    }
+  }
+
+  /**
+   * A configuration's row: the configuration, how the restart goes, what it ends in and says, and
+   * then the configuration on disk and the one running (empty: none runs).
+   */
+  private record ConfigureRow(
+      String why,
+      String config,
+      Restart restart,
+      Exit exit,
+      String says,
+      String onDisk,
+      String running) {}
+
+  @Test
+  void aConfigurationIsPutInPlaceOnlyOnceVisorAcceptsIt() throws Exception {
+    String next = "team = 5678\n";
+    List<ConfigureRow> rows =
+        List.of(
+            new ConfigureRow(
+                "one Visor accepts, and runs",
+                next,
+                Restart.STARTS,
+                Exit.OK,
+                "1 camera",
+                next,
+                next),
+            new ConfigureRow(
+                "one it refuses leaves the board as it was, and says why",
+                "bad = true\n",
+                Restart.STARTS,
+                Exit.FAILS,
+                "no, this is bad",
+                CONFIG,
+                CONFIG),
+            new ConfigureRow(
+                "a restart that fails once it's in place: none runs",
+                next,
+                Restart.FAILS,
+                Exit.FAILS,
+                "visor.service failed",
+                next,
+                ""),
+            new ConfigureRow(
+                "cut off once it's in place: the old configuration runs on",
+                next,
+                Restart.CUT_OFF,
+                Exit.FAILS,
+                "1 camera",
+                next,
+                CONFIG));
+    for (int n = 0; n < rows.size(); n++) {
+      ConfigureRow row = rows.get(n);
+      PackBoard board = board("configure-" + n);
+      board.runs(OLD, CONFIG);
+      board.restart(row.restart());
+      Ran ran = board.script("configure", row.config().getBytes(StandardCharsets.UTF_8));
+
+      assertThat(Exit.of(ran)).as(row.why() + ": " + ran).isEqualTo(row.exit());
+      assertThat(ran.err()).as(row.why()).contains(row.says());
+      VisorPack.Report status = board.status();
+      assertThat(status.config()).as(row.why()).isEqualTo(VisorPack.configHash(row.onDisk()));
+      String running = row.running().isEmpty() ? "" : VisorPack.configHash(row.running());
+      assertThat(status.runningConfig()).as(row.why()).isEqualTo(running);
+      assertThat(board.visor.resolve("visor.toml")).content().isEqualTo(row.onDisk());
+      assertThat(board.visor.resolve("visor.toml.new")).doesNotExist();
+      // Readable by Visor, which runs as its own user, though the agent writes it under umask 0077.
+      assertThat(permissions(board.visor.resolve("visor.toml"))).isEqualTo("rw-r--r--");
+      if (row.exit() == Exit.OK) {
+        assertThat(ran.out())
+            .isEqualTo("{\"config\": \"" + VisorPack.configHash(row.onDisk()) + "\"}\n");
+      }
+    }
+  }
+
+  /** A page of the log's row: what's asked, journalctl itself, what it ends in, and the page. */
+  private record JournalRow(
+      String why, Map<String, String> asked, String journalctl, Exit exit, List<String> page) {}
+
+  @Test
+  void aPageOfTheLogFailsWhenJournalctlDoes() throws Exception {
+    // A journal of five entries, oldest first, and newest first with --reverse, as journalctl's.
+    String five =
         """
-        .formatted(version);
+        #!/bin/sh
+        for argument; do
+          if [ "$argument" = --reverse ]; then printf '5\\n4\\n3\\n2\\n1\\n'; exit 0; fi
+        done
+        printf '1\\n2\\n3\\n4\\n5\\n'
+        """;
+    String endless = "#!/bin/sh\nexec yes again\n";
+    String refuses = "#!/bin/sh\necho 'Failed to seek to cursor: Invalid argument' >&2\nexit 1\n";
+    List<JournalRow> rows =
+        List.of(
+            new JournalRow(
+                "the latest, oldest first",
+                Map.of("SPOTTER_LIMIT", "2"),
+                five,
+                Exit.OK,
+                List.of("4", "5")),
+            new JournalRow(
+                "a journal longer than the page: journalctl is stopped once the page is full,"
+                    + " which is no failure",
+                Map.of("SPOTTER_LIMIT", "3"),
+                endless,
+                Exit.OK,
+                List.of("again", "again", "again")),
+            new JournalRow(
+                "a cursor journalctl refuses: the page fails, rather than coming back empty",
+                Map.of("SPOTTER_FROM", "after", "SPOTTER_CURSOR", "nonsense"),
+                refuses,
+                Exit.FAILS,
+                List.of()),
+            new JournalRow(
+                "journalctl failing on the latest page", Map.of(), refuses, Exit.FAILS, List.of()));
+    for (int n = 0; n < rows.size(); n++) {
+      JournalRow row = rows.get(n);
+      PackBoard board = board("journal-" + n);
+      Path bin = Files.createDirectories(board.root.resolve("bin"));
+      PackBoard.executable(bin.resolve("journalctl"), row.journalctl());
+      Map<String, String> environment = new HashMap<>(row.asked());
+      environment.put("PATH", bin + ":" + System.getenv("PATH"));
+      Ran ran = board.script("journal", new byte[0], environment);
+
+      assertThat(Exit.of(ran)).as(row.why() + ": " + ran).isEqualTo(row.exit());
+      List<String> page = ran.out().isEmpty() ? List.of() : List.of(ran.out().split("\n"));
+      assertThat(page).as(row.why()).isEqualTo(row.page());
+    }
+  }
+
+  @Test
+  void aStatusReportIsReadAsThePackWritesIt() {
+    assertThat(VisorPack.report(NEW, "abc", "", "", ""))
+        .isEqualTo(new VisorPack.Report(NEW, "abc", "", "", List.of()));
+    assertThat(VisorPack.report(NEW, "abc", NEW, "abc", "one,two").cameras())
+        .containsExactly("one", "two");
+    assertThat(VisorPack.releaseName(NEW)).isEqualTo("visor-2099.1.2-linux-arm64.tar.gz");
   }
 
   @AfterEach
@@ -76,126 +361,96 @@ class VisorPackTest {
   }
 
   @Test
-  void aBoardIsBroughtUpToDateAndRefusesWhatWouldBreakIt() throws Exception {
-    Path visor = Files.createDirectories(work.resolve("opt-visor"));
-    Path devices = Files.createDirectories(work.resolve("by-id"));
-    Path ports = Files.createDirectories(work.resolve("by-path"));
-    Path sysfs = Files.createDirectories(work.resolve("sys"));
-    // Three cameras, as udev names them and the kernel describes them: one with a serial, one with
-    // none (a ThriftyCam), whose by-id name every camera of its model shares, and a third whose
-    // serial is the first's, so udev's one by-id name for it leads to the first alone.
-    plugIn(devices, ports, sysfs, 0, "1.1", "0001", "usb-Thrifty_Cam_0001");
-    plugIn(devices, ports, sysfs, 2, "1.2", null, "usb-DCX-240524--XH_SPCA2630_PC_Camera");
-    plugIn(devices, ports, sysfs, 4, "1.3", "0001", null);
-    Path restarts = work.resolve("restarts");
-    Path restart = executable("restart", "#!/bin/sh\necho restarted >> " + restarts + "\n");
+  void onSpottersAgentABoardIsBroughtUpToDate() throws Exception {
+    PackBoard board = board("agent");
     Path packs = Files.createDirectories(work.resolve("packs/visor"));
     try (Stream<Path> files = Files.list(Path.of(System.getProperty("visor.pack")))) {
       for (Path file : files.toList()) {
         Files.copy(file, packs.resolve(file.getFileName()), StandardCopyOption.COPY_ATTRIBUTES);
       }
     }
-    int port = freePort();
-    startAgent(port, visor, devices, ports, sysfs, restart);
+    int port = startAgent(board);
 
     Manager spotter =
         new Manager(
             new RobotSignals(() -> false, () -> false, System::nanoTime),
-            List.of(new BoardDefinition("127.0.0.1:" + port, List.of("visor"))),
+            List.of(new BoardDefinition("127.0.0.1:" + port, List.of(VisorPack.NAME))),
             Settings.DEFAULTS.withPacks(work.resolve("packs")),
             Recorder.NONE);
     manager = spotter;
     spotter.start();
-    Board board = spotter.boards().get(0);
-    Value version = board.value("visor.status.version");
-    Value config = board.value("visor.status.config");
-    Value cameras = board.value("visor.status.cameras");
+    Board on = spotter.boards().get(0);
+    List<Value> values = new ArrayList<>();
+    for (String id : VisorPack.STATUS) {
+      values.add(on.value(id));
+    }
+    BooleanSupplier reported = () -> values.stream().allMatch(Value::available);
 
-    // Pushed the pack, the board says it has no Visor yet, and which cameras are plugged in: each
-    // once, by its name as `visor cameras` gives it. The one with its own serial by id; the
-    // ThriftyCam, with no serial, by its port though it's the only one of its model; and the one
-    // whose serial is another's by its port.
-    await(spotter, version::available, "the pack's status");
-    assertThat(version.text()).as("no Visor yet").isEmpty();
-    assertThat(config.text()).isEmpty();
-    assertThat(cameras.text())
-        .isEqualTo(
-            "usb-Thrifty_Cam_0001-video-index0,"
-                + "platform-xhci-usb-0:1.2:1.0-video-index0,"
-                + "platform-xhci-usb-0:1.3:1.0-video-index0");
+    // Pushed the pack (the agent restarts to read it), the board says it has no Visor yet.
+    await(spotter, reported, "the pack's status");
+    assertThat(report(values)).isEqualTo(new VisorPack.Report("", "", "", "", List.of()));
 
-    // A release installs, and Visor is restarted on it.
-    Run installed = run(spotter, board.run("visor.install", release(program("2099.1.2"))));
+    // A release installs, and Visor runs it.
+    byte[] archive =
+        release(
+            Files.createDirectories(work.resolve("release")),
+            Map.of("visor", PackBoard.program(NEW)));
+    Files.writeString(board.visor.resolve("visor.toml"), CONFIG);
+    Run installed = run(spotter, on.run(VisorPack.INSTALL, archive));
     assertThat(installed.level()).as(installed.reason()).isEqualTo(Level.OK);
-    assertThat(Objects.requireNonNull(installed.response("version")).text()).isEqualTo("2099.1.2");
-    await(spotter, () -> version.text().equals("2099.1.2"), "the installed version");
-    assertThat(restarts).content().isEqualTo("restarted\n");
+    assertThat(Objects.requireNonNull(installed.response(VisorPack.INSTALLED)).text())
+        .isEqualTo(NEW);
+    await(spotter, () -> report(values).runningVersion().equals(NEW), "the running version");
+    assertThat(report(values).version()).isEqualTo(NEW);
+    assertThat(report(values).cameras()).containsExactly("usb-Thrifty_Cam_0001-video-index0");
 
-    // A configuration Visor accepts is put in place.
-    String toml = "team = 1234\n";
-    Run configured = run(spotter, board.run("visor.configure", toml));
+    // A configuration Visor accepts is put in place, and runs.
+    String next = "team = 5678\n";
+    String hash = VisorPack.configHash(next);
+    Run configured = run(spotter, on.run(VisorPack.CONFIGURE, next));
     assertThat(configured.level()).as(configured.reason()).isEqualTo(Level.OK);
-    String hash = sha256(toml);
-    await(spotter, () -> config.text().equals(hash), "the configuration's hash");
-    assertThat(visor.resolve("visor.toml")).content().isEqualTo(toml);
-    // Readable by Visor, which runs as its own user, though the agent writes it under umask 0077.
-    assertThat(
-            PosixFilePermissions.toString(
-                Files.getPosixFilePermissions(visor.resolve("visor.toml"))))
-        .isEqualTo("rw-r--r--");
-    assertThat(PosixFilePermissions.toString(Files.getPosixFilePermissions(visor.resolve("visor"))))
-        .isEqualTo("rwxr-xr-x");
+    assertThat(Objects.requireNonNull(configured.response(VisorPack.CONFIGURED)).text())
+        .isEqualTo(hash);
+    await(spotter, () -> report(values).runningConfig().equals(hash), "the running configuration");
+    assertThat(report(values).config()).isEqualTo(hash);
+  }
 
-    // One it refuses leaves the board as it was, and says why.
-    Run refused = run(spotter, board.run("visor.configure", "bad = true\n"));
-    assertThat(refused.level()).isEqualTo(Level.FAILING);
-    assertThat(refused.log())
-        .anySatisfy(line -> assertThat(line.getMessage()).contains("no, this is bad"));
-    assertThat(visor.resolve("visor.toml")).content().isEqualTo(toml);
-    assertThat(visor.resolve("visor.toml.new")).doesNotExist();
+  private static VisorPack.Report report(List<Value> values) {
+    return VisorPack.report(
+        values.get(0).text(),
+        values.get(1).text(),
+        values.get(2).text(),
+        values.get(3).text(),
+        values.get(4).text());
+  }
 
-    // A release whose program won't run on the board is never put in place.
-    Run broken = run(spotter, board.run("visor.install", release("#!/bin/sh\nexit 3\n")));
-    assertThat(broken.level()).isEqualTo(Level.FAILING);
-    assertThat(broken.log())
-        .anySatisfy(line -> assertThat(line.getMessage()).contains("doesn't run here"));
-    assertThat(visor.resolve("visor")).content().isEqualTo(program("2099.1.2"));
-    assertThat(restarts)
-        .content()
-        .as("restarted for the two that went in")
-        .isEqualTo("restarted\nrestarted\n");
+  private PackBoard board(String name) throws IOException {
+    return new PackBoard(
+        Files.createDirectories(work.resolve(name)), Path.of(System.getProperty("visor.pack")));
   }
 
   /**
    * The agent, as systemd runs it on a board: started again whenever it exits, as it does after a
-   * push to read the packs pushed.
+   * push to read the packs pushed. It's first given any free port (0), and says which it has; each
+   * restart takes that one again.
    */
-  private void startAgent(int port, Path visor, Path devices, Path ports, Path sysfs, Path restart)
-      throws IOException {
+  private int startAgent(PackBoard board) throws Exception {
     Path root = Files.createDirectories(work.resolve("root"));
     Files.createDirectories(root.resolve("var/lib/frc-spotter"));
     Path log = work.resolve("agent.log");
-    ProcessBuilder builder =
-        new ProcessBuilder(
-                "/bin/sh",
-                "-c",
-                // With the umask its systemd unit gives it (UMask=0077): what a pack writes is its
-                // own
-                // unless the pack says otherwise.
-                "umask 077; exec \"$0\" -Xmx128m -jar \"$1\" --root=\"$2\" --controller=127.0.0.1"
-                    + " --port=\"$3\"",
-                ProcessHandle.current().info().command().orElse("java"),
-                System.getProperty("visor.spotterAgent"),
-                root.toString(),
-                Integer.toString(port))
-            .redirectErrorStream(true)
-            .redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()));
-    builder.environment().put("VISOR_DIR", visor.toString());
-    builder.environment().put("VISOR_BY_ID", devices.toString());
-    builder.environment().put("VISOR_BY_PATH", ports.toString());
-    builder.environment().put("VISOR_SYSFS", sysfs.toString());
-    builder.environment().put("VISOR_RESTART", restart.toString());
-    agent = builder.start();
+    agent = agent(root, board, log, 0).start();
+    long until = System.nanoTime() + 60_000_000_000L;
+    int port = 0;
+    while (port == 0 && System.nanoTime() < until) {
+      Matcher said = SERVING.matcher(agentLog());
+      if (said.find()) {
+        port = Integer.parseInt(said.group(1));
+      } else {
+        Thread.sleep(20);
+      }
+    }
+    assertThat(port).as("the agent's port; it said:\n" + agentLog()).isPositive();
+    ProcessBuilder again = agent(root, board, log, port);
     Thread thread =
         new Thread(
             () -> {
@@ -205,7 +460,7 @@ class VisorPackTest {
                   running.waitFor();
                   if (!stopping) {
                     Thread.sleep(200);
-                    agent = builder.start();
+                    agent = again.start();
                   }
                 } catch (InterruptedException | IOException e) {
                   return;
@@ -216,61 +471,54 @@ class VisorPackTest {
     thread.setDaemon(true);
     thread.start();
     supervisor = thread;
+    return port;
+  }
+
+  private static ProcessBuilder agent(Path root, PackBoard board, Path log, int port) {
+    ProcessBuilder builder =
+        new ProcessBuilder(
+                "/bin/sh",
+                "-c",
+                // With the umask its systemd unit gives it (UMask=0077): what a pack writes is its
+                // own unless the pack says otherwise.
+                "umask 077; exec \"$0\" -Xmx128m -jar \"$1\" --root=\"$2\" --controller=127.0.0.1"
+                    + " --port=\"$3\"",
+                ProcessHandle.current().info().command().orElse("java"),
+                System.getProperty("visor.spotterAgent"),
+                root.toString(),
+                Integer.toString(port))
+            .redirectErrorStream(true)
+            .redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()));
+    builder.environment().putAll(board.environment());
+    return builder;
   }
 
   /**
-   * A camera in a USB port, as video devices {@code first} (capture) and {@code first + 1}
-   * (metadata): their by-path names, their by-id names when udev gave it one ({@code id}, without
-   * the {@code -video-index} part), and in sysfs, its USB device with its serial, if it has one.
+   * A release archive as the release workflow makes one, of the files given by name: each one's
+   * text, or {@code ->target} for a link to {@code target}.
    */
-  private void plugIn(
-      Path devices,
-      Path ports,
-      Path sysfs,
-      int first,
-      String port,
-      @Nullable String serial,
-      @Nullable String id)
-      throws IOException {
-    Path usb = Files.createDirectories(work.resolve("usb").resolve(port));
-    Path controlInterface = Files.createDirectories(usb.resolve(port + ":1.0"));
-    if (serial != null) {
-      Files.writeString(usb.resolve("serial"), serial + "\n");
-    }
-    for (int index = 0; index < 2; index++) {
-      String video = "video" + (first + index);
-      Path device = Files.createDirectories(work.resolve("dev")).resolve(video);
-      Files.createFile(device);
-      Files.createSymbolicLink(
-          Files.createDirectories(sysfs.resolve(video)).resolve("device"), controlInterface);
-      Files.createSymbolicLink(
-          ports.resolve("platform-xhci-usb-0:" + port + ":1.0-video-index" + index), device);
-      if (id != null) {
-        Files.createSymbolicLink(devices.resolve(id + "-video-index" + index), device);
+  private static byte[] release(Path folder, Map<String, String> files)
+      throws IOException, InterruptedException {
+    Path contents = Files.createDirectories(folder.resolve("contents"));
+    for (Map.Entry<String, String> file : files.entrySet()) {
+      Path path = contents.resolve(file.getKey());
+      if (file.getValue().startsWith("->")) {
+        Files.createSymbolicLink(path, Path.of(file.getValue().substring(2)));
+      } else {
+        PackBoard.executable(path, file.getValue());
       }
     }
-  }
-
-  /** A release archive as the release workflow makes one: the program, as {@code ./visor}. */
-  private byte[] release(String program) throws IOException, InterruptedException {
-    Path folder = Files.createTempDirectory(work, "release");
-    Path visor = folder.resolve("visor");
-    Files.writeString(visor, program);
-    Files.setPosixFilePermissions(visor, PosixFilePermissions.fromString("rwxr-xr-x"));
-    Path archive = work.resolve(folder.getFileName() + ".tar.gz");
+    Path archive = folder.resolve("release.tar.gz");
     Process tar =
-        new ProcessBuilder("tar", "-czf", archive.toString(), "-C", folder.toString(), ".")
+        new ProcessBuilder("tar", "-czf", archive.toString(), "-C", contents.toString(), ".")
             .inheritIO()
             .start();
     assertThat(tar.waitFor()).isZero();
     return Files.readAllBytes(archive);
   }
 
-  private Path executable(String name, String text) throws IOException {
-    Path file = work.resolve(name);
-    Files.writeString(file, text);
-    Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rwxr-xr-x"));
-    return file;
+  private static String permissions(Path file) throws IOException {
+    return PosixFilePermissions.toString(Files.getPosixFilePermissions(file));
   }
 
   /** Keeps the manager up to date, as the robot loop does, until the run is done. */
@@ -292,19 +540,7 @@ class VisorPackTest {
   }
 
   private String agentLog() throws IOException {
-    File log = work.resolve("agent.log").toFile();
-    return log.exists() ? Files.readString(log.toPath()) : "(nothing)";
-  }
-
-  private static String sha256(String text) throws Exception {
-    return HexFormat.of()
-        .formatHex(
-            MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8)));
-  }
-
-  private static int freePort() throws IOException {
-    try (ServerSocket socket = new ServerSocket(0)) {
-      return socket.getLocalPort();
-    }
+    Path log = work.resolve("agent.log");
+    return Files.exists(log) ? Files.readString(log) : "(nothing)";
   }
 }

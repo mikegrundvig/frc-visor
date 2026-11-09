@@ -13,7 +13,7 @@ with its other packs.
 | `visor.status.running-config` | The SHA-256 of the configuration it runs, as `config` gives it; empty while none runs |
 | `visor.status.cameras` | The cameras plugged in, comma-separated, each once by the name the installed program gives it (`visor cameras --names`, so Visor alone has the rule): its `/dev/v4l/by-id/` name when it has a USB serial of its own; with no serial, always its `/dev/v4l/by-path/` name, its USB port's (label the ports and cables). Empty when there's no program installed that can say |
 | `visor.log` | Visor's journal (`visor.service`) |
-| `visor.install` | Takes a release archive, `visor-<version>-linux-arm64.tar.gz`, as its input: unpacks it beside the running program, has the new program say its version, then moves it into place and restarts Visor. One that won't run on the board leaves it as it was |
+| `visor.install` | Takes a release archive, `visor-<version>-linux-arm64.tar.gz`, as its input: refuses one holding anything but files and folders (a link, a device) before anything in it runs, unpacks it beside the running program, has the new program say its version, then moves it into place and restarts Visor. One that won't run on the board leaves it as it was. A restart that fails after the move fails the run, and `running-version` then shows what runs |
 | `visor.configure` | Takes a configuration as its input: Visor checks it (`visor check`), and only then is it moved into place and Visor restarted. One Visor refuses leaves the board as it was, and the response says why |
 
 Both actions run only while the robot is disabled: the manager refuses them otherwise.
@@ -59,4 +59,6 @@ pack what it needs, and nothing more:
 `VISOR_DIR`, `VISOR_RUN`, `VISOR_MAIN_PID`, `VISOR_BY_ID`, `VISOR_BY_PATH`, `VISOR_SYSFS` and
 `VISOR_RESTART`, in the agent's environment, change where it looks
 and how it restarts Visor, for an image laid out otherwise (and the tests). `journal` is Spotter's
-catalog's, under its MIT License.
+catalog's, under its MIT License, keeping journalctl's exit status: a journal it can't read, or a
+cursor it refuses, fails the page rather than returning an empty one. It's a copy because a pack
+runs only its own files.
