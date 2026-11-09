@@ -26,6 +26,10 @@ pub struct Plugged {
     pub device: PathBuf,
     /// The serial its USB device reports; none when it reports none, or an empty one.
     pub serial: Option<String>,
+    /// The kernel's index of it among its USB device's video devices: 0 is the one that captures
+    /// (udev's `-video-index0` names), and a UVC camera's metadata device is 1. None when the
+    /// kernel doesn't say.
+    pub index: Option<u32>,
     pub by_id: Vec<PathBuf>,
     pub by_path: Vec<PathBuf>,
 }
@@ -43,6 +47,31 @@ impl Plugged {
             .or(self.by_path.first())
             .map_or(self.device.as_path(), PathBuf::as_path)
     }
+
+    /// Whether it's the device a camera captures on: the kernel's first for its USB device. Told
+    /// from the kernel's description, not by opening it, so it's the same for any user: Spotter's
+    /// agent, which lists the cameras for the robot, may not open them.
+    pub fn captures(&self) -> bool {
+        self.index == Some(0)
+    }
+}
+
+/// The name of each camera plugged in, as the robot gives them in its configuration and Visor's
+/// Spotter pack reports them (`visor cameras --names`): each capture device's name, its last
+/// part. A name with any character udev doesn't use is left out: the pack reports them
+/// comma-separated in JSON, unescaped.
+pub fn capture_names(plugged: &[Plugged]) -> Vec<String> {
+    plugged
+        .iter()
+        .filter(|each| each.captures())
+        .filter_map(|each| each.name().file_name()?.to_str().map(str::to_owned))
+        .filter(|name| name.chars().all(is_udev_name_char))
+        .collect()
+}
+
+/// The characters udev keeps in the names it makes; it replaces any other.
+fn is_udev_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "_.:+-".contains(c)
 }
 
 /// Every video device either folder names, in the devices' order, each with its serial from the
@@ -56,6 +85,7 @@ pub fn plugged(by_id: &Path, by_path: &Path, sysfs: &Path) -> io::Result<Vec<Plu
             let entry = devices.entry(device.clone()).or_insert_with(|| Plugged {
                 device,
                 serial: None,
+                index: None,
                 by_id: Vec::new(),
                 by_path: Vec::new(),
             });
@@ -69,6 +99,7 @@ pub fn plugged(by_id: &Path, by_path: &Path, sysfs: &Path) -> io::Result<Vec<Plu
     let mut found: Vec<Plugged> = devices.into_values().collect();
     for each in &mut found {
         each.serial = serial(sysfs, &each.device)?;
+        each.index = index(sysfs, &each.device)?;
     }
     Ok(found)
 }
@@ -83,6 +114,18 @@ fn serial(sysfs: &Path, device: &Path) -> io::Result<Option<String>> {
     match std::fs::read_to_string(file) {
         Ok(text) if text.trim().is_empty() => Ok(None),
         Ok(text) => Ok(Some(text.trim().to_string())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// A video device's index, as the kernel has it; none when there's no `index` to read.
+fn index(sysfs: &Path, device: &Path) -> io::Result<Option<u32>> {
+    let Some(video) = device.file_name() else {
+        return Ok(None);
+    };
+    match std::fs::read_to_string(sysfs.join(video).join("index")) {
+        Ok(text) => Ok(text.trim().parse().ok()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }

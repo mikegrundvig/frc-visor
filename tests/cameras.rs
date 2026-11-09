@@ -1,9 +1,11 @@
 //! The cameras plugged in, as udev and the kernel describe them, in folders of the test's: each
 //! camera in a USB port, with its capture and metadata devices, its by-id and by-path names as
-//! udev makes them, and its USB device's serial, if any, where sysfs has it.
+//! udev makes them, and its USB device's serial, if any, where sysfs has it. And the names Visor's
+//! Spotter pack reports for them, which are `visor cameras --names`'s.
 
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use visor::cameras::{Plugged, plugged};
 
@@ -65,6 +67,7 @@ fn plug(root: &Path, cameras: &[Camera]) -> Vec<Plugged> {
             std::fs::write(dev.join(&video), "").unwrap();
             std::fs::create_dir_all(sys.join(&video)).unwrap();
             symlink(&interface, sys.join(&video).join("device")).unwrap();
+            std::fs::write(sys.join(&video).join("index"), format!("{index}\n")).unwrap();
             let id_link = by_id.join(format!("{id}-video-index{index}"));
             let _ = std::fs::remove_file(&id_link);
             symlink(dev.join(&video), id_link).unwrap();
@@ -77,8 +80,109 @@ fn plug(root: &Path, cameras: &[Camera]) -> Vec<Plugged> {
 
 #[test]
 fn a_camera_is_named_by_id_only_with_a_serial_of_its_own() {
+    for (n, (why, cameras, expected)) in naming_cases().into_iter().enumerate() {
+        let root = folder(&format!("cameras-{n}"));
+        let found = plug(&root, &cameras);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.name().file_name().unwrap().to_str().unwrap().to_owned())
+            .collect();
+        let wanted: Vec<String> = expected
+            .iter()
+            .flat_map(|stem| (0..2).map(move |index| format!("{stem}-video-index{index}")))
+            .collect();
+        assert_eq!(names, wanted, "{why}");
+        for (each, camera) in found.iter().zip(cameras.iter().flat_map(|c| [c, c])) {
+            let serial = camera.serial.filter(|s| !s.is_empty());
+            assert_eq!(each.serial.as_deref(), serial, "{why}");
+            assert_eq!(each.by_path.len(), 1, "{why}");
+        }
+    }
+}
+
+#[test]
+fn the_pack_reports_each_camera_by_the_name_visor_gives_it() {
+    // The capture device alone (index 0, not the metadata device), by the name the rule above
+    // gives it: as `visor cameras --names` prints them, and as the pack's status reports them,
+    // through the installed program, so the rule has one owner.
+    for (n, (why, cameras, expected)) in naming_cases().into_iter().enumerate() {
+        let root = folder(&format!("pack-cameras-{n}"));
+        plug(&root, &cameras);
+        let wanted: Vec<String> = expected
+            .iter()
+            .map(|stem| format!("{stem}-video-index0"))
+            .collect();
+        let printed = names_printed(&root);
+        assert_eq!(printed, wanted, "visor cameras --names: {why}");
+        install_visor(&root);
+        let reported = status_cameras(&root);
+        assert_eq!(reported, wanted.join(","), "the pack's status: {why}");
+    }
+}
+
+#[test]
+fn the_pack_reports_no_cameras_when_none_are_plugged_in_or_visor_is_missing() {
+    let root = folder("pack-no-cameras");
+    for each in ["by-id", "by-path", "sys"] {
+        std::fs::create_dir_all(root.join(each)).unwrap();
+    }
+    assert!(names_printed(&root).is_empty());
+    install_visor(&root);
+    assert_eq!(status_cameras(&root), "");
+    // No program installed: no names, rather than a status that fails.
+    let without = folder("pack-no-visor");
+    plug(&without, &[with_serial("1.1", "0001")]);
+    assert_eq!(status_cameras(&without), "");
+}
+
+/// What `visor cameras --names` prints for the cameras plugged in under `root`.
+fn names_printed(root: &Path) -> Vec<String> {
+    let out = Command::new(env!("CARGO_BIN_EXE_visor"))
+        .args(["cameras", "--names", "--by-id"])
+        .arg(root.join("by-id"))
+        .arg("--by-path")
+        .arg(root.join("by-path"))
+        .arg("--sysfs")
+        .arg(root.join("sys"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The built program, installed as the pack finds it, in `root`'s `opt-visor`.
+fn install_visor(root: &Path) {
+    let installed = root.join("opt-visor");
+    std::fs::create_dir_all(&installed).unwrap();
+    symlink(env!("CARGO_BIN_EXE_visor"), installed.join("visor")).unwrap();
+}
+
+/// The `cameras` value of the pack's status, run as Spotter's agent runs it, with Visor installed
+/// in `root`'s `opt-visor`, if it is.
+fn status_cameras(root: &Path) -> String {
+    let installed = root.join("opt-visor");
+    let out = Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/spotter/visor/status"))
+        .env("VISOR_DIR", &installed)
+        .env("VISOR_BY_ID", root.join("by-id"))
+        .env("VISOR_BY_PATH", root.join("by-path"))
+        .env("VISOR_SYSFS", root.join("sys"))
+        .env("VISOR_RUN", root.join("run"))
+        .env("VISOR_MAIN_PID", "/bin/false")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    report["cameras"].as_str().unwrap().to_owned()
+}
+
+/// Cameras plugged in, and the names they're given, each without its `-video-indexN`.
+fn naming_cases() -> [(&'static str, Vec<Camera>, Vec<String>); 5] {
     let port = |p: &str| format!("platform-xhci-usb-0:{p}:1.0");
-    let cases: [(&str, Vec<Camera>, Vec<String>); 5] = [
+    [
         (
             "no serial, alone: by its port, though the by-id name is its alone for now",
             vec![no_serial("1.1")],
@@ -113,25 +217,7 @@ fn a_camera_is_named_by_id_only_with_a_serial_of_its_own() {
                 "usb-Thrifty_Cam_0001".into(),
             ],
         ),
-    ];
-    for (n, (why, cameras, expected)) in cases.into_iter().enumerate() {
-        let root = folder(&format!("cameras-{n}"));
-        let found = plug(&root, &cameras);
-        let names: Vec<String> = found
-            .iter()
-            .map(|p| p.name().file_name().unwrap().to_str().unwrap().to_owned())
-            .collect();
-        let wanted: Vec<String> = expected
-            .iter()
-            .flat_map(|stem| (0..2).map(move |index| format!("{stem}-video-index{index}")))
-            .collect();
-        assert_eq!(names, wanted, "{why}");
-        for (each, camera) in found.iter().zip(cameras.iter().flat_map(|c| [c, c])) {
-            let serial = camera.serial.filter(|s| !s.is_empty());
-            assert_eq!(each.serial.as_deref(), serial, "{why}");
-            assert_eq!(each.by_path.len(), 1, "{why}");
-        }
-    }
+    ]
 }
 
 #[test]

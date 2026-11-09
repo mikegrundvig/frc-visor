@@ -9,7 +9,7 @@ with its other packs.
 |---|---|
 | `visor.status.version` | The Visor in `/opt/visor`, by its version (`2026.11.4`); empty when there's none |
 | `visor.status.config` | The SHA-256 of its configuration, `/opt/visor/visor.toml`; empty when there's none |
-| `visor.status.cameras` | The cameras plugged in, each once by its name as `visor cameras` gives it, comma-separated: its `/dev/v4l/by-id/` name when it has a USB serial of its own; with no serial, always its `/dev/v4l/by-path/` name, its USB port's (label the ports and cables) |
+| `visor.status.cameras` | The cameras plugged in, comma-separated, each once by the name the installed program gives it (`visor cameras --names`, so Visor alone has the rule): its `/dev/v4l/by-id/` name when it has a USB serial of its own; with no serial, always its `/dev/v4l/by-path/` name, its USB port's (label the ports and cables). Empty when there's no program installed that can say |
 | `visor.log` | Visor's journal (`visor.service`) |
 | `visor.install` | Takes a release archive, `visor-<version>-linux-arm64.tar.gz`, as its input: unpacks it beside the running program, has the new program say its version, then moves it into place and restarts Visor. One that won't run on the board leaves it as it was |
 | `visor.configure` | Takes a configuration as its input: Visor checks it (`visor check`), and only then is it moved into place and Visor restarted. One Visor refuses leaves the board as it was, and the response says why |
@@ -46,8 +46,9 @@ pack what it needs, and nothing more:
   });
   ```
 
-- **The cameras' names:** `/dev/v4l/by-id/`, `/dev/v4l/by-path/` and the cameras' serials under
-  `/sys/class/video4linux/` are readable by anyone, so listing them needs nothing.
+- **The cameras' names:** `/dev/v4l/by-id/`, `/dev/v4l/by-path/` and the cameras' serials and
+  indexes under `/sys/class/video4linux/` are readable by anyone, so listing them needs nothing:
+  `visor cameras --names` opens no camera.
 
 `VISOR_DIR`, `VISOR_BY_ID`, `VISOR_BY_PATH`, `VISOR_SYSFS` and `VISOR_RESTART`, in the agent's
 environment, change where it looks

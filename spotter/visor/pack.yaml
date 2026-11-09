@@ -11,7 +11,7 @@ collectors:
     fields:
       version: {label: Visor, type: text}           # empty: none installed
       config: {label: Configuration (SHA-256), type: text}   # empty: none
-      cameras: {label: Cameras plugged in, type: text}       # each by its name as `visor cameras` gives it, comma-separated
+      cameras: {label: Cameras plugged in, type: text}       # each by its name as `visor cameras --names` gives it, comma-separated
 logs:
   - id: log
     label: Visor's log

@@ -17,35 +17,13 @@ if [ -f "$dir/visor.toml" ]; then
   config=$(sha256sum "$dir/visor.toml" | cut -d ' ' -f 1)
 fi
 
-# Whether a video device's USB device reports a serial that isn't blank.
-has_serial() {
-  serial="$sysfs/${1##*/}/device/../serial"
-  [ -r "$serial" ] && [ -n "$(tr -d '[:space:]' < "$serial")" ]
-}
-
-# Each camera's capture device once, by its name as `visor cameras` gives it: its by-id name, from
-# its serial, which finds it after a replug into any port, when it has a serial and udev gave it the
-# name; otherwise its by-path name, from the port. A camera with no serial shares its by-id name
-# with every camera of its model, so it's never named by it, even alone. Only the characters such
-# names have, so the JSON needs no escaping.
+# Each camera plugged in, by the name the robot gives it, comma-separated: as the installed program
+# names them (`visor cameras --names`, one per line, and only with the characters udev uses, so the
+# JSON needs no escaping). Visor owns the rule, so there are none when no program can say.
 cameras=""
-seen=" "
-for folder in "$by_id" "$by_path"; do
-  for link in "$folder"/*-video-index0; do
-    [ -e "$link" ] || continue
-    name=${link##*/}
-    case $name in
-      *[!A-Za-z0-9_.:+-]*) continue ;;
-    esac
-    device=$(readlink -f "$link")
-    case $seen in
-      *" $device "*) continue ;;
-    esac
-    if [ "$folder" = "$by_id" ] && ! has_serial "$device"; then
-      continue
-    fi
-    seen="$seen$device "
-    cameras="${cameras:+$cameras,}$name"
-  done
-done
+if [ -x "$dir/visor" ] &&
+  names=$("$dir/visor" cameras --names --by-id "$by_id" --by-path "$by_path" --sysfs "$sysfs" \
+    2>/dev/null); then
+  cameras=$(printf '%s\n' "$names" | paste -s -d , -)
+fi
 printf '{"version": "%s", "config": "%s", "cameras": "%s"}\n' "$version" "$config" "$cameras"

@@ -100,7 +100,20 @@ enum Command {
     },
     /// List the cameras plugged in: each one's device to give Visor, the formats and sizes it
     /// offers, and its controls, with their ranges and defaults. Works while the service runs.
-    Cameras,
+    Cameras {
+        /// Only each camera's name, one per line, as Visor's Spotter pack reports them to the
+        /// robot (spotter/visor/status): no camera is opened.
+        #[arg(long)]
+        names: bool,
+        /// udev's folders of names, and the kernel's video devices, for an image laid out
+        /// otherwise (the pack's VISOR_BY_ID, VISOR_BY_PATH and VISOR_SYSFS), and tests.
+        #[arg(long, default_value = cameras::BY_ID)]
+        by_id: PathBuf,
+        #[arg(long, default_value = cameras::BY_PATH)]
+        by_path: PathBuf,
+        #[arg(long, default_value = cameras::SYSFS)]
+        sysfs: PathBuf,
+    },
     /// Print the version, its version ID, and the licence notices.
     Version,
 }
@@ -144,7 +157,12 @@ fn main() -> ExitCode {
             }
         }
         Command::Check { config } => check(&config),
-        Command::Cameras => cameras(),
+        Command::Cameras {
+            names,
+            by_id,
+            by_path,
+            sysfs,
+        } => list_cameras(names, &by_id, &by_path, &sysfs),
         Command::Version => {
             version();
             Ok(())
@@ -473,18 +491,30 @@ fn save_frames(
     Ok(())
 }
 
+/// `visor cameras`: each camera described, or only its name.
+fn list_cameras(names: bool, by_id: &Path, by_path: &Path, sysfs: &Path) -> Result<()> {
+    let plugged = cameras::plugged(by_id, by_path, sysfs)?;
+    if names {
+        camera_names(&plugged);
+        return Ok(());
+    }
+    cameras(&plugged)
+}
+
+/// Each camera's name, one per line, for Visor's Spotter pack.
+fn camera_names(plugged: &[cameras::Plugged]) {
+    for name in cameras::capture_names(plugged) {
+        println!("{name}");
+    }
+}
+
 /// Each camera plugged in: the device to give Visor, what it offers, and its controls. A video
-/// device that offers no capture format (a UVC camera's second, metadata, device) is left out.
-fn cameras() -> Result<()> {
-    let plugged = cameras::plugged(
-        Path::new(cameras::BY_ID),
-        Path::new(cameras::BY_PATH),
-        Path::new(cameras::SYSFS),
-    )?;
+/// device that doesn't capture (a UVC camera's second, metadata, device) is left out.
+fn cameras(plugged: &[cameras::Plugged]) -> Result<()> {
     let mut listed = 0;
-    for each in &plugged {
+    for each in plugged.iter().filter(|each| each.captures()) {
         let offers = match offered(&each.device) {
-            Ok(offers) if offers.is_empty() => continue,
+            Ok(offers) if offers.is_empty() => vec!["no capture formats".to_string()],
             Ok(offers) => offers,
             Err(why) => vec![format!("can't be read: {why}")],
         };
