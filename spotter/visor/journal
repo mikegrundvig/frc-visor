@@ -1,6 +1,7 @@
 #!/bin/sh
 # Spotter's catalog journal script (github.com/mikegrundvig/frc-spotter, packs/debian/journal, MIT
-# License), its example changed to this pack's service.
+# License), its example changed to this pack's service, and journalctl's exit status kept: this
+# pack's one copy, as a pack runs only its own files.
 # A page of the journal, as journalctl -o json writes it, by what the agent asks in SPOTTER_*:
 # SPOTTER_FROM latest (the newest SPOTTER_LIMIT entries), before or after SPOTTER_CURSOR (an
 # entry's __CURSOR), oldest first, at SPOTTER_LEVEL or more severe. Its arguments go to journalctl
@@ -36,21 +37,43 @@ unauth() {
   fi
 }
 
-case ${SPOTTER_FROM:-latest} in
+from=${SPOTTER_FROM:-latest}
+case $from in
   latest)
     # Newest first, as many as asked, then oldest first.
-    journalctl "$@" --reverse | unauth | head -n "$limit" | tac
+    set -- "$@" --reverse
     ;;
   before)
     # Back from the cursor's entry, newest first: that entry left out, then oldest first.
-    journalctl "$@" --cursor="$cursor" --reverse | grep -v -F -e "$cursor" | unauth |
-      head -n "$limit" | tac
+    set -- "$@" --cursor="$cursor" --reverse
     ;;
   after)
-    journalctl "$@" --after-cursor="$cursor" | unauth | head -n "$limit"
+    set -- "$@" --after-cursor="$cursor"
     ;;
   *)
-    echo "SPOTTER_FROM is latest, before or after, not $SPOTTER_FROM" >&2
+    echo "SPOTTER_FROM is latest, before or after, not $from" >&2
     exit 2
     ;;
+esac
+
+# journalctl's lines, as the page has them.
+page() {
+  case $from in
+    latest) unauth | head -n "$limit" | tac ;;
+    before) grep -v -F -e "$cursor" | unauth | head -n "$limit" | tac ;;
+    after) unauth | head -n "$limit" ;;
+  esac
+}
+
+# journalctl's own exit status, through the pipe, on descriptor 3 (POSIX sh has no pipefail): a
+# journal it can't read, or a cursor it refuses, is a failed page, not an empty one. Stopped by
+# SIGPIPE (128 + 13) once the page has all it wants is no failure.
+exec 4>&1
+status=$({ {
+  journalctl "$@"
+  echo "$?" >&3
+} | page >&4; } 3>&1)
+case $status in
+  0 | 141) ;;
+  *) exit "$status" ;;
 esac
