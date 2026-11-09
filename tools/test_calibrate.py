@@ -372,6 +372,19 @@ class FailedSolves(unittest.TestCase):
                 self.assertIn(says, str(refused.exception))
 
 
+class VisorWrittenFrames(unittest.TestCase):
+    """A PGM written by Visor's own writer (testdata/visor-written.pgm, which Visor's test
+    tests/pgm_for_calibrate.rs keeps matching what `visor record` writes) is read with its pixels."""
+
+    def test_the_pixels_come_through(self):
+        width, height = 37, 23
+        expected = ((np.arange(width * height) + 10) % 256).astype(np.uint8).reshape(height, width)
+        [(name, image)] = calibrate.read_frames([REPO / "testdata" / "visor-written.pgm"])
+        self.assertEqual(name, "visor-written.pgm")
+        self.assertEqual(image.dtype, np.uint8)
+        np.testing.assert_array_equal(image, expected)
+
+
 def visor_binary():
     given = os.environ.get("VISOR_BIN")
     if given:
