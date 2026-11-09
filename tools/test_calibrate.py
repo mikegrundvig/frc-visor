@@ -22,6 +22,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+from unittest import mock
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -232,6 +233,142 @@ class RefusedSessions(unittest.TestCase):
             with self.subTest(name):
                 with self.assertRaises(calibrate.Refused) as refused:
                     calibrate.solve([(n, image) for n, image, _, _ in frames])
+                self.assertIn(says, str(refused.exception))
+
+
+EVERY_NINTH = [(row, column) for row in range(3) for column in range(3)]
+BUT_TOP_LEFT = EVERY_NINTH[1:]
+
+
+def flat_view(name, ninths, rng):
+    """A view with 25 corners in each ninth of the frame named. OpenCV's solve is never run on it:
+    the tests that use it stand in their own, so only where its corners fall matters."""
+    corners = [
+        np.column_stack([rng.uniform(c * W / 3, (c + 1) * W / 3, 25), rng.uniform(r * H / 3, (r + 1) * H / 3, 25)])
+        for r, c in ninths
+    ]
+    corners = np.vstack(corners)
+    return calibrate.View(name, corners, np.zeros((len(corners), 3)))
+
+
+def standing_in(views):
+    """What solve() needs to take these views as the ones it found: a frame of the right size for
+    each, and a find_board that hands back the view for each frame in turn."""
+    frames = [(view.name, np.broadcast_to(np.uint8(0), (H, W))) for view in views]
+    queue = []
+
+    def find_board(image, board, detector, name, limits):
+        if not queue:
+            queue.extend(views)
+        return queue.pop(0), None
+
+    return frames, mock.patch.object(calibrate, "find_board", find_board)
+
+
+def solver_giving(error_of):
+    """A solve_views that gives each view the error error_of(view, every name in the solve)
+    returns, as OpenCV would after fitting that set of views."""
+
+    def solve_views(views, size, rational):
+        present = {view.name for view in views}
+        for view in views:
+            view.error_px = error_of(view, present)
+        rms = float(np.sqrt(np.mean([view.error_px**2 for view in views])))
+        return rms, LENSES[0].camera_matrix.copy(), LENSES[0].distortion.copy(), np.full(9, 0.1)
+
+    return solve_views
+
+
+def heavy_hides_moderate(view, present):
+    """Two badly wrong views pull the fit, so the good ones' errors rise and hide a third, milder
+    outlier until the two are gone."""
+    if view.name.startswith("heavy"):
+        return 5.0
+    if view.name.startswith("moderate"):
+        return 1.0
+    return 0.4 if "heavy-0" in present else 0.1
+
+
+def bad_is_bad(view, present):
+    return 2.0 if view.name.startswith("bad") else 0.1
+
+
+class OutlierDrops(unittest.TestCase):
+    """Views far worse than the rest are dropped, and what is left is checked and solved again until
+    nothing more is dropped; a drop that would leave too little is refused, or said."""
+
+    def test_drops(self):
+        rng = np.random.default_rng(5)
+        good = [flat_view(f"good-{n:02d}", EVERY_NINTH, rng) for n in range(16)]
+        no_corner = [flat_view(f"good-{n:02d}", BUT_TOP_LEFT, rng) for n in range(16)]
+        heavy = [flat_view(f"heavy-{n}", EVERY_NINTH, rng) for n in range(2)]
+        moderate = [flat_view("moderate-0", EVERY_NINTH, rng)]
+        bad = [flat_view(f"bad-{n}", EVERY_NINTH, rng) for n in range(2)]
+        # Frames named alike in two folders: a bad view named as a good one is dropped alone.
+        twin = flat_view("good-00", EVERY_NINTH, rng)
+        cases = [
+            # Each row: views, their errors, then views kept, names dropped, and a note or a refusal.
+            ("nothing to drop", good, bad_is_bad, 16, [], None, None),
+            ("a second round finds what the first hid", good + heavy + moderate, heavy_hides_moderate, 16,
+             ["heavy-0", "heavy-1", "moderate-0"], None, None),
+            ("outliers were the only views near an edge", no_corner + bad, bad_is_bad, None, None, None,
+             "were the only ones near the frame's top left"),
+            ("too few would remain", good[:14] + bad[:1], bad_is_bad, 15, [], "kept 1 view over 3 times", None),
+            ("views that share a name", good + [twin], lambda view, present: 2.0 if view is twin else 0.1, 16,
+             ["good-00"], None, None),
+        ]
+        for name, views, error_of, kept, dropped, note, refusal in cases:
+            with self.subTest(name):
+                frames, found = standing_in(views)
+                with found, mock.patch.object(calibrate, "solve_views", solver_giving(error_of)):
+                    if refusal is not None:
+                        with self.assertRaises(calibrate.Refused) as refused:
+                            calibrate.solve(frames)
+                        self.assertIn(refusal, str(refused.exception))
+                        continue
+                    lens = calibrate.solve(frames)
+                self.assertEqual(len(lens.views), kept, "views kept")
+                self.assertEqual(sorted(n for n, _ in lens.dropped), dropped, "views dropped")
+                if note is None:
+                    self.assertEqual(lens.notes, [])
+                else:
+                    self.assertEqual(len(lens.notes), 1)
+                    self.assertIn(note, lens.notes[0])
+                    self.assertIn(note, calibrate.report(lens))
+
+
+def opencv_giving(rms=0.2, fx=1230.0, k1=-0.08, view_error=0.2):
+    """OpenCV's solve as it can come back from a failed fit: the values given, the rest ordinary."""
+
+    def calibrate_camera_extended(object_points, image_points, size, *rest, **options):
+        matrix = np.array([[fx, 0, 800.0], [0, 1231.0, 650.0], [0, 0, 1]])
+        distortion = np.array([[k1, 0.02, 0.0, 0.0, 0.0]])
+        errors = np.full((len(object_points), 1), 0.2)
+        errors[0] = view_error
+        return rms, matrix, distortion, None, None, np.full((18, 1), 0.1), None, errors
+
+    return calibrate_camera_extended
+
+
+class FailedSolves(unittest.TestCase):
+    """A solve that comes back with an error or a parameter that isn't a number is refused, not
+    printed as a lens block that wouldn't parse."""
+
+    def test_refusals(self):
+        rng = np.random.default_rng(9)
+        views = [flat_view(f"good-{n:02d}", EVERY_NINTH, rng) for n in range(16)]
+        cases = [
+            ("the error is NaN", opencv_giving(rms=float("nan")), "RMS error"),
+            ("fx is NaN", opencv_giving(fx=float("nan")), "fx"),
+            ("k1 is infinite", opencv_giving(k1=float("inf")), "distortion 1"),
+            ("one view's error is NaN", opencv_giving(view_error=float("nan")), "good-00"),
+        ]
+        for name, opencv, says in cases:
+            frames, found = standing_in(views)
+            with self.subTest(name), found, mock.patch.object(calibrate.cv2, "calibrateCameraExtended", opencv):
+                with self.assertRaises(calibrate.Refused) as refused:
+                    calibrate.solve(frames)
+                self.assertIn("not a number", str(refused.exception))
                 self.assertIn(says, str(refused.exception))
 
 

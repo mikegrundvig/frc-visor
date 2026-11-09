@@ -12,7 +12,8 @@ exact size doesn't change the lens, but its squares must come out square. `solve
 each frame, solves the lens as OpenCV does, and prints it twice: as a `[camera.lens]` block for the
 camera's entry in Visor's configuration, and as the robot definition takes it, for a robot whose
 deploy writes that configuration. It refuses a session that can't give a good lens: too few views,
-views that miss part of the frame (the edges are where the distortion is), or too large an error.
+views that miss part of the frame (the edges are where the distortion is, so also when the views
+near one were the outliers dropped), too large an error, or a solve that failed.
 """
 
 import argparse
@@ -65,7 +66,8 @@ class Limits:
     min_per_region: int = 20
 
 
-@dataclass
+# Frames named alike in two folders make views of one name, so a view is equal only to itself.
+@dataclass(eq=False)
 class View:
     name: str
     corners: np.ndarray  # n × 2 pixels
@@ -83,6 +85,7 @@ class Lens:
     deviations: np.ndarray  # fx, fy, cx, cy, then the distortion's, one standard deviation each
     views: list
     dropped: list  # (name, why)
+    notes: list  # what the solve did that whoever pastes the lens should know
 
     @property
     def fx(self):
@@ -165,6 +168,29 @@ def coverage(views, width, height):
     return counts
 
 
+def thin_regions(views, size, limits):
+    """The ninths of the frame with too few corners across these views, by name."""
+    counts = coverage(views, *size)
+    return [REGION_NAMES[r][c] for r in range(3) for c in range(3) if counts[r, c] < limits.min_per_region]
+
+
+def not_numbers(rms, camera_matrix, distortion, views):
+    """The values a solve gave that aren't finite numbers, by name: a failed fit can come back
+    with NaN, which no limit catches and no robot can use."""
+    values = {
+        "RMS error": rms,
+        "fx": camera_matrix[0, 0],
+        "fy": camera_matrix[1, 1],
+        "cx": camera_matrix[0, 2],
+        "cy": camera_matrix[1, 2],
+    }
+    for n, coefficient in enumerate(distortion):
+        values[f"distortion {n + 1}"] = coefficient
+    for view in views:
+        values[f"{view.name}'s error"] = view.error_px
+    return [name for name, value in values.items() if not np.isfinite(value)]
+
+
 def solve_views(views, size, rational):
     flags = cv2.CALIB_RATIONAL_MODEL if rational else 0
     rms, camera_matrix, distortion, _, _, deviations, _, errors = cv2.calibrateCameraExtended(
@@ -178,7 +204,45 @@ def solve_views(views, size, rational):
     )
     for view, error in zip(views, errors.ravel()):
         view.error_px = float(error)
-    return rms, camera_matrix, distortion.ravel(), deviations.ravel()
+    distortion = distortion.ravel()
+    failed = not_numbers(rms, camera_matrix, distortion, views)
+    if failed:
+        raise Refused(f"the solve failed: its {', '.join(failed)} came out not a number")
+    return rms, camera_matrix, distortion, deviations.ravel()
+
+
+def plural(count, noun):
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def fit(views, size, limits, rational):
+    """Solves the lens, drops the views far worse than the rest (blurred or misdetected ones), and
+    checks and solves again, until no view is dropped. Returns the last solve, the views it used,
+    the views dropped and why, and notes on what it kept."""
+    dropped, notes = [], []
+    while True:
+        solved = solve_views(views, size, rational)
+        median = float(np.median([v.error_px for v in views]))
+        outliers = [v for v in views if v.error_px > 3 * median]
+        if not outliers:
+            return solved, views, dropped, notes
+        remaining = [v for v in views if v not in outliers]
+        names = ", ".join(v.name for v in outliers)
+        if len(remaining) < limits.min_views:
+            notes.append(
+                f"kept {plural(len(outliers), 'view')} over 3 times the median error ({names}): dropping "
+                f"them would leave {len(remaining)}, under {limits.min_views}"
+            )
+            return solved, views, dropped, notes
+        thin = thin_regions(remaining, size, limits)
+        if thin:
+            raise Refused(
+                f"the views over 3 times the median error ({names}) were the only ones near the frame's "
+                f"{', '.join(thin)}: hold the board there again, steady and in focus"
+            )
+        for view in outliers:
+            dropped.append((view.name, f"error {view.error_px:.2f} px, over 3 times the median"))
+        views = remaining
 
 
 def solve(images, board=Board(), limits=Limits(), rational=False):
@@ -200,29 +264,21 @@ def solve(images, board=Board(), limits=Limits(), rational=False):
             views.append(view)
     if len(views) < limits.min_views:
         raise Refused(f"the board was found in {len(views)} frames; it needs {limits.min_views}")
-    counts = coverage(views, width, height)
-    thin = [REGION_NAMES[r][c] for r in range(3) for c in range(3) if counts[r, c] < limits.min_per_region]
+    thin = thin_regions(views, (width, height), limits)
     if thin:
         raise Refused(
             f"too few corners near the frame's {', '.join(thin)} (each ninth needs "
             f"{limits.min_per_region}): hold the board there too, the lens bends most at the edges"
         )
 
-    rms, camera_matrix, distortion, deviations = solve_views(views, (width, height), rational)
-    # A view far worse than the rest is a blurred or misdetected one: drop those once and solve again.
-    median = float(np.median([v.error_px for v in views]))
-    outliers = [v for v in views if v.error_px > 3 * median]
-    if outliers and len(views) - len(outliers) >= limits.min_views:
-        for view in outliers:
-            dropped.append((view.name, f"error {view.error_px:.2f} px, over 3 times the median"))
-        views = [v for v in views if v not in outliers]
-        rms, camera_matrix, distortion, deviations = solve_views(views, (width, height), rational)
+    solved, views, outliers, notes = fit(views, (width, height), limits, rational)
+    rms, camera_matrix, distortion, deviations = solved
     if rms > limits.max_rms_px:
         raise Refused(
             f"RMS error {rms:.2f} px, over {limits.max_rms_px}: blurred frames, a board that isn't flat, "
             "or a board printed out of square"
         )
-    return Lens(width, height, camera_matrix, distortion, rms, deviations, views, dropped)
+    return Lens(width, height, camera_matrix, distortion, rms, deviations, views, dropped + outliers, notes)
 
 
 def report(lens):
@@ -237,6 +293,8 @@ def report(lens):
     lines.append("  worst views: " + ", ".join(f"{v.name} {v.error_px:.2f} px" for v in worst))
     for name, why in lens.dropped:
         lines.append(f"  left out {name}: {why}")
+    for note in lens.notes:
+        lines.append(f"  note: {note}")
     return "\n".join(lines)
 
 
