@@ -20,9 +20,10 @@ const CAMERA: &str = r#"
     height = 1304
 "#;
 
-/// The program, started on a configuration with frames going to `robot`. `panic_in` names a
-/// camera whose detect thread is to panic (VISOR_TEST_PANIC, a debug build's fault switch).
-fn start(test: &str, robot: &str, panic_in: Option<&str>) -> Child {
+/// The program, started on a configuration with frames going to `robot`, and the directory the
+/// configuration is in. `panic_in` names a camera whose detect thread is to panic
+/// (VISOR_TEST_PANIC, a debug build's fault switch).
+fn start(test: &str, robot: &str, panic_in: Option<&str>) -> (Child, PathBuf) {
     let dir = std::env::temp_dir().join(format!("visor-run-{test}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let config: PathBuf = dir.join("visor.toml");
@@ -37,7 +38,7 @@ fn start(test: &str, robot: &str, panic_in: Option<&str>) -> Child {
     if let Some(camera) = panic_in {
         command.env("VISOR_TEST_PANIC", camera);
     }
-    command.spawn().unwrap()
+    (command.spawn().unwrap(), dir)
 }
 
 /// The program's exit status once it ends, or None if it's still running after `wait`; then it's
@@ -60,8 +61,10 @@ fn a_panic_in_one_camera_s_thread_ends_the_process() {
     // The other threads (the camera's capture and live view, and the live view's server) run on.
     // Unless the panic aborts, the process stays up with this camera dead, and systemd never
     // restarts it.
-    let mut child = start("panic", "127.0.0.1", Some("front-left"));
-    let status = ended_within(&mut child, PATIENCE).expect("the process ends");
+    let (mut child, dir) = start("panic", "127.0.0.1", Some("front-left"));
+    let status = ended_within(&mut child, PATIENCE);
+    std::fs::remove_dir_all(dir).unwrap();
+    let status = status.expect("the process ends");
     assert_eq!(status.signal(), Some(libc::SIGABRT), "{status}");
 }
 
@@ -69,7 +72,8 @@ fn a_panic_in_one_camera_s_thread_ends_the_process() {
 fn no_route_to_the_robot_yet_is_not_a_reason_to_stop() {
     // A broadcast address can't be sent to without SO_BROADCAST, as an address with no route
     // can't be while the network comes up: each frame fails to send, and the cameras run.
-    let mut child = start("no-route", "255.255.255.255", None);
+    let (mut child, dir) = start("no-route", "255.255.255.255", None);
     let ended = ended_within(&mut child, Duration::from_millis(1500));
+    std::fs::remove_dir_all(dir).unwrap();
     assert_eq!(ended, None, "the program ended");
 }

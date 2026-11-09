@@ -45,14 +45,14 @@ fn check_passes_a_good_file_and_names_what_is_wrong_with_a_bad_one() {
             "/no/such/visor.toml",
         ),
     ];
-    for (path, passes, said) in cases {
+    for (path, passes, said) in &cases {
         let output = Command::new(env!("CARGO_BIN_EXE_visor"))
             .arg("check")
             .arg("--config")
-            .arg(&path)
+            .arg(path)
             .output()
             .unwrap();
-        let printed = if passes {
+        let printed = if *passes {
             &output.stdout
         } else {
             &output.stderr
@@ -60,10 +60,11 @@ fn check_passes_a_good_file_and_names_what_is_wrong_with_a_bad_one() {
         let printed = String::from_utf8_lossy(printed);
         assert_eq!(
             output.status.success(),
-            passes,
+            *passes,
             "{}: {printed}",
             path.display()
         );
         assert!(printed.contains(said), "{}: {printed}", path.display());
     }
+    std::fs::remove_dir_all(cases[1].0.parent().unwrap()).unwrap();
 }
