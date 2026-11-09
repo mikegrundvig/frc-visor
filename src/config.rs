@@ -182,7 +182,7 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Config, ConfigError> {
-        let file: File = toml::from_str(text).map_err(|e| ConfigError(e.message().to_string()))?;
+        let file: File = toml::from_str(text).map_err(|e| unreadable(text, &e))?;
         let address = match (file.robot, file.team) {
             (Some(robot), None) => robot,
             (None, Some(team)) => team_address(team)?,
@@ -197,6 +197,12 @@ impl Config {
             return Err(ConfigError(format!(
                 "tag_size_m is the tags' black square in metres, not {tag_size_m}"
             )));
+        }
+        let port = file.port.unwrap_or(DEFAULT_PORT);
+        if port == 0 {
+            return Err(ConfigError(
+                "port is the robot's UDP port, 1 to 65535, not 0".into(),
+            ));
         }
         if file.cameras.is_empty() {
             return Err(ConfigError("no [[camera]]".into()));
@@ -221,10 +227,22 @@ impl Config {
             cameras.push(camera);
         }
         Ok(Config {
-            robot: SocketAddr::new(address, file.port.unwrap_or(DEFAULT_PORT)),
+            robot: SocketAddr::new(address, port),
             cameras,
         })
     }
+}
+
+/// A file TOML or its types refuse, with the line it's on, so a bad value names its key.
+fn unreadable(text: &str, error: &toml::de::Error) -> ConfigError {
+    let message = error.message();
+    let Some(span) = error.span() else {
+        return ConfigError(message.to_string());
+    };
+    let start = span.start.min(text.len());
+    let number = text[..start].matches('\n').count() + 1;
+    let line = text.lines().nth(number - 1).unwrap_or("").trim();
+    ConfigError(format!("line {number} (`{line}`): {message}"))
 }
 
 /// The robot controller's address for a team number: 10.TE.AM.2.
@@ -270,6 +288,21 @@ fn check_camera(file: CameraFile, tag_size_m: f64) -> Result<Camera, ConfigError
             "exposure_us is the exposure in microseconds, 1 to 10000000, not {us}"
         )));
     }
+    if let Some(gain) = file.gain
+        && !(0..=i64::from(i32::MAX)).contains(&gain)
+    {
+        // Frames carry the gain as a 32-bit number, as V4L2 sets it.
+        return Err(fail(format!(
+            "gain is the camera's gain control, 0 to {}, not {gain}",
+            i32::MAX
+        )));
+    }
+    let time_offset_us = file.time_offset_us.unwrap_or(0);
+    let Some(time_offset_nanos) = time_offset_us.checked_mul(1_000) else {
+        return Err(fail(format!(
+            "time_offset_us is microseconds added to each capture time, not {time_offset_us}"
+        )));
+    };
     let stream =
         check_stream(file.stream_scale, file.stream_fps, file.stream_quality, fps).map_err(fail)?;
     let mut controls = Vec::new();
@@ -306,7 +339,7 @@ fn check_camera(file: CameraFile, tag_size_m: f64) -> Result<Camera, ConfigError
         fps,
         format: file.format,
         min_tag_px,
-        time_offset_nanos: file.time_offset_us.unwrap_or(0) * 1_000,
+        time_offset_nanos,
         exposure_us: file.exposure_us,
         gain: file.gain,
         controls,
@@ -540,9 +573,74 @@ mod tests {
                 format!("team = 1234\n{CAMERA}stream_quality = 101\n"),
                 "stream_quality is a JPEG quality",
             ),
+            (
+                format!("team = 1234\n{CAMERA}fps = 0\n"),
+                "fps 0 isn't a frame rate",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}fps = 1001\n"),
+                "fps 1001 isn't a frame rate",
+            ),
+            (
+                format!("team = 1234\nport = 0\n{CAMERA}"),
+                "port is the robot's UDP port, 1 to 65535, not 0",
+            ),
+            (
+                format!("team = 1234\nport = 70000\n{CAMERA}"),
+                "line 2 (`port = 70000`): invalid value",
+            ),
+            (
+                format!("tag_size_m = -0.1651\nteam = 1234\n{CAMERA}"),
+                "tag_size_m is the tags' black square in metres, not -0.1651",
+            ),
+            (
+                format!("tag_size_m = 10.0\nteam = 1234\n{CAMERA}"),
+                "tag_size_m is the tags' black square in metres, not 10",
+            ),
+            (
+                format!("tag_size_m = nan\nteam = 1234\n{CAMERA}"),
+                "tag_size_m is the tags' black square in metres, not NaN",
+            ),
+            (
+                format!("team = 1234\n{}", CAMERA.replace("index = 0", "index = -1")),
+                "(`index = -1`): invalid value",
+            ),
+            (
+                format!(
+                    "team = 1234\n{}",
+                    CAMERA.replace("index = 0", "index = 256")
+                ),
+                "(`index = 256`): invalid value",
+            ),
+            (
+                format!(
+                    "team = 1234\n{CAMERA}{}{}",
+                    second.replace("index = 0", "index = 1"),
+                    CAMERA.replace("front-left", "back")
+                ),
+                "two cameras have index 0",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}gain = -1\n"),
+                "gain is the camera's gain control, 0 to 2147483647, not -1",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}gain = 2147483648\n"),
+                "gain is the camera's gain control, 0 to 2147483647, not 2147483648",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}time_offset_us = 9223372036854775807\n"),
+                "time_offset_us is microseconds added to each capture time, not 9223372036854775807",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}time_offset_us = -9223372036854775808\n"),
+                "time_offset_us is microseconds added to each capture time",
+            ),
         ];
         for (text, why) in cases {
-            let error = Config::parse(&text).unwrap_err().0;
+            let Err(ConfigError(error)) = Config::parse(&text) else {
+                panic!("{why:?}: accepted\n{text}");
+            };
             assert!(error.contains(why), "{why:?} not in {error:?}");
         }
     }
