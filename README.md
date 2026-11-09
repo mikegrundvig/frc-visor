@@ -169,11 +169,18 @@ A bought ChArUco board works too: pass its `--squares`, `--square-mm`, `--marker
 markers is `--squares 15x15 --square-mm 28.575 --marker-mm 22.225 --dictionary 4X4_1000`), and
 skip printing.
 
-With the camera plugged into a Linux laptop instead of a coprocessor, two live views help:
-`uv run tools/focus.py <device>` shows how sharp the middle of the frame is while you turn the lens
-to its peak, and `uv run tools/capture.py <device> --out frames/` (with the board's options) shows
-the board's corners, its rough distance and tilt, and each ninth of the frame's coverage, and saves
-a frame every 1.5 s while the board is steady. Solve its folder as below.
+With the camera plugged into a Linux laptop instead of a coprocessor, `uv run tools/capture.py
+<device> --out frames/` (with the board's options) is a live view for both steps. It opens paused,
+for focusing: a bar shows how sharp the middle of the frame is against the best seen, `f` zooms the
+middle to full size, and `r` resets the peak; turn the lens to the peak and lock it. Then `s` starts
+recording: it shows the board's corners, its rough distance and tilt, each ninth of the frame's
+coverage and how far the corners reach toward each corner of the frame, and saves a frame every
+1.5 s while the board is steady. Solve its folder as below.
+
+A good session has the board's corners reaching every corner of the frame (a partly visible board
+counts), the board tilted 30 to 45 degrees about both axes, top toward and away as well as the
+sides, at several places in the frame, at two distances, and 40 to 60 views. Corners only in the
+middle of the frame leave the lens a guess out at its edges, where the distortion is largest.
 
 1. Print `board.png` at 100% scale and fix it flat to something rigid.
 2. On the coprocessor, `visor cameras` lists each camera plugged in: the device to give Visor, and
@@ -205,14 +212,17 @@ uv run tools/calibrate.py solve frames/*.pgm --out lens.toml
 
 It prints the error of each view and how well each part of the frame was covered, and writes a
 `[camera.lens]` block for that camera's entry in the configuration. It refuses a session it can't
-trust (too few frames with the board, part of the frame never reached, or too large an error) and
-says which. Add `--rational` for a wide lens with strong distortion. Then check a tag at a measured
+trust (too few frames with the board, part of the frame never reached, too few corners out toward
+one of the frame's corners, or too large an error) and says which. The distortion has five terms,
+the fifth (k3) held at 0, since a session can rarely tell it from the others; add `--free-k3` for a
+lens that needs it, or `--rational` for eight terms, for a wide lens with strong distortion. Then check a tag at a measured
 distance with `visor detect --config ... --camera ...`.
 
 Its tests (`uv run tools/test_calibrate.py`) render boards through lenses whose values are known,
-including a strongly distorted one, and check the tool gives them back; then a tag drawn through
-that lens near the frame's corner, solved by Visor with the tool's block, lands within 1 mm of its
-true place 4.3 m out, where leaving the distortion out puts it 63 cm off.
+including a strongly distorted one (solved with `--free-k3`), and check the tool gives them back;
+then a tag drawn through that lens near the frame's corner, solved by Visor with the tool's block,
+lands within 1 mm of its true place 4.3 m out, where leaving the distortion out puts it 63 cm off.
+`uv run tools/test_capture.py` tests the live view's choices of which frames to save.
 
 ## The robot's side
 
