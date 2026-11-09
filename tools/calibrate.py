@@ -14,11 +14,16 @@ camera's entry in Visor's configuration, and as the robot definition takes it, f
 deploy writes that configuration. It refuses a session that can't give a good lens: too few views,
 views that miss part of the frame (the edges are where the distortion is, so also when the views
 near one were the outliers dropped), too large an error, or a solve that failed.
+
+The distortion is solved with five terms, the fifth (k3) held at 0: a session that doesn't reach the
+frame's corners can't tell k3 from k2, and a free k3 only swings the lens out where no corner was
+seen. --free-k3 solves all five, for a lens that needs it; --rational solves eight, for a wide lens.
 """
 
 import argparse
 import sys
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 import cv2
@@ -66,6 +71,27 @@ class Limits:
     min_per_region: int = 20
 
 
+class Model(Enum):
+    """How many distortion terms the solve fits."""
+
+    # Five terms, the fifth (k3) held at 0.
+    K3_FIXED = "k3 fixed"
+    # Five terms, all free.
+    FIVE = "five terms"
+    # Eight terms, for a wide lens.
+    RATIONAL = "eight terms"
+
+
+OPENCV_FLAGS = {
+    Model.K3_FIXED: cv2.CALIB_FIX_K3,
+    Model.FIVE: 0,
+    Model.RATIONAL: cv2.CALIB_RATIONAL_MODEL,
+}
+# The coefficients each model prints. OpenCV 5 gives fourteen for the rational model, the last six
+# (thin prism and tilt) held at 0; Visor and the robot take 4, 5 or 8.
+TERMS = {Model.K3_FIXED: 5, Model.FIVE: 5, Model.RATIONAL: 8}
+
+
 # Frames named alike in two folders make views of one name, so a view is equal only to itself.
 @dataclass(eq=False)
 class View:
@@ -86,6 +112,7 @@ class Lens:
     views: list
     dropped: list  # (name, why)
     notes: list  # what the solve did that whoever pastes the lens should know
+    model: Model
 
     @property
     def fx(self):
@@ -123,7 +150,7 @@ class Lens:
         """The block for the camera's entry in Visor's configuration."""
         coefficients = ", ".join(f"{c:.9g}" for c in self.distortion)
         return (
-            f"# visor calibrate: {len(self.views)} views, RMS {self.rms_px:.3f} px\n"
+            f"# visor calibrate: {len(self.views)} views, RMS {self.rms_px:.3f} px, {self.model.value}\n"
             "[camera.lens]\n"
             f"width = {self.width}\n"
             f"height = {self.height}\n"
@@ -191,8 +218,8 @@ def not_numbers(rms, camera_matrix, distortion, views):
     return [name for name, value in values.items() if not np.isfinite(value)]
 
 
-def solve_views(views, size, rational):
-    flags = cv2.CALIB_RATIONAL_MODEL if rational else 0
+def solve_views(views, size, model):
+    flags = OPENCV_FLAGS[model]
     rms, camera_matrix, distortion, _, _, deviations, _, errors = cv2.calibrateCameraExtended(
         [v.object_points.astype(np.float32) for v in views],
         [v.corners.astype(np.float32) for v in views],
@@ -204,7 +231,7 @@ def solve_views(views, size, rational):
     )
     for view, error in zip(views, errors.ravel()):
         view.error_px = float(error)
-    distortion = distortion.ravel()
+    distortion = distortion.ravel()[: TERMS[model]]
     failed = not_numbers(rms, camera_matrix, distortion, views)
     if failed:
         raise Refused(f"the solve failed: its {', '.join(failed)} came out not a number")
@@ -215,13 +242,13 @@ def plural(count, noun):
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
-def fit(views, size, limits, rational):
+def fit(views, size, limits, model):
     """Solves the lens, drops the views far worse than the rest (blurred or misdetected ones), and
     checks and solves again, until no view is dropped. Returns the last solve, the views it used,
     the views dropped and why, and notes on what it kept."""
     dropped, notes = [], []
     while True:
-        solved = solve_views(views, size, rational)
+        solved = solve_views(views, size, model)
         median = float(np.median([v.error_px for v in views]))
         outliers = [v for v in views if v.error_px > 3 * median]
         if not outliers:
@@ -245,7 +272,7 @@ def fit(views, size, limits, rational):
         views = remaining
 
 
-def solve(images, board=Board(), limits=Limits(), rational=False):
+def solve(images, board=Board(), limits=Limits(), model=Model.K3_FIXED):
     """The lens from frames of the board: a list of (name, 8-bit image)."""
     if not images:
         raise Refused("no frames")
@@ -271,18 +298,18 @@ def solve(images, board=Board(), limits=Limits(), rational=False):
             f"{limits.min_per_region}): hold the board there too, the lens bends most at the edges"
         )
 
-    solved, views, outliers, notes = fit(views, (width, height), limits, rational)
+    solved, views, outliers, notes = fit(views, (width, height), limits, model)
     rms, camera_matrix, distortion, deviations = solved
     if rms > limits.max_rms_px:
         raise Refused(
             f"RMS error {rms:.2f} px, over {limits.max_rms_px}: blurred frames, a board that isn't flat, "
             "or a board printed out of square"
         )
-    return Lens(width, height, camera_matrix, distortion, rms, deviations, views, dropped + outliers, notes)
+    return Lens(width, height, camera_matrix, distortion, rms, deviations, views, dropped + outliers, notes, model)
 
 
 def report(lens):
-    lines = [f"{lens.width} × {lens.height}, {len(lens.views)} views, RMS {lens.rms_px:.3f} px"]
+    lines = [f"{lens.width} × {lens.height}, {len(lens.views)} views, RMS {lens.rms_px:.3f} px, {lens.model.value}"]
     names = ["fx", "fy", "cx", "cy"]
     values = [lens.fx, lens.fy, lens.cx, lens.cy]
     lines.append("  " + "   ".join(f"{n} {v:.2f} ± {d:.2f}" for n, v, d in zip(names, values, lens.deviations)))
@@ -341,6 +368,14 @@ def board_from(args):
     return Board(columns, rows, args.square_mm / 1000, args.marker_mm / 1000, args.dictionary)
 
 
+def model_from(args):
+    if args.rational:
+        return Model.RATIONAL
+    if args.free_k3:
+        return Model.FIVE
+    return Model.K3_FIXED
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -351,7 +386,9 @@ def main(argv=None):
     solving = commands.add_parser("solve", help="solve the lens from frames of the board")
     board_arguments(solving)
     solving.add_argument("frames", nargs="+", type=Path)
-    solving.add_argument("--rational", action="store_true", help="eight distortion coefficients, for a wide lens")
+    terms = solving.add_mutually_exclusive_group()
+    terms.add_argument("--free-k3", action="store_true", help="solve the fifth distortion term too, held at 0 otherwise")
+    terms.add_argument("--rational", action="store_true", help="eight distortion coefficients, for a wide lens")
     solving.add_argument("--out", type=Path, help="also write the [camera.lens] block here")
     args = parser.parse_args(argv)
 
@@ -362,7 +399,7 @@ def main(argv=None):
         print("Print at 100% scale and fix it flat to something rigid. Check the squares came out square.")
         return 0
     try:
-        lens = solve(read_frames(args.frames), board, rational=args.rational)
+        lens = solve(read_frames(args.frames), board, model=model_from(args))
     except Refused as why:
         print(f"refused: {why}", file=sys.stderr)
         return 1
