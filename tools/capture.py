@@ -29,6 +29,8 @@ import argparse
 import math
 import sys
 import time
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 import cv2
@@ -167,6 +169,186 @@ def speed(before, after, seconds):
     return float(np.median(moved)) / seconds
 
 
+class Mode(Enum):
+    PAUSED = "PAUSED"
+    RECORDING = "RECORDING"
+
+
+class Shown(Enum):
+    """What the view shows: the whole frame with the board on it, or the middle at full size."""
+
+    WHOLE = "whole"
+    MIDDLE = "middle"
+
+
+@dataclass
+class Session:
+    """What the live view keeps from one frame to the next."""
+
+    mode: Mode
+    status: str
+    saved: list = field(default_factory=list)
+    shown: Shown = Shown.WHOLE
+    # The middle's sharpness, smoothed over a few frames; None until the first frame.
+    focus: float | None = None
+    focus_peak: float = 0.0
+    board_peak: float = 0.0
+    # Seconds until the next automatic save, while recording.
+    countdown: float | None = None
+    # The board as the frame before saw it, to tell how fast it moves, and when.
+    previous: dict | None = None
+    previous_time: float = 0.0
+    last_save: float = 0.0
+
+
+class Stop(Exception):
+    """The run is over: q was pressed, or the replay ran out of frames."""
+
+
+class Camera:
+    """The plugged-in camera, opened again when it comes back after it was unplugged or stalled."""
+
+    def __init__(self, device, width, height):
+        self.device, self.width, self.height = device, width, height
+        self.capture = open_camera(device, width, height)
+
+    def read(self, session):
+        """The next frame's luma, or None when there's none this time round."""
+        # Unplugged or stalled: wait for the camera to come back, the window kept live, and keep
+        # what's saved, rather than stopping or freezing.
+        if self.capture is None:
+            if waiting(self.device, f"no camera: {len(session.saved)} frames saved") == ord("q"):
+                raise Stop()
+            self.capture = open_camera(self.device, self.width, self.height)
+            session.previous = None
+            return None
+        ok, raw = self.capture.read()
+        if not ok:
+            self.capture.release()
+            self.capture = None
+            return None
+        return luma(raw, self.width, self.height)
+
+    def key(self):
+        return cv2.waitKey(1) & 0xFF
+
+    def steady(self, found):
+        return found is not None and found["speed"] is not None and found["speed"] < STEADY_PX_PER_S
+
+    def due(self, session, now, every):
+        return now - session.last_save >= every
+
+    def show(self, image):
+        cv2.imshow("calibration", image)
+
+
+class Replay:
+    """Saved frames read back in place of a camera, as a check: every frame with the board in it is
+    taken as steady and due, with no window and no keys."""
+
+    def __init__(self, folder):
+        self.paths = sorted(folder.glob("*.pgm"))
+
+    def read(self, session):
+        if not self.paths:
+            raise Stop()
+        path = self.paths.pop(0)
+        gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            print(f"left out {path.name}: it can't be read")
+        return gray
+
+    def key(self):
+        return -1
+
+    def steady(self, found):
+        return found is not None
+
+    def due(self, session, now, every):
+        return True
+
+    def show(self, image):
+        pass
+
+
+def carried_on(out, board, detector, lens):
+    """The frames an earlier run saved in the folder, so a run that stopped carries on where it
+    was. A file it can't read, as one left half written when that run was stopped, is left out."""
+    saved = []
+    for path in sorted(out.glob("capture-*.pgm")):
+        gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            print(f"left out {path.name}: it can't be read, perhaps half written when a run stopped")
+            continue
+        earlier = found_board(gray, board, detector, lens)
+        if earlier is not None:
+            saved.append({**earlier, "path": path})
+    return saved
+
+
+def update_focus(session, gray):
+    # Smoothed over a few frames, so sensor noise doesn't make the focus bar jump.
+    focus = sharpness(middle(gray))
+    session.focus = focus if session.focus is None else 0.7 * session.focus + 0.3 * focus
+    session.focus_peak = max(session.focus_peak, session.focus)
+
+
+def look_for_board(session, gray, board, detector, lens, now):
+    """The board in this frame, with how fast it moves since the frame before; None when it isn't
+    in view."""
+    found = found_board(gray, board, detector, lens)
+    if found is not None:
+        session.board_peak = max(session.board_peak, found["sharpness"])
+        found["speed"] = speed(session.previous, found, now - session.previous_time)
+    session.previous, session.previous_time = found, now
+    return found
+
+
+def toggle(session, key):
+    """s starts or pauses recording, f zooms the middle in or out, r resets the peaks."""
+    if key == ord("s"):
+        session.mode = Mode.PAUSED if session.mode == Mode.RECORDING else Mode.RECORDING
+        session.status = "hold the board still somewhere new" if session.mode == Mode.RECORDING else "paused"
+    if key == ord("f"):
+        session.shown = Shown.WHOLE if session.shown == Shown.MIDDLE else Shown.MIDDLE
+    if key == ord("r"):
+        session.focus_peak = session.focus
+        session.board_peak = 0.0
+
+
+def maybe_save(session, gray, found, key, steady, due, now, args, diagonal):
+    """Saves the frame when space is pressed, or while recording when the board is steady and a
+    save is due, and says what happened."""
+    recording = session.mode == Mode.RECORDING
+    automatic = recording and steady and due
+    if found is not None and (key == ord(" ") or automatic):
+        repeat = not is_new(found, session.saved, diagonal)
+        name = args.out / f"capture-{len(session.saved):03d}.pgm"
+        while name.exists():
+            name = name.with_name(name.stem + "b.pgm")
+        cv2.imwrite(str(name), gray)
+        session.saved.append({**found, "path": name})
+        session.last_save = now
+        session.status = f"saved {name.name}" + (": much like an earlier one, move somewhere new" if repeat else "")
+        return
+    if key == ord(" "):
+        session.status = "no board in view to save"
+        return
+    if recording and found is None:
+        session.status = "waiting for the board"
+        return
+    if recording and not steady and due:
+        session.status = "hold steady to save"
+
+
+def undo(session):
+    if not session.saved:
+        return
+    gone = session.saved.pop()
+    gone["path"].unlink(missing_ok=True)
+    session.status = f"dropped {gone['path'].name}"
+
+
 def bar(panel, y, value, peak, label):
     filled = int(600 * min(value / peak, 1.0)) if peak > 0 else 0
     cv2.rectangle(panel, (10, y), (10 + filled, y + 22), GREEN, -1)
@@ -174,9 +356,9 @@ def bar(panel, y, value, peak, label):
     cv2.putText(panel, label, (620, y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 1)
 
 
-def draw(gray, state, found, counts, saved, args):
+def draw(gray, session, found, counts, args):
     height, width = gray.shape
-    if state["zoom"]:
+    if session.shown == Shown.MIDDLE:
         # The middle at full size, where focus is judged, with its outline on a small whole frame.
         crop = middle(gray)
         image = cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
@@ -196,9 +378,8 @@ def draw(gray, state, found, counts, saved, args):
         image = cv2.resize(image, (VIEW_WIDTH, int(height * VIEW_WIDTH / width)), interpolation=cv2.INTER_AREA)
 
     panel = np.zeros((190, image.shape[1], 3), np.uint8)
-    mode = "RECORDING" if state["recording"] else "PAUSED"
-    countdown = f"   next in {state['countdown']:.1f} s" if state.get("countdown") is not None else ""
-    lines = [f"{mode}   saved {len(saved)} / {args.count}{countdown}    {state['status']}"]
+    countdown = "" if session.countdown is None else f"   next in {session.countdown:.1f} s"
+    lines = [f"{session.mode.value}   saved {len(session.saved)} / {args.count}{countdown}    {session.status}"]
     if found is not None:
         hint = "  closer than the focus: back off" if found["distance"] < args.near else ""
         moving = found.get("speed")
@@ -211,11 +392,32 @@ def draw(gray, state, found, counts, saved, args):
     lines.append("s start/pause   space save   u undo   f zoom (focus)   r reset peak   q quit")
     for i, text in enumerate(lines):
         cv2.putText(panel, text, (10, 26 + 28 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.62, ORANGE, 2)
-    focus_label = f"focus, middle {state['focus']:.0f} (peak {state['focus_peak']:.0f})"
-    bar(panel, 128, state["focus"], state["focus_peak"], focus_label)
+    focus_label = f"focus, middle {session.focus:.0f} (peak {session.focus_peak:.0f})"
+    bar(panel, 128, session.focus, session.focus_peak, focus_label)
     if found is not None:
-        bar(panel, 158, found["sharpness"], state["board_peak"], "board sharpness")
+        bar(panel, 158, found["sharpness"], session.board_peak, "board sharpness")
     return np.vstack([image, panel])
+
+
+def step(session, source, gray, board, detector, lens, args, diagonal):
+    """One frame: the focus, the board, the keys, perhaps a save, and the view."""
+    update_focus(session, gray)
+    now = time.time()
+    found = look_for_board(session, gray, board, detector, lens, now)
+    steady = source.steady(found)
+    due = source.due(session, now, args.every)
+    recording = session.mode == Mode.RECORDING
+    session.countdown = max(0.0, args.every - (now - session.last_save)) if recording else None
+
+    key = source.key()
+    toggle(session, key)
+    maybe_save(session, gray, found, key, steady, due, now, args, diagonal)
+    if key == ord("u"):
+        undo(session)
+    if key == ord("q"):
+        raise Stop()
+    counts = region_counts(session.saved, args.width, args.height)
+    source.show(draw(gray, session, found, counts, args))
 
 
 def main(argv=None):
@@ -238,101 +440,25 @@ def main(argv=None):
     args.out.mkdir(parents=True, exist_ok=True)
     diagonal = math.hypot(args.width, args.height)
 
-    saved = []
-    # Frames already in the folder count, so a run that stopped carries on where it was.
-    for path in sorted(args.out.glob("capture-*.pgm")):
-        earlier = found_board(cv2.imread(str(path), cv2.IMREAD_GRAYSCALE), board, detector, lens)
-        if earlier is not None:
-            saved.append({**earlier, "path": path})
-    state = {
-        "recording": args.replay is not None,
-        "zoom": False,
-        "status": f"carrying on: {len(saved)} frames already here" if saved else "focus first, then s to start",
-        "focus": 0.0,
-        "focus_peak": 0.0,
-        "board_peak": 0.0,
-    }
-
-    replay = sorted(args.replay.glob("*.pgm")) if args.replay else None
-    camera = None if replay else open_camera(args.device, args.width, args.height)
-    previous, previous_time, last_save, index = None, 0.0, 0.0, 0
-    while len(saved) < args.count:
-        if replay is not None:
-            if index >= len(replay):
-                break
-            gray = cv2.imread(str(replay[index]), cv2.IMREAD_GRAYSCALE)
-            index += 1
-        else:
-            # Unplugged or stalled: wait for the camera to come back, the window kept live, and keep
-            # what's saved, rather than stopping or freezing.
-            if camera is None:
-                if waiting(args.device, f"no camera: {len(saved)} frames saved") == ord("q"):
-                    break
-                camera = open_camera(args.device, args.width, args.height)
-                previous = None
+    saved = carried_on(args.out, board, detector, lens)
+    if args.replay is not None:
+        source = Replay(args.replay)
+        session = Session(Mode.RECORDING, "replaying", saved)
+    else:
+        source = Camera(args.device, args.width, args.height)
+        status = f"carrying on: {len(saved)} frames already here" if saved else "focus first, then s to start"
+        session = Session(Mode.PAUSED, status, saved)
+    try:
+        while len(session.saved) < args.count:
+            gray = source.read(session)
+            if gray is None:
                 continue
-            ok, raw = camera.read()
-            if not ok:
-                camera.release()
-                camera = None
-                continue
-            gray = luma(raw, args.width, args.height)
+            step(session, source, gray, board, detector, lens, args, diagonal)
+    except Stop:
+        pass
 
-        # Smoothed over a few frames, so sensor noise doesn't make the focus bar jump.
-        focus = sharpness(middle(gray))
-        state["focus"] = focus if state["focus"] == 0 else 0.7 * state["focus"] + 0.3 * focus
-        state["focus_peak"] = max(state["focus_peak"], state["focus"])
-
-        found = found_board(gray, board, detector, lens)
-        now = time.time()
-        if found is not None:
-            state["board_peak"] = max(state["board_peak"], found["sharpness"])
-            moving = speed(previous, found, now - previous_time)
-            found["speed"] = moving
-        steady = found is not None and (replay is not None or (found["speed"] is not None and found["speed"] < STEADY_PX_PER_S))
-        previous, previous_time = found, now
-        due = replay is not None or now - last_save >= args.every
-        state["countdown"] = max(0.0, args.every - (now - last_save)) if state["recording"] else None
-
-        key = -1 if replay is not None else (cv2.waitKey(1) & 0xFF)
-        if key == ord("s"):
-            state["recording"] = not state["recording"]
-            state["status"] = "hold the board still somewhere new" if state["recording"] else "paused"
-        if key == ord("f"):
-            state["zoom"] = not state["zoom"]
-        if key == ord("r"):
-            state["focus_peak"] = state["focus"]
-            state["board_peak"] = 0.0
-
-        automatic = state["recording"] and steady and due
-        if found is not None and (key == ord(" ") or automatic):
-            repeat = not is_new(found, saved, diagonal)
-            name = args.out / f"capture-{len(saved):03d}.pgm"
-            while name.exists():
-                name = name.with_name(name.stem + "b.pgm")
-            cv2.imwrite(str(name), gray)
-            saved.append({**found, "path": name})
-            last_save = now
-            state["status"] = f"saved {name.name}" + (": much like an earlier one, move somewhere new" if repeat else "")
-        elif key == ord(" "):
-            state["status"] = "no board in view to save"
-        elif state["recording"] and found is None:
-            state["status"] = "waiting for the board"
-        elif state["recording"] and not steady and due:
-            state["status"] = "hold steady to save"
-        if key == ord("u") and saved:
-            gone = saved.pop()
-            gone["path"].unlink(missing_ok=True)
-            state["status"] = f"dropped {gone['path'].name}"
-        if key == ord("q"):
-            break
-
-        if replay is None:
-            counts = region_counts(saved, args.width, args.height)
-            cv2.imshow("calibration", draw(gray, state, found, counts, saved, args))
-
-    counts = region_counts(saved, args.width, args.height)
-    print(f"{len(saved)} frames in {args.out}. Corners per ninth, top row first: {counts.tolist()}")
+    counts = region_counts(session.saved, args.width, args.height)
+    print(f"{len(session.saved)} frames in {args.out}. Corners per ninth, top row first: {counts.tolist()}")
     print(f"Solve: uv run tools/calibrate.py solve {args.out}/*.pgm --squares {args.squares} "
           f"--square-mm {args.square_mm} --marker-mm {args.marker_mm} --dictionary {args.dictionary} --out lens.toml")
 

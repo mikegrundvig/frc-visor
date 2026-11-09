@@ -50,6 +50,8 @@ jobs:
         env:
           VISOR_BIN: target/release/visor
         run: uv run tools/test_calibrate.py
+      - name: Calibration capture tool
+        run: uv run tools/test_capture.py
 
   client:
     name: Java client
