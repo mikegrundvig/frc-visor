@@ -1,4 +1,4 @@
-# Visor on a coprocessor, for Spotter's agent: what's installed and what cameras are plugged in, so
+# Visor on a coprocessor, for Spotter's agent: what's installed, what's running and what cameras are plugged in, so
 # the robot can check it as it starts, and the two actions it puts things right with. The robot
 # program (frc-robot-runtime) pushes this pack from its deploy folder, and installs and configures
 # Visor while it's disabled. What the board's image grants the agent for it is in README.md.
@@ -6,11 +6,13 @@ pack: visor
 version: 1.0.0
 collectors:
   - id: status
-    run: [./status]                                 # {"version": "<Cargo.toml's version>", "config": "<sha256>", "cameras": "..."}
+    run: [./status]                                 # {"version": "<Cargo.toml's version>", "config": "<sha256>", "running-version": ..., "running-config": ..., "cameras": "..."}
     every: 2s
     fields:
-      version: {label: Visor, type: text}           # empty: none installed
+      version: {label: Visor installed, type: text} # empty: none installed
       config: {label: Configuration (SHA-256), type: text}   # empty: none
+      running-version: {label: Visor running, type: text}    # empty: not running
+      running-config: {label: Configuration running (SHA-256), type: text}  # empty: not running
       cameras: {label: Cameras plugged in, type: text}       # each by its name as `visor cameras --names` gives it, comma-separated
 logs:
   - id: log

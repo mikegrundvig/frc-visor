@@ -9,6 +9,8 @@ with its other packs.
 |---|---|
 | `visor.status.version` | The Visor in `/opt/visor`, by its version (`2026.11.4`); empty when there's none |
 | `visor.status.config` | The SHA-256 of its configuration, `/opt/visor/visor.toml`; empty when there's none |
+| `visor.status.running-version` | The version of the Visor running, as it said when it started (in `/run/visor/running`, believed only from the unit's main process); empty while none runs. Unlike `version` while a program put in place hasn't been started (a restart that failed) |
+| `visor.status.running-config` | The SHA-256 of the configuration it runs, as `config` gives it; empty while none runs |
 | `visor.status.cameras` | The cameras plugged in, comma-separated, each once by the name the installed program gives it (`visor cameras --names`, so Visor alone has the rule): its `/dev/v4l/by-id/` name when it has a USB serial of its own; with no serial, always its `/dev/v4l/by-path/` name, its USB port's (label the ports and cables). Empty when there's no program installed that can say |
 | `visor.log` | Visor's journal (`visor.service`) |
 | `visor.install` | Takes a release archive, `visor-<version>-linux-arm64.tar.gz`, as its input: unpacks it beside the running program, has the new program say its version, then moves it into place and restarts Visor. One that won't run on the board leaves it as it was |
@@ -46,11 +48,15 @@ pack what it needs, and nothing more:
   });
   ```
 
+- **What's running:** Visor's unit makes `/run/visor` (`RuntimeDirectory=`), readable by anyone,
+  and its main process ID is anyone's to read (`systemctl show`), so this needs nothing either.
+  The unit comes with the image (the release's `visor.service`); an install changes only the
+  program, so a board whose unit has no `RuntimeDirectory=` never reports a running Visor.
 - **The cameras' names:** `/dev/v4l/by-id/`, `/dev/v4l/by-path/` and the cameras' serials and
   indexes under `/sys/class/video4linux/` are readable by anyone, so listing them needs nothing:
   `visor cameras --names` opens no camera.
 
-`VISOR_DIR`, `VISOR_BY_ID`, `VISOR_BY_PATH`, `VISOR_SYSFS` and `VISOR_RESTART`, in the agent's
-environment, change where it looks
+`VISOR_DIR`, `VISOR_RUN`, `VISOR_MAIN_PID`, `VISOR_BY_ID`, `VISOR_BY_PATH`, `VISOR_SYSFS` and
+`VISOR_RESTART`, in the agent's environment, change where it looks
 and how it restarts Visor, for an image laid out otherwise (and the tests). `journal` is Spotter's
 catalog's, under its MIT License.

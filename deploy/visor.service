@@ -15,6 +15,9 @@ RestartSec=1
 # Spotter's agent's to write (spotter/visor/README.md), and kept across boots on a read-only root.
 User=visor
 SupplementaryGroups=video
+# /run/visor, the visor user's, readable by anyone, and gone when Visor stops: where it says, as it
+# starts, which version and configuration it runs, for its Spotter pack (src/running.rs).
+RuntimeDirectory=visor
 # Visor's threads on the fast cores of an RK3588 (Orange Pi 5: cores 4-7 are the Cortex-A76s).
 CPUAffinity=4-7
 Nice=-5

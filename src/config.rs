@@ -176,9 +176,17 @@ struct LensFile {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
+        Config::read(path).map(|(config, _)| config)
+    }
+
+    /// The configuration in a file, and its text exactly as read: the text's hash says which
+    /// configuration is running ([`crate::running`]).
+    pub fn read(path: &Path) -> Result<(Config, String), ConfigError> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
-        Config::parse(&text).map_err(|e| ConfigError(format!("{}: {e}", path.display())))
+        let config =
+            Config::parse(&text).map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
+        Ok((config, text))
     }
 
     pub fn parse(text: &str) -> Result<Config, ConfigError> {

@@ -1,9 +1,12 @@
 #!/bin/sh
-# What Visor this board has, its configuration's SHA-256, and the cameras plugged in: one JSON
-# object. VISOR_DIR (/opt/visor), VISOR_BY_ID and VISOR_BY_PATH (udev's folders of names) and
+# What Visor this board has and its configuration's SHA-256, what the running service says it runs,
+# and the cameras plugged in: one JSON object. VISOR_DIR (/opt/visor), VISOR_RUN (the service's
+# runtime folder, /run/visor), VISOR_MAIN_PID (a program printing the service's main process ID,
+# run in place of `systemctl show`), VISOR_BY_ID and VISOR_BY_PATH (udev's folders of names) and
 # VISOR_SYSFS (the kernel's video devices) are for an image laid out otherwise, and tests.
 set -u
 dir=${VISOR_DIR:-/opt/visor}
+run=${VISOR_RUN:-/run/visor}
 by_id=${VISOR_BY_ID:-/dev/v4l/by-id}
 by_path=${VISOR_BY_PATH:-/dev/v4l/by-path}
 sysfs=${VISOR_SYSFS:-/sys/class/video4linux}
@@ -17,6 +20,33 @@ if [ -f "$dir/visor.toml" ]; then
   config=$(sha256sum "$dir/visor.toml" | cut -d ' ' -f 1)
 fi
 
+# What the service runs, as it said when it started (src/running.rs): believed only from the
+# unit's main process, so a file a process that has ended left says nothing. Empty while Visor
+# isn't running, and when what's on disk hasn't been started yet (a restart that failed).
+main_pid() {
+  if [ -n "${VISOR_MAIN_PID:-}" ]; then
+    "$VISOR_MAIN_PID"
+  else
+    systemctl show --property=MainPID --value visor.service
+  fi
+}
+running_version=""
+running_config=""
+if [ -r "$run/running" ] && pid=$(main_pid 2>/dev/null) && [ "${pid:-0}" != 0 ]; then
+  said=$(cat "$run/running" 2>/dev/null) || said=""
+  if [ "$(printf '%s\n' "$said" | sed -n 's/^pid=//p')" = "$pid" ]; then
+    running_version=$(printf '%s\n' "$said" | sed -n 's/^version=//p')
+    running_config=$(printf '%s\n' "$said" | sed -n 's/^config=//p')
+  fi
+fi
+# Only what Visor writes there: digits and dots, and hex, so the JSON needs no escaping.
+case $running_version in
+  *[!0-9.]*) running_version="" ;;
+esac
+case $running_config in
+  *[!0-9a-f]*) running_config="" ;;
+esac
+
 # Each camera plugged in, by the name the robot gives it, comma-separated: as the installed program
 # names them (`visor cameras --names`, one per line, and only with the characters udev uses, so the
 # JSON needs no escaping). Visor owns the rule, so there are none when no program can say.
@@ -26,4 +56,5 @@ if [ -x "$dir/visor" ] &&
     2>/dev/null); then
   cameras=$(printf '%s\n' "$names" | paste -s -d , -)
 fi
-printf '{"version": "%s", "config": "%s", "cameras": "%s"}\n' "$version" "$config" "$cameras"
+printf '{"version": "%s", "config": "%s", "running-version": "%s", "running-config": "%s", "cameras": "%s"}\n' \
+  "$version" "$config" "$running_version" "$running_config" "$cameras"

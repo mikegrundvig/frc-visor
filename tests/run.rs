@@ -1,7 +1,7 @@
 //! `visor run`, the service, as the built program: how it ends, and what it doesn't end on.
 
 use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -76,4 +76,121 @@ fn no_route_to_the_robot_yet_is_not_a_reason_to_stop() {
     let ended = ended_within(&mut child, Duration::from_millis(1500));
     std::fs::remove_dir_all(dir).unwrap();
     assert_eq!(ended, None, "the program ended");
+}
+
+/// The service as systemd runs it, with its runtime folder (RUNTIME_DIRECTORY) in a folder of the
+/// test's, `root/run`, and installed as the pack finds it: the program and its configuration in
+/// `root/opt-visor`.
+fn start_as_a_service(test: &str) -> (Child, PathBuf) {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("service-{test}"));
+    let _ = std::fs::remove_dir_all(&root);
+    let installed = root.join("opt-visor");
+    std::fs::create_dir_all(&installed).unwrap();
+    std::fs::create_dir_all(root.join("run")).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_visor"), installed.join("visor")).unwrap();
+    let config = installed.join("visor.toml");
+    std::fs::write(
+        &config,
+        format!("robot = \"127.0.0.1\"\nport = 9\n{CAMERA}"),
+    )
+    .unwrap();
+    let child = Command::new(installed.join("visor"))
+        .arg("run")
+        .arg("--config")
+        .arg(&config)
+        .env("RUNTIME_DIRECTORY", root.join("run"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    (child, root)
+}
+
+/// The pack's status, as Spotter's agent runs it on a board laid out as in `root`, with
+/// `main_pid` as the unit's main process ID.
+fn status(root: &Path, main_pid: u32) -> serde_json::Value {
+    let says = root.join(format!("main-pid-{main_pid}"));
+    std::fs::write(&says, format!("#!/bin/sh\necho {main_pid}\n")).unwrap();
+    std::fs::set_permissions(&says, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let out = Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/spotter/visor/status"))
+        .env("VISOR_DIR", root.join("opt-visor"))
+        .env("VISOR_RUN", root.join("run"))
+        .env("VISOR_MAIN_PID", &says)
+        .env("VISOR_BY_ID", root.join("by-id"))
+        .env("VISOR_BY_PATH", root.join("by-path"))
+        .env("VISOR_SYSFS", root.join("sys"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+/// A file's SHA-256 as `sha256sum` gives it, as the pack hashes the configuration on disk.
+fn sha256sum(file: &Path) -> String {
+    let out = Command::new("sha256sum").arg(file).output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    text.split(' ').next().unwrap().to_owned()
+}
+
+#[test]
+fn the_pack_reports_what_the_running_service_runs_beside_what_is_on_disk() {
+    let (mut child, root) = start_as_a_service("running");
+    let file = root.join("run/running");
+    let started = Instant::now();
+    while !file.exists() && started.elapsed() < PATIENCE {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let config = root.join("opt-visor/visor.toml");
+    let on_disk = sha256sum(&config);
+    let pid = child.id();
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!(
+            "pid={pid}\nversion={}\nconfig={on_disk}\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+        "the file it writes as it starts"
+    );
+    let version = env!("CARGO_PKG_VERSION");
+    // Each row: what changes, the unit's main process ID, and the running version and
+    // configuration the pack then reports.
+    let other = pid + 1;
+    let rows: [(&str, Option<&str>, u32, &str, bool); 4] = [
+        ("the service runs what's on disk", None, pid, version, true),
+        (
+            "a process that has ended left the file: another is the unit's main process now",
+            None,
+            other,
+            "",
+            false,
+        ),
+        (
+            "the service isn't running: no main process",
+            None,
+            0,
+            "",
+            false,
+        ),
+        (
+            "a new configuration was put in place, but the restart failed",
+            Some("robot = \"127.0.0.1\"\nport = 10\n"),
+            pid,
+            version,
+            true,
+        ),
+    ];
+    for (why, new_config, main_pid, running_version, running) in rows {
+        if let Some(text) = new_config {
+            std::fs::write(&config, format!("{text}{CAMERA}")).unwrap();
+        }
+        let report = status(&root, main_pid);
+        assert_eq!(report["version"], version, "{why}");
+        assert_eq!(report["config"], sha256sum(&config), "{why}");
+        assert_eq!(report["running-version"], running_version, "{why}");
+        let running_config = if running { on_disk.as_str() } else { "" };
+        assert_eq!(report["running-config"], running_config, "{why}");
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }

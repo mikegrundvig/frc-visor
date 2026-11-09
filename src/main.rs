@@ -184,7 +184,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// (Cargo.toml's profiles): the scope would otherwise wait for the other threads, which never
 /// finish. systemd then restarts Visor (deploy/visor.service).
 fn run(path: &Path) -> Result<()> {
-    let config = Config::load(path)?;
+    let (config, text) = Config::read(path)?;
     info!(
         "visor {} (version ID {}): {} cameras, frames to {}",
         env!("CARGO_PKG_VERSION"),
@@ -220,6 +220,7 @@ fn run(path: &Path) -> Result<()> {
             None
         }
     };
+    say_running(&text);
     let stop = AtomicBool::new(false);
     let stop = &stop;
     thread::scope(|scope| {
@@ -254,6 +255,27 @@ fn run(path: &Path) -> Result<()> {
         }
     });
     Ok(())
+}
+
+/// Says what this process runs, for Visor's Spotter pack, once all it needs is open: the cameras'
+/// threads start next. Without systemd's runtime folder (run by hand) there's nowhere to say it.
+/// A file that can't be written is said in the log, and detection goes on: the robot then sees
+/// the board as not running its Visor, and installs it again.
+fn say_running(config: &str) {
+    let Some(folder) = visor::running::folder() else {
+        return;
+    };
+    let text = visor::running::text(
+        std::process::id(),
+        env!("CARGO_PKG_VERSION"),
+        config.as_bytes(),
+    );
+    if let Err(why) = visor::running::write(&folder, &text) {
+        error!(
+            "can't say what's running in {} ({why}): the robot won't see this Visor running",
+            folder.display()
+        );
+    }
 }
 
 /// A fault switch for tests/run.rs, in debug builds only: the detect thread of the camera that
