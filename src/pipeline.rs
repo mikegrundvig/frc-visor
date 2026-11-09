@@ -81,8 +81,12 @@ pub fn run(
             dropped: latest.dropped() as u32,
             tags,
         };
-        frame.encode(&mut bytes);
-        let sent = send(&bytes).is_ok();
+        let sent = match frame.encode(&mut bytes) {
+            Ok(()) => send(&bytes).is_ok(),
+            // Can't happen, as `tags_of` keeps no more tags than a frame holds; counted as not
+            // sent if it ever does.
+            Err(_) => false,
+        };
         numbers.add(detect_time, frame.tags.len(), sent, frame.clock_synced);
         numbers.light(brightness, settings);
         let mut image = Some(captured.image);

@@ -147,7 +147,7 @@ pub struct Applied {
 ///
 /// A camera without one of the exposure or gain controls, or a value outside its range (set to the
 /// nearest end), is a warning. A control under `controls` the camera doesn't have fails the open,
-/// as before: it's named by hand, so a misspelling is the likelier cause.
+/// unlike those: it's named by hand, so a misspelling is the likelier cause.
 pub fn apply(device: &impl Controls, camera: &Camera) -> io::Result<Applied> {
     let known = match device.list() {
         Ok(known) => known,

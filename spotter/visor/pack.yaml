@@ -6,7 +6,7 @@ pack: visor
 version: 1.0.0
 collectors:
   - id: status
-    run: [./status]                                 # {"version": "2026.11.4", "config": "<sha256>", "cameras": "..."}
+    run: [./status]                                 # {"version": "<Cargo.toml's version>", "config": "<sha256>", "cameras": "..."}
     every: 2s
     fields:
       version: {label: Visor, type: text}           # empty: none installed

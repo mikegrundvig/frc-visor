@@ -46,7 +46,7 @@ impl Lens {
         }
         if ![0, 4, 5, 8].contains(&coefficients.len()) {
             return Err(LensError(format!(
-                "OpenCV's distortion has 4, 5 or 8 coefficients, not {}",
+                "OpenCV's distortion has 0, 4, 5 or 8 coefficients, not {}",
                 coefficients.len()
             )));
         }
@@ -148,7 +148,7 @@ mod tests {
     fn bad_calibrations_are_named() {
         let cases: [(f64, &[f64], &str); 3] = [
             (0.0, &[], "focal lengths are positive"),
-            (1000.0, &[0.1, 0.2, 0.0], "4, 5 or 8 coefficients, not 3"),
+            (1000.0, &[0.1, 0.2, 0.0], "0, 4, 5 or 8 coefficients, not 3"),
             (1000.0, &[f64::NAN, 0.0, 0.0, 0.0], "isn't a number"),
         ];
         for (fx, coefficients, why) in cases {

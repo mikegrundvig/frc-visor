@@ -541,7 +541,7 @@ mod tests {
                 format!(
                     "team = 1234\n{CAMERA}[camera.lens]\nwidth = 1600\nheight = 1304\nfx = 1.0\nfy = 1.0\ncx = 0.0\ncy = 0.0\ndistortion = [0.1]\n"
                 ),
-                "lens: OpenCV's distortion has 4, 5 or 8",
+                "lens: OpenCV's distortion has 0, 4, 5 or 8",
             ),
             (
                 format!(

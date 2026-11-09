@@ -115,12 +115,12 @@ impl std::error::Error for WireError {}
 
 impl Frame {
     /// The frame's bytes, written into `out` (cleared first, so one buffer serves every frame).
-    ///
-    /// # Panics
-    /// If the frame has more than [`MAX_TAGS`] tags: the sender trims them first.
-    pub fn encode(&self, out: &mut Vec<u8>) {
-        assert!(self.tags.len() <= MAX_TAGS, "{} tags", self.tags.len());
+    /// More than [`MAX_TAGS`] tags is refused, writing nothing: the sender trims them first.
+    pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
         out.clear();
+        if self.tags.len() > MAX_TAGS {
+            return Err(WireError::TooManyTags(self.tags.len()));
+        }
         out.extend_from_slice(&MAGIC.to_le_bytes());
         out.extend_from_slice(&self.version_id.to_le_bytes());
         out.extend_from_slice(&self.sequence.to_le_bytes());
@@ -161,6 +161,7 @@ impl Frame {
                 out.extend_from_slice(&value.to_le_bytes());
             }
         }
+        Ok(())
     }
 
     /// Reads a frame from a datagram's bytes.
@@ -370,7 +371,7 @@ mod tests {
     #[test]
     fn the_layout_matches_the_golden_file() {
         let mut bytes = Vec::new();
-        golden().encode(&mut bytes);
+        golden().encode(&mut bytes).unwrap();
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/golden-frame.bin");
         if std::env::var_os("VISOR_WRITE_GOLDEN").is_some() {
             std::fs::write(path, &bytes).unwrap();
@@ -410,15 +411,23 @@ mod tests {
         full.tags = vec![golden().tags[0]; MAX_TAGS];
         cases.push(full);
         for frame in cases {
-            frame.encode(&mut bytes);
+            frame.encode(&mut bytes).unwrap();
             assert_eq!(Frame::decode(&bytes), Ok(frame));
         }
+        // One tag past a frame's room is refused, not sent cut short.
+        let mut over = golden();
+        over.tags = vec![golden().tags[0]; MAX_TAGS + 1];
+        assert_eq!(
+            over.encode(&mut bytes),
+            Err(WireError::TooManyTags(MAX_TAGS + 1))
+        );
+        assert!(bytes.is_empty());
     }
 
     #[test]
     fn bad_datagrams_are_refused() {
         let mut good = Vec::new();
-        golden().encode(&mut good);
+        golden().encode(&mut good).unwrap();
         let mut wrong_magic = good.clone();
         wrong_magic[0] ^= 0xff;
         let mut too_many = good.clone();

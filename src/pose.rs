@@ -177,7 +177,7 @@ fn translation(model: &[(f64, f64); 4], seen: &[(f64, f64); 4], r: &Matrix3<f64>
     for (&(x, y), &(u, v)) in model.iter().zip(seen) {
         let point = Vector3::new(x, y, 0.0);
         let depth = r.row(2).dot(&point.transpose());
-        for (row, (coefficients, target)) in [
+        for (coefficients, target) in [
             (
                 Vector3::new(1.0, 0.0, -u),
                 u * depth - r.row(0).dot(&point.transpose()),
@@ -186,11 +186,7 @@ fn translation(model: &[(f64, f64); 4], seen: &[(f64, f64); 4], r: &Matrix3<f64>
                 Vector3::new(0.0, 1.0, -v),
                 v * depth - r.row(1).dot(&point.transpose()),
             ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let _ = row;
+        ] {
             normal += coefficients * coefficients.transpose();
             rhs += coefficients * target;
         }
