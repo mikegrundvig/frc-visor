@@ -1,6 +1,6 @@
 //! The `visor` command.
 
-use std::net::{Ipv4Addr, TcpListener, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -176,12 +176,17 @@ fn run(path: &Path) -> Result<()> {
     );
     let mut detectors = Vec::new();
     let mut sockets = Vec::new();
+    // Bound, not connected, and each frame sent to the robot's address: connecting fails while
+    // the network has no route to the robot yet, and the cameras would wait for it to open.
+    let any = match config.robot {
+        SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        SocketAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    };
     for camera in &config.cameras {
         detectors.push(Detector::new(camera.min_tag_px)?);
-        let socket = UdpSocket::bind("0.0.0.0:0")?;
-        socket.connect(config.robot)?;
-        sockets.push(socket);
+        sockets.push(UdpSocket::bind((any, 0))?);
     }
+    let robot = config.robot;
     let slots: Vec<Latest> = config.cameras.iter().map(|_| Latest::new()).collect();
     let feeds: Vec<Feed> = config.cameras.iter().map(|_| Feed::new()).collect();
     let views: Arc<Vec<View>> =
@@ -216,7 +221,7 @@ fn run(path: &Path) -> Result<()> {
             scope.spawn(move || capture::run(camera, latest, &SystemClocks, stop));
             scope.spawn(move || {
                 panic_if_a_test_asks(&camera.name);
-                let mut send = |bytes: &[u8]| socket.send(bytes).map(|_| ());
+                let mut send = |bytes: &[u8]| socket.send_to(bytes, robot).map(|_| ());
                 pipeline::run(
                     camera,
                     latest,

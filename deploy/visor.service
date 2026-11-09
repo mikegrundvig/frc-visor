@@ -1,7 +1,8 @@
 [Unit]
 Description=Visor, AprilTag vision for the robot
-After=network-online.target chrony.service
-Wants=network-online.target
+# Not after the network: Visor opens its cameras while the network comes up, and sends to the robot
+# once it has a route there.
+After=chrony.service
 # The robot program puts the program and its configuration in /opt/visor, through Visor's Spotter
 # pack (spotter/visor), and restarts it: keep trying for good, including before the first install.
 StartLimitIntervalSec=0

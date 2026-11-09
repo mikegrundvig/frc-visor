@@ -64,3 +64,12 @@ fn a_panic_in_one_camera_s_thread_ends_the_process() {
     let status = ended_within(&mut child, PATIENCE).expect("the process ends");
     assert_eq!(status.signal(), Some(libc::SIGABRT), "{status}");
 }
+
+#[test]
+fn no_route_to_the_robot_yet_is_not_a_reason_to_stop() {
+    // A broadcast address can't be sent to without SO_BROADCAST, as an address with no route
+    // can't be while the network comes up: each frame fails to send, and the cameras run.
+    let mut child = start("no-route", "255.255.255.255", None);
+    let ended = ended_within(&mut child, Duration::from_millis(1500));
+    assert_eq!(ended, None, "the program ended");
+}
