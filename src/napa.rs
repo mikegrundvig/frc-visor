@@ -71,6 +71,12 @@ pub enum NapaError {
     MinTagPx(i32),
     OutOfMemory,
     InvalidInput,
+    /// An image whose pixels aren't `width` times `height`, which NAPA would read past the end of.
+    ImageSize {
+        width: u32,
+        height: u32,
+        pixels: usize,
+    },
 }
 
 impl fmt::Display for NapaError {
@@ -79,6 +85,11 @@ impl fmt::Display for NapaError {
             NapaError::MinTagPx(px) => write!(f, "min_tag_px is from 8 to 30000, not {px}"),
             NapaError::OutOfMemory => write!(f, "NAPA ran out of memory"),
             NapaError::InvalidInput => write!(f, "NAPA refused the image or its settings"),
+            NapaError::ImageSize {
+                width,
+                height,
+                pixels,
+            } => write!(f, "a {width}x{height} image with {pixels} pixels"),
         }
     }
 }
@@ -92,7 +103,7 @@ pub struct Detector {
     found: Vec<Detection>,
 }
 
-// The handle is only ever used through `&mut self`, so moving it to another thread is safe.
+// SAFETY: the handle is only ever used through `&mut self`, so moving it to another thread is safe.
 unsafe impl Send for Detector {}
 
 impl Detector {
@@ -102,10 +113,14 @@ impl Detector {
         if !(8..=30_000).contains(&min_tag_px) {
             return Err(NapaError::MinTagPx(min_tag_px));
         }
+        // SAFETY: `FamilyLayout` is a plain C struct of integers, for which all zeroes is valid.
         let mut layout: FamilyLayout = unsafe { std::mem::zeroed() };
+        // SAFETY: `FAMILY` is a NUL-terminated string, and `layout` is a writable `FamilyLayout`,
+        // the size napa_core.h declares (checked by `the_c_structs_match_napa_s`).
         if unsafe { napa_family_info(FAMILY.as_ptr(), &mut layout) } != 0 {
             unreachable!("NAPA always has tag36h11");
         }
+        // SAFETY: `FAMILY` is a NUL-terminated string; a null result is handled.
         let handle = NonNull::new(unsafe { napa_create_family(FAMILY.as_ptr()) })
             .ok_or(NapaError::OutOfMemory)?;
         Ok(Detector {
@@ -123,13 +138,31 @@ impl Detector {
 
     /// The tags in an image. The slice is reused by the next call.
     pub fn detect(&mut self, image: &GrayImage) -> Result<&[Detection], NapaError> {
+        let refused = NapaError::ImageSize {
+            width: image.width,
+            height: image.height,
+            pixels: image.pixels.len(),
+        };
+        // NAPA reads `width` times `height` bytes, trusting the sizes it's given: the image's
+        // fields are public, so they're checked here rather than taken on trust.
+        let size = (image.width as usize).checked_mul(image.height as usize);
+        if size != Some(image.pixels.len()) {
+            return Err(refused);
+        }
+        let (Ok(width), Ok(height)) = (c_int::try_from(image.width), c_int::try_from(image.height))
+        else {
+            return Err(refused);
+        };
+        // SAFETY: the handle is live until `drop`, and used by one thread at a time (`&mut self`).
+        // The pixels are `width` times `height` bytes, checked above, rows `width` apart. `found`
+        // has room for the `MAX_DETECTIONS` that NAPA is told it may write.
         let count = unsafe {
             napa_detect(
                 self.handle.as_ptr(),
                 image.pixels.as_ptr(),
-                image.width as c_int,
-                image.height as c_int,
-                image.width as c_int,
+                width,
+                height,
+                width,
                 &self.params,
                 self.found.as_mut_ptr(),
                 MAX_DETECTIONS as c_int,
@@ -145,6 +178,7 @@ impl Detector {
 
 impl Drop for Detector {
     fn drop(&mut self) {
+        // SAFETY: the handle came from `napa_create_family` and is destroyed only here, once.
         unsafe { napa_destroy(self.handle.as_ptr()) };
     }
 }
@@ -167,6 +201,29 @@ mod tests {
             assert_eq!(Detector::new(px).err(), Some(NapaError::MinTagPx(px)));
         }
         assert!(Detector::new(16).is_ok());
+    }
+
+    #[test]
+    fn an_image_whose_pixels_don_t_fill_its_size_is_refused_before_napa_reads_it() {
+        let mut detector = Detector::new(16).unwrap();
+        // (width, height, pixels)
+        let cases = [(640, 480, 10), (640, 480, 640 * 480 + 1), (2, 2, 0)];
+        for (width, height, pixels) in cases {
+            let image = GrayImage {
+                width,
+                height,
+                pixels: vec![0; pixels],
+            };
+            assert_eq!(
+                detector.detect(&image).err(),
+                Some(NapaError::ImageSize {
+                    width,
+                    height,
+                    pixels
+                }),
+                "{width}x{height} with {pixels} pixels"
+            );
+        }
     }
 
     #[test]
