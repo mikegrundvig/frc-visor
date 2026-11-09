@@ -12,8 +12,13 @@ exact size doesn't change the lens, but its squares must come out square. `solve
 each frame, solves the lens as OpenCV does, and prints it twice: as a `[camera.lens]` block for the
 camera's entry in Visor's configuration, and as the robot definition takes it, for a robot whose
 deploy writes that configuration. It refuses a session that can't give a good lens: too few views,
-views that miss part of the frame (the edges are where the distortion is, so also when the views
-near one were the outliers dropped), too large an error, or a solve that failed.
+views that miss part of the frame or don't reach out toward each of its four corners (the edges are
+where the distortion is, so also when the views out there were the outliers dropped), too large an
+error, or a solve that failed.
+
+A good session has the board's corners reaching every corner of the frame (a partly visible board
+counts), the board tilted 30 to 45 degrees about both axes, top toward and away as well as the
+sides, at several places in the frame, at two distances, and 40 to 60 views.
 
 The distortion is solved with five terms, the fifth (k3) held at 0: a session that doesn't reach the
 frame's corners can't tell k3 from k2, and a free k3 only swings the lens out where no corner was
@@ -21,6 +26,7 @@ seen. --free-k3 solves all five, for a lens that needs it; --rational solves eig
 """
 
 import argparse
+import math
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -69,6 +75,11 @@ class Limits:
     max_rms_px: float = 1.0
     # Corners needed in each ninth of the frame, across all views.
     min_per_region: int = 20
+    # Corners needed out toward each of the frame's four corners, across all views: beyond this
+    # share of the way from the frame's middle to that corner. The ninths alone pass a session whose
+    # board never left the inner part of the corner ninths, and its lens out there is a guess.
+    min_per_corner: int = 10
+    corner_reach: float = 0.7
 
 
 class Model(Enum):
@@ -201,6 +212,32 @@ def thin_regions(views, size, limits):
     return [REGION_NAMES[r][c] for r in range(3) for c in range(3) if counts[r, c] < limits.min_per_region]
 
 
+CORNER_NAMES = ["top left", "top right", "bottom left", "bottom right"]
+
+
+def reach(corners, size, limits):
+    """Corners beyond limits.corner_reach of the way from the frame's middle toward each of its four
+    corners, in CORNER_NAMES' order. corners is n × 2 pixels."""
+    width, height = size
+    across = (corners[:, 0] - (width - 1) / 2) / ((width - 1) / 2)
+    down = (corners[:, 1] - (height - 1) / 2) / ((height - 1) / 2)
+    beyond = np.hypot(across, down) / math.sqrt(2) > limits.corner_reach
+    left, top = across < 0, down < 0
+    quarters = [top & left, top & ~left, ~top & left, ~top & ~left]
+    return [int((beyond & quarter).sum()) for quarter in quarters]
+
+
+def short_corners(counts, limits):
+    """The frame's corners, by name, that reach counts too few corners toward."""
+    return [name for name, count in zip(CORNER_NAMES, counts) if count < limits.min_per_corner]
+
+
+def unreached(views, size, limits):
+    """The frame's corners too few of these views' corners reach toward, by name."""
+    corners = np.vstack([v.corners for v in views]) if views else np.zeros((0, 2))
+    return short_corners(reach(corners, size, limits), limits)
+
+
 def not_numbers(rms, camera_matrix, distortion, views):
     """The values a solve gave that aren't finite numbers, by name: a failed fit can come back
     with NaN, which no limit catches and no robot can use."""
@@ -238,8 +275,12 @@ def solve_views(views, size, model):
     return rms, camera_matrix, distortion, deviations.ravel()
 
 
+def words(count, noun):
+    return noun if count == 1 else f"{noun}s"
+
+
 def plural(count, noun):
-    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+    return f"{count} {words(count, noun)}"
 
 
 def fit(views, size, limits, model):
@@ -261,7 +302,7 @@ def fit(views, size, limits, model):
                 f"them would leave {len(remaining)}, under {limits.min_views}"
             )
             return solved, views, dropped, notes
-        thin = thin_regions(remaining, size, limits)
+        thin = thin_regions(remaining, size, limits) + [f"{name} corner" for name in unreached(remaining, size, limits)]
         if thin:
             raise Refused(
                 f"the views over 3 times the median error ({names}) were the only ones near the frame's "
@@ -297,6 +338,14 @@ def solve(images, board=Board(), limits=Limits(), model=Model.K3_FIXED):
             f"too few corners near the frame's {', '.join(thin)} (each ninth needs "
             f"{limits.min_per_region}): hold the board there too, the lens bends most at the edges"
         )
+    short = unreached(views, (width, height), limits)
+    if short:
+        raise Refused(
+            f"too few corners reach toward the frame's {', '.join(short)} {words(len(short), 'corner')} (each "
+            f"needs {limits.min_per_corner} beyond {limits.corner_reach:.0%} of the way from the middle): move the "
+            "board out there, partly out of view if need be (a partly visible board counts), nearer or further "
+            "away until its corners reach; the lens bends most there"
+        )
 
     solved, views, outliers, notes = fit(views, (width, height), limits, model)
     rms, camera_matrix, distortion, deviations = solved
@@ -308,7 +357,7 @@ def solve(images, board=Board(), limits=Limits(), model=Model.K3_FIXED):
     return Lens(width, height, camera_matrix, distortion, rms, deviations, views, dropped + outliers, notes, model)
 
 
-def report(lens):
+def report(lens, limits=Limits()):
     lines = [f"{lens.width} × {lens.height}, {len(lens.views)} views, RMS {lens.rms_px:.3f} px, {lens.model.value}"]
     names = ["fx", "fy", "cx", "cy"]
     values = [lens.fx, lens.fy, lens.cx, lens.cy]
@@ -316,6 +365,12 @@ def report(lens):
     counts = coverage(lens.views, lens.width, lens.height)
     lines.append("  corners by ninth of the frame:")
     lines += ["    " + " ".join(f"{n:5d}" for n in row) for row in counts]
+    corners = np.vstack([v.corners for v in lens.views])
+    toward = reach(corners, (lens.width, lens.height), limits)
+    lines.append(
+        f"  corners beyond {limits.corner_reach:.0%} of the way to each frame corner: "
+        + ", ".join(f"{name} {count}" for name, count in zip(CORNER_NAMES, toward))
+    )
     worst = sorted(lens.views, key=lambda v: -v.error_px)[:5]
     lines.append("  worst views: " + ", ".join(f"{v.name} {v.error_px:.2f} px" for v in worst))
     for name, why in lens.dropped:

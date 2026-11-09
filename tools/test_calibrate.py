@@ -374,6 +374,61 @@ class OutlierDrops(unittest.TestCase):
                     self.assertIn(note, calibrate.report(lens))
 
 
+def reaching(name, rng, reach=(0.65,) * 4, extra=(0,) * 4):
+    """A view with corners spread over the frame, none further toward each of the frame's corners
+    (top left, top right, bottom left, bottom right) than reach says, as a share of the way from the
+    middle, and extra corners just past 70% of the way toward each."""
+    across, down = rng.uniform(-1, 1, (2, 3000))
+    quarter = 2 * (down >= 0) + (across >= 0)
+    keep = np.hypot(across, down) / np.sqrt(2) <= np.array(reach)[quarter]
+    across, down = list(across[keep]), list(down[keep])
+    for (sign_across, sign_down), count in zip([(-1, -1), (1, -1), (-1, 1), (1, 1)], extra):
+        across += [sign_across * 0.72] * count
+        down += [sign_down * 0.72] * count
+    corners = np.column_stack([(np.array(across) + 1) * (W - 1) / 2, (np.array(down) + 1) * (H - 1) / 2])
+    return calibrate.View(name, corners, np.zeros((len(corners), 3)))
+
+
+COUNTS = "a partly visible board counts"
+
+
+class CornerReach(unittest.TestCase):
+    """A session is refused unless its corners reach out toward each of the frame's four corners:
+    the ninths alone pass a board that never left the inner part of the corner ninths."""
+
+    def test_rows(self):
+        rng = np.random.default_rng(12)
+        inner = [reaching(f"good-{n:02d}", rng) for n in range(15)]
+        cases = [
+            # Each row: the views, then what the refusal says (None when the session is taken), and a
+            # corner it must not name.
+            ("every corner reached", inner[:14] + [reaching("good-14", rng, (1.0,) * 4)], None, None),
+            ("nothing past 65%, as a board kept well in from the corners", inner,
+             ["top left, top right, bottom left, bottom right corners", COUNTS], None),
+            ("one corner short", inner[:14] + [reaching("good-14", rng, (1.0, 0.65, 1.0, 1.0))],
+             ["toward the frame's top right corner", COUNTS], "top left"),
+            ("ten corners just past 70% toward each", inner[:14] + [reaching("good-14", rng, extra=(10,) * 4)], None, None),
+            ("nine toward one", inner[:14] + [reaching("good-14", rng, extra=(10, 10, 9, 10))],
+             ["toward the frame's bottom left corner", COUNTS], "top left"),
+            ("the outliers were the only views reaching out", inner + [reaching(f"bad-{n}", rng, (1.0,) * 4) for n in range(2)],
+             ["were the only ones near the frame's top left corner, top right corner"], None),
+        ]
+        for name, views, refusal, not_named in cases:
+            with self.subTest(name):
+                frames, found = standing_in(views)
+                with found, mock.patch.object(calibrate, "solve_views", solver_giving(bad_is_bad)):
+                    if refusal is None:
+                        lens = calibrate.solve(frames)
+                        self.assertEqual(len(lens.views), len(views))
+                        continue
+                    with self.assertRaises(calibrate.Refused) as refused:
+                        calibrate.solve(frames)
+                for says in refusal:
+                    self.assertIn(says, str(refused.exception))
+                if not_named is not None:
+                    self.assertNotIn(not_named, str(refused.exception))
+
+
 def opencv_giving(rms=0.2, fx=1230.0, k1=-0.08, view_error=0.2):
     """OpenCV's solve as it can come back from a failed fit: the values given, the rest ordinary."""
 
