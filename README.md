@@ -79,7 +79,9 @@ visor version
 - **Service:** [deploy/visor.service](deploy/visor.service), which runs as a `visor` user in the
   `video` group. Each release carries it under `os/` with the rest of what a board's image installs
   for Visor: the account, `/opt/visor`, and what Spotter's agent needs for Visor's pack
-  ([spotter/visor](spotter/visor/README.md#what-the-boards-image-gives-it)).
+  ([spotter/visor](spotter/visor/README.md#what-the-boards-image-gives-it)). Visor tells systemd
+  it's alive each 1.5 s while every camera's detect thread runs, a camera that's unplugged too;
+  one that hangs for 3 s gets Visor restarted ([src/watchdog.rs](src/watchdog.rs)).
 - **chrony:** [deploy/chrony.conf](deploy/chrony.conf), with the robot controller's address
   (`10.TE.AM.2`) in its `server` line.
 

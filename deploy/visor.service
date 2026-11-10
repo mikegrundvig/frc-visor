@@ -11,6 +11,10 @@ ConditionPathExists=/opt/visor/visor.toml
 StartLimitIntervalSec=0
 
 [Service]
+# Visor says when it's ready, and then that it's alive each 1.5 s while every camera's detect thread
+# runs (src/watchdog.rs); 3 s without it, systemd ends it, and restarts it.
+Type=notify
+WatchdogSec=3
 ExecStart=/opt/visor/visor run --config /opt/visor/visor.toml
 Restart=always
 RestartSec=1

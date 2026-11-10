@@ -24,6 +24,8 @@ libc = "0.2"
 log = "0.4"
 nalgebra = { version = "0.34", default-features = false, features = ["std"] }
 percent-encoding = "2"
+# Tells systemd Visor is ready and alive (src/watchdog.rs).
+sd-notify = "0.5"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 socket2 = "0.6"

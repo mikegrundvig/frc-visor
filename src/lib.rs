@@ -4,7 +4,8 @@
 //! exposure and gain it was taken at ([`settings`]) and how bright it is ([`brightness`]). While
 //! anyone watches, each camera's live view is served over HTTP ([`stream`]). The service
 //! ([`service`]) runs every camera's threads; as it starts, it says what it's running for Visor's
-//! Spotter pack ([`running`]).
+//! Spotter pack ([`running`]), and it tells systemd it's alive while every camera's detect thread
+//! runs ([`watchdog`]).
 
 pub mod brightness;
 pub mod cameras;
@@ -21,4 +22,5 @@ pub mod running;
 pub mod service;
 pub mod settings;
 pub mod stream;
+pub mod watchdog;
 pub mod wire;

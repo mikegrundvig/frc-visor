@@ -24,20 +24,29 @@ const CAMERA: &str = r#"
 /// configuration is in. `panic_in` names a camera whose detect thread is to panic
 /// (VISOR_TEST_PANIC, a debug build's fault switch).
 fn start(test: &str, robot: &str, panic_in: Option<&str>) -> (Child, PathBuf) {
+    let config = format!("robot = \"{robot}\"\nport = 9\n{CAMERA}");
+    let panic: Vec<(&str, &str)> = panic_in
+        .map(|camera| ("VISOR_TEST_PANIC", camera))
+        .into_iter()
+        .collect();
+    start_with(test, &config, &panic)
+}
+
+/// The program, started on the configuration `config` with `env` beside its own environment, and
+/// the directory the configuration is in.
+fn start_with(test: &str, config: &str, env: &[(&str, &str)]) -> (Child, PathBuf) {
     let dir = std::env::temp_dir().join(format!("visor-run-{test}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let config: PathBuf = dir.join("visor.toml");
-    std::fs::write(&config, format!("robot = \"{robot}\"\nport = 9\n{CAMERA}")).unwrap();
+    let path: PathBuf = dir.join("visor.toml");
+    std::fs::write(&path, config).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_visor"));
     command
         .arg("run")
         .arg("--config")
-        .arg(&config)
+        .arg(&path)
+        .envs(env.iter().copied())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if let Some(camera) = panic_in {
-        command.env("VISOR_TEST_PANIC", camera);
-    }
     (command.spawn().unwrap(), dir)
 }
 
@@ -76,6 +85,63 @@ fn no_route_to_the_robot_yet_is_not_a_reason_to_stop() {
     let ended = ended_within(&mut child, Duration::from_millis(1500));
     std::fs::remove_dir_all(dir).unwrap();
     assert_eq!(ended, None, "the program ended");
+}
+
+/// What systemd hears from the program on its notification socket, as systemd would run it with a
+/// watchdog of `watchdog`: each message, until `listening` has passed.
+fn told_systemd(test: &str, config: &str, watchdog: Duration, listening: Duration) -> Vec<String> {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("notify-{test}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("notify");
+    let socket = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let micros = watchdog.as_micros().to_string();
+    let env = [
+        ("NOTIFY_SOCKET", path.to_str().unwrap()),
+        ("WATCHDOG_USEC", micros.as_str()),
+    ];
+    let (mut child, config_dir) = start_with(test, config, &env);
+    let mut heard = Vec::new();
+    let started = Instant::now();
+    let mut buffer = [0u8; 256];
+    while started.elapsed() < listening {
+        if let Ok(n) = socket.recv(&mut buffer) {
+            heard.push(String::from_utf8_lossy(&buffer[..n]).trim_end().to_string());
+        }
+    }
+    let ended = child.try_wait().unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    std::fs::remove_dir_all(config_dir).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert_eq!(ended, None, "{test}: the program ended");
+    heard
+}
+
+#[test]
+fn visor_tells_systemd_it_s_ready_then_alive_while_its_detect_threads_run() {
+    let watchdog = Duration::from_millis(400);
+    let listening = Duration::from_secs(2);
+    // (the board, its configuration)
+    let rows = [(
+        "a camera absent: its capture thread retries, its detect thread waits",
+        format!("robot = \"127.0.0.1\"\nport = 9\n{CAMERA}"),
+    )];
+    for (board, config) in rows {
+        let heard = told_systemd("notify", &config, watchdog, listening);
+        assert_eq!(
+            heard.first().map(String::as_str),
+            Some("READY=1"),
+            "{board}: {heard:?}"
+        );
+        // Every half of the watchdog's time: 10 in 2 s, less a few for a busy machine.
+        let alive = heard.iter().filter(|said| *said == "WATCHDOG=1").count();
+        assert!(alive >= 5, "{board}: {heard:?}");
+        assert_eq!(alive + 1, heard.len(), "{board}: {heard:?}");
+    }
 }
 
 /// The service as systemd runs it, with its runtime folder (RUNTIME_DIRECTORY) in a folder of the

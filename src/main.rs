@@ -19,7 +19,7 @@ use visor::latest::Latest;
 use visor::napa::Detector;
 use visor::service::{self, Wired};
 use visor::stream::{self, server};
-use visor::wire;
+use visor::{watchdog, wire};
 
 use commands::Result;
 
@@ -215,12 +215,16 @@ fn run(path: &Path) -> Result<()> {
     }
     let listener = service::listen(SocketAddr::from((Ipv4Addr::UNSPECIFIED, stream::PORT)));
     say_running(&text);
+    // Ready: what each camera needs is open, and its threads start next. systemd watches from here
+    // (deploy/visor.service: Type=notify, WatchdogSec=).
+    watchdog::ready();
     let stop = AtomicBool::new(false);
     service::run(
         cameras,
         config.robot,
         listener,
         server::Options::default(),
+        watchdog::interval(),
         &SystemClocks,
         &stop,
     );

@@ -207,6 +207,7 @@ fn each_camera_s_frames_go_out_under_its_own_index_whether_or_not_the_view_has_i
                     robot_address,
                     listener,
                     Options::default(),
+                    None,
                     &Synced,
                     stop,
                 )

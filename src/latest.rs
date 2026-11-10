@@ -1,8 +1,10 @@
 //! The hand-off between a camera's capture thread and its detect thread: one slot holding the
 //! newest frame. The capture thread replaces whatever is waiting, so a slow detection drops frames
 //! rather than falling behind. Images are recycled, so frames don't allocate. The slot counts the
-//! frames that never went on: replaced before they were taken, or broken.
+//! frames that never went on: replaced before they were taken, or broken; and the times the detect
+//! thread asked for one, which say it's running ([`crate::watchdog`]).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -26,6 +28,8 @@ pub struct Captured {
 pub struct Latest {
     state: Mutex<State>,
     ready: Condvar,
+    /// The times the detect thread asked for a frame, since the program started.
+    asked: AtomicU64,
 }
 
 #[derive(Default)]
@@ -75,12 +79,19 @@ impl Latest {
 
     /// The newest frame, waiting up to `timeout` for one.
     pub fn take(&self, timeout: Duration) -> Option<Captured> {
+        self.asked.fetch_add(1, Ordering::Relaxed);
         let state = self.state.lock().unwrap();
         let (mut state, _) = self
             .ready
             .wait_timeout_while(state, timeout, |state| state.waiting.is_none())
             .unwrap();
         state.waiting.take()
+    }
+
+    /// The times the detect thread has asked for a frame ([`Latest::take`]): each frame it took,
+    /// and each wait for one that ran out. While it runs, this goes up at least each wait.
+    pub fn asked(&self) -> u64 {
+        self.asked.load(Ordering::Relaxed)
     }
 
     /// Counts a frame the camera gave that can't be used: the driver marked it bad, or it was short.
