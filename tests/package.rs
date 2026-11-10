@@ -1,5 +1,5 @@
-//! tools/package.sh makes the release archive a board's image installs Visor from: the program, and
-//! under `os/` everything the image needs for Visor (its account, its folder, its unit, and what
+//! tools/package.sh makes the release archive a board's image installs Visor from: the program, its
+//! notices (NAPA's, and the crates it's built from with their licences), and under `os/` everything the image needs for Visor (its account, its folder, its unit, and what
 //! Spotter's agent needs to run Visor's pack), so no image keeps a copy of its own.
 //!
 //! The case packs a stand-in program and checks every member of the archive, by type, mode and
@@ -14,6 +14,7 @@ const MEMBERS: &[(&str, &str, Option<&str>)] = &[
     ("drwxr-xr-x", "./", None),
     ("-rw-r--r--", "./LICENSE", None),
     ("-rw-r--r--", "./NOTICE", None),
+    ("-rw-r--r--", "./THIRD-PARTY-LICENSES", None),
     ("-rw-r--r--", "./chrony.conf", None),
     ("drwxr-xr-x", "./os/", None),
     ("drwxr-xr-x", "./os/usr/", None),
@@ -63,6 +64,18 @@ const MEMBERS: &[(&str, &str, Option<&str>)] = &[
     ("-rwxr-xr-x", "./spotter/visor/journal", None),
     ("-rw-r--r--", "./spotter/visor/pack.yaml", None),
     ("-rwxr-xr-x", "./spotter/visor/status", None),
+    ("drwxr-xr-x", "./vendor/", None),
+    ("drwxr-xr-x", "./vendor/napa/", None),
+    (
+        "-rw-r--r--",
+        "./vendor/napa/NOTICE",
+        Some("vendor/napa/NOTICE"),
+    ),
+    (
+        "-rw-r--r--",
+        "./vendor/napa/THIRD_PARTY_NOTICES",
+        Some("vendor/napa/THIRD_PARTY_NOTICES"),
+    ),
     ("-rwxr-xr-x", "./visor", None),
 ];
 
@@ -135,6 +148,20 @@ fn the_release_archive_carries_the_program_its_pack_and_the_image_s_part() {
             std::fs::read(repo().join(source)).unwrap(),
             "{name} is {source}"
         );
+    }
+    // The crates the program is built from, each with its licences; not the tests' own, nor Visor.
+    let crates = std::fs::read_to_string(unpacked.join("THIRD-PARTY-LICENSES")).unwrap();
+    // (part of a line, whether it's listed)
+    let rows = [
+        ("\naxum@0.8.9 (1): MIT\n", true),
+        ("\njpeg-encoder@", true),
+        ("\nv4l@", true),
+        ("\nureq@", false),
+        ("\nimage@", false),
+        ("\nvisor@", false),
+    ];
+    for (line, listed) in rows {
+        assert_eq!(crates.contains(line), listed, "{line:?} in\n{crates}");
     }
     std::fs::remove_dir_all(dir).unwrap();
 }

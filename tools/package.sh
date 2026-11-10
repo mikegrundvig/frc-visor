@@ -4,7 +4,8 @@
 #
 #   tools/package.sh <program> <out dir>      prints the archive's path
 #
-# The archive holds the program, its licence and notices, the chrony configuration to start from,
+# The archive holds the program, its licence and notices (NAPA's, and a list of the Rust crates it's
+# built from and their licences, which needs cargo-deny), the chrony configuration to start from,
 # Visor's Spotter pack (spotter/), and os/: what a board's image installs at its root for Visor, its
 # account, its folder, its unit, and what the agent needs to run Visor's pack (spotter/visor/README.md).
 # The same files make the same archive: fixed owner, order and times, no gzip timestamp.
@@ -24,6 +25,20 @@ trap 'rm -rf "$package"' EXIT
 
 install -m 0755 "$program" "$package/visor"
 install -m 0644 "$repo/LICENSE" "$repo/NOTICE" "$repo/deploy/chrony.conf" "$package/"
+# NAPA's notice and its own third-party notices, where NOTICE says they are.
+install -D -m 0644 "$repo/vendor/napa/NOTICE" "$package/vendor/napa/NOTICE"
+install -m 0644 "$repo/vendor/napa/THIRD_PARTY_NOTICES" "$package/vendor/napa/"
+# Each Rust crate the program is built from and its licences, from Cargo.lock by cargo-deny: the
+# arm64 build's crates, less the tests' own.
+{
+  echo "The Rust crates Visor's program is built from, each with its licences, from Cargo.lock"
+  echo "(cargo deny list). Each crate's licence text is in its source, on crates.io."
+  echo
+  cargo deny --log-level error --manifest-path "$repo/Cargo.toml" --locked --offline \
+    --exclude-dev --target aarch64-unknown-linux-gnu --color never list --layout crate |
+    grep -v '^visor@'
+} >"$package/THIRD-PARTY-LICENSES"
+chmod 0644 "$package/THIRD-PARTY-LICENSES"
 # Visor's Spotter pack, which the robot program pushes to its boards.
 mkdir "$package/spotter"
 cp -r "$repo/spotter/visor" "$package/spotter/"

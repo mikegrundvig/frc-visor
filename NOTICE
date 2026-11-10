@@ -8,3 +8,7 @@ Visor includes NAPA, the AprilTag detector, by Zachary Wilson (https://github.co
 vendor/napa/, under GPL-3.0-only. NAPA's notice, including its additional term under section 7(b)
 of the GPL that works based on NAPA keep its notice and credit Zachary Wilson as its author, is in
 vendor/napa/NOTICE. `visor version` prints that credit.
+
+The Rust crates the program is built from are each under their own licences (MIT, Apache-2.0,
+BSD-3-Clause, Zlib, Unlicense, IJG and others): each release archive lists them, crate by crate, in
+THIRD-PARTY-LICENSES.

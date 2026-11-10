@@ -3,8 +3,9 @@ name: Release
 # A tag vYEAR.MONTH.DAY, Cargo.toml's version, builds the coprocessor program on GitHub's arm64
 # runner (the coprocessors' architecture), tests it there, and attaches it to the tag's GitHub
 # release with its SHA-256: visor-<version>-linux-arm64.tar.gz, holding the program, its licence and
-# notices, the chrony configuration, Visor's Spotter pack (spotter/visor/), and os/, what a board's
-# image installs for Visor (tools/package.sh says what).
+# notices (NAPA's, and the crates it's built from with their licences), the chrony configuration,
+# Visor's Spotter pack (spotter/visor/), and os/, what a board's image installs for Visor
+# (tools/package.sh says what).
 # tools/release.sh then publishes it into frc-maven beside the client.
 #
 # Two jobs, so no build code runs where the release can be written: the first builds, tests and
@@ -34,6 +35,9 @@ jobs:
         run: |
           rustup toolchain install --no-self-update
           sudo apt-get install -y libclang-dev
+      # The package lists the crates the program is built from, and their licences, with it.
+      - name: cargo-deny, at a fixed version, built from crates.io with its own lock file
+        run: cargo install --locked cargo-deny@0.20.2
       - name: The tag is the package's version
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
