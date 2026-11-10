@@ -3,7 +3,8 @@ name: Release
 # A tag vYEAR.MONTH.DAY, Cargo.toml's version, builds the coprocessor program on GitHub's arm64
 # runner (the coprocessors' architecture), tests it there, and attaches it to the tag's GitHub
 # release with its SHA-256: visor-<version>-linux-arm64.tar.gz, holding the program, its licence and
-# notices, the systemd unit, the chrony configuration, and Visor's Spotter pack (spotter/visor/).
+# notices, the chrony configuration, Visor's Spotter pack (spotter/visor/), and os/, what a board's
+# image installs for Visor (tools/package.sh says what).
 # tools/release.sh then publishes it into frc-maven beside the client.
 
 on:
@@ -38,17 +39,11 @@ jobs:
         run: cargo test --locked
       - name: Release build
         run: cargo build --release --locked
+      # tools/package.sh, which tests/package.rs checks member by member.
       - name: Package
         run: |
-          name="visor-$VERSION-linux-arm64.tar.gz"
-          mkdir package
-          cp target/release/visor LICENSE NOTICE deploy/visor.service deploy/chrony.conf package/
-          # Visor's Spotter pack, which the robot program pushes to its boards.
-          mkdir package/spotter
-          cp -r spotter/visor package/spotter/
-          # The same files make the same archive: fixed owner, order and times, no gzip timestamp.
-          tar -C package --owner=0 --group=0 --numeric-owner --sort=name \
-            --mtime="@$(git log -1 --format=%ct)" -cf - . | gzip -n > "$name"
+          archive="$(tools/package.sh target/release/visor .)"
+          name="$(basename "$archive")"
           sha256sum "$name" > "$name.sha256"
           cat "$name.sha256"
       - name: The tag's release

@@ -119,8 +119,9 @@ ext.published = [
 apply from: file("gradle/publishing.gradle")
 
 // The coprocessor program itself, beside the client and at its version: com.michaelgrundvig.frc:visor,
-// visor-<version>-linux-arm64.tar.gz (the program, its licence and notices, the systemd unit and the
-// chrony configuration), as the release workflow builds it on GitHub's arm64 runner. A robot's
+// visor-<version>-linux-arm64.tar.gz (the program, its licence and notices, the chrony configuration,
+// the Spotter pack and what a board's image installs, tools/package.sh), as the release workflow
+// builds it on GitHub's arm64 runner. A robot's
 // deploy takes it from there for the client it's built with. tools/release.sh downloads it from the
 // tag's GitHub release, checks its SHA-256 and hands it over as -PvisorTarball.
 def visorTarball = providers.gradleProperty("visorTarball").map { file(it) }

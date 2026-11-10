@@ -1,0 +1,4 @@
+# Visor's folder (systemd-tmpfiles): /opt/visor, Spotter's agent's account's, since Visor's pack
+# installs the program and its configuration there (spotter/visor/README.md). Readable by anyone, so
+# the visor user runs what's in it. Made by the board's image, and put right again at every boot.
+d /opt/visor 0755 frc-spotter frc-spotter -

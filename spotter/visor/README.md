@@ -20,38 +20,29 @@ Both actions run only while the robot is disabled: the manager refuses them othe
 
 ## What the board's image gives it
 
-The agent runs as its own account, which may do almost nothing by default. The image grants this
-pack what it needs, and nothing more:
+The agent runs as its own account, which may do almost nothing by default. What this pack needs of
+the board ships in each release, under `os/`, at the paths a package's own files take, and the
+board's image installs that folder at its root (copied as it is, then `systemd-sysusers visor.conf`,
+`systemd-tmpfiles --create visor.conf`, and `systemctl enable visor.service`):
 
-- **Visor's systemd unit,** enabled: Visor's `deploy/visor.service`, which runs `/opt/visor/visor`
-  as the `visor` user and keeps trying until the first install puts it there.
-- **`/opt/visor`, writable by the agent:** owned by its account (`frc-spotter`), and kept across
-  boots on a read-only root. A drop-in for its unit,
-  `/etc/systemd/system/frc-spotter.service.d/visor.conf`:
+| In `os/` | From | What it gives |
+|---|---|---|
+| `usr/lib/sysusers.d/visor.conf` | `deploy/visor.sysusers` | The `visor` account, in the `video` group, which Visor's unit runs as |
+| `usr/lib/tmpfiles.d/visor.conf` | `deploy/visor.tmpfiles` | `/opt/visor`, the agent's account's (`frc-spotter`) to write, readable by anyone |
+| `usr/lib/systemd/system/visor.service` | `deploy/visor.service` | Visor's unit, which runs `/opt/visor/visor` as `visor` once the robot has configured it |
+| `usr/lib/systemd/system/frc-spotter.service.d/visor.conf` | `deploy/frc-spotter-visor.conf` | The agent may write `/opt/visor` (`ReadWritePaths=`) |
+| `usr/share/polkit-1/rules.d/50-frc-spotter-visor.rules` | `deploy/50-frc-spotter-visor.rules` | The agent may restart `visor.service`, and nothing more: it sorts before Spotter's own `99-frc-spotter.rules` |
 
-  ```ini
-  [Service]
-  ReadWritePaths=/opt/visor
-  ```
+What stays the image's own is the board's: keeping `/opt/visor` across boots on a read-only root,
+and which cores Visor runs on (a drop-in for `visor.service` with `CPUAffinity=`). A drop-in in the
+board's `/etc` names its file differently from the release's, or it would replace that one.
 
-- **Restarting Visor, and only that:** a polkit rule, sorting before Spotter's own
-  `99-frc-spotter.rules`, as `/etc/polkit-1/rules.d/50-frc-spotter-visor.rules`:
-
-  ```js
-  polkit.addRule(function (action, subject) {
-    if (action.id == "org.freedesktop.systemd1.manage-units" &&
-        action.lookup("unit") == "visor.service" &&
-        action.lookup("verb") == "restart" &&
-        subject.user == "frc-spotter") {
-      return polkit.Result.YES;
-    }
-  });
-  ```
+Two things need nothing granted:
 
 - **What's running:** Visor's unit makes `/run/visor` (`RuntimeDirectory=`), readable by anyone,
-  and its main process ID is anyone's to read (`systemctl show`), so this needs nothing either.
-  The unit comes with the image (the release's `visor.service`); an install changes only the
-  program, so a board whose unit has no `RuntimeDirectory=` never reports a running Visor.
+  and its main process ID is anyone's to read (`systemctl show`). The unit comes with the image
+  (the release's `os/`); an install changes only the program, so a board whose unit has no
+  `RuntimeDirectory=` never reports a running Visor until it's given a newer image.
 - **The cameras' names:** `/dev/v4l/by-id/`, `/dev/v4l/by-path/` and the cameras' serials and
   indexes under `/sys/class/video4linux/` are readable by anyone, so listing them needs nothing:
   `visor cameras --names` opens no camera.

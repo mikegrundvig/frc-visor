@@ -1,0 +1,4 @@
+# Visor's account (systemd-sysusers): a system user with no login and no home, in the video group
+# for the cameras. The board's image makes it from the release's os/usr/lib/sysusers.d/visor.conf.
+u visor - "Visor, AprilTag vision" /nonexistent /usr/sbin/nologin
+m visor video

@@ -4,22 +4,26 @@ Description=Visor, AprilTag vision for the robot
 # once it has a route there.
 After=chrony.service
 # The robot program puts the program and its configuration in /opt/visor, through Visor's Spotter
-# pack (spotter/visor), and restarts it: keep trying for good, including before the first install.
+# pack (spotter/visor), and restarts it. Until the robot has written a configuration there are no
+# cameras to run, so Visor waits for it rather than restarting every second; the pack's restart after
+# configuring starts it. From then on, keep trying for good.
+ConditionPathExists=/opt/visor/visor.toml
 StartLimitIntervalSec=0
 
 [Service]
 ExecStart=/opt/visor/visor run --config /opt/visor/visor.toml
 Restart=always
 RestartSec=1
-# The cameras (the video group) are all it needs. The image creates the visor user; /opt/visor is
-# Spotter's agent's to write (spotter/visor/README.md), and kept across boots on a read-only root.
+# The cameras (the video group) are all it needs. The visor user and /opt/visor, Spotter's agent's
+# to write (spotter/visor/README.md), come with this unit in the release's os/ (sysusers.d and
+# tmpfiles.d).
 User=visor
 SupplementaryGroups=video
 # /run/visor, the visor user's, readable by anyone, and gone when Visor stops: where it says, as it
 # starts, which version and configuration it runs, for its Spotter pack (src/running.rs).
 RuntimeDirectory=visor
-# Visor's threads on the fast cores of an RK3588 (Orange Pi 5: cores 4-7 are the Cortex-A76s).
-CPUAffinity=4-7
+# Which cores are the fast ones is the board's: its image pins Visor to them with a drop-in
+# (CPUAffinity=).
 Nice=-5
 NoNewPrivileges=true
 ProtectSystem=strict

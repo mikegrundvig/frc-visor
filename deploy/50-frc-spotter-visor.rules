@@ -1,0 +1,14 @@
+// Visor's Spotter pack restarts Visor after it installs or configures it: the agent's account may
+// restart visor.service, and nothing more. It sorts before the agent package's 99-frc-spotter.rules,
+// which refuses that account everything else.
+polkit.addRule(function (action, subject) {
+  if (subject.user !== "frc-spotter") {
+    return polkit.Result.NOT_HANDLED;
+  }
+  if (action.id === "org.freedesktop.systemd1.manage-units" &&
+      action.lookup("unit") === "visor.service" &&
+      action.lookup("verb") === "restart") {
+    return polkit.Result.YES;
+  }
+  return polkit.Result.NOT_HANDLED;
+});

@@ -75,7 +75,9 @@ visor version
   the board has another, and writes the configuration from the cameras the board has plugged in.
   The new configuration is checked (`visor check`) before it replaces the old.
 - **Service:** [deploy/visor.service](deploy/visor.service), which runs as a `visor` user in the
-  `video` group.
+  `video` group. Each release carries it under `os/` with the rest of what a board's image installs
+  for Visor: the account, `/opt/visor`, and what Spotter's agent needs for Visor's pack
+  ([spotter/visor](spotter/visor/README.md#what-the-boards-image-gives-it)).
 - **chrony:** [deploy/chrony.conf](deploy/chrony.conf), with the robot controller's address
   (`10.TE.AM.2`) in its `server` line.
 
@@ -149,8 +151,8 @@ A release is a date, `year.month.day` in Cargo.toml, and its version ID is that 
 the robot client is released at the same version. Pushing the tag `v<version>` runs
 [the release workflow](.github/workflows/release.yml), which builds and tests the program on an
 arm64 runner and attaches `visor-<version>-linux-arm64.tar.gz` (the program, its licence and
-notices, the systemd unit, the chrony configuration and the Spotter pack) and its SHA-256 to the
-tag's GitHub release. `tools/release.sh` then publishes the client and that archive into the FRC
+notices, the chrony configuration, the Spotter pack, and `os/`, what a board's image installs;
+[tools/package.sh](tools/package.sh) makes it) and its SHA-256 to the tag's GitHub release. `tools/release.sh` then publishes the client and that archive into the FRC
 libraries' Maven repository, from which a robot's build takes the archive for its client. It runs
 from a clean checkout of the tag and refuses otherwise, so the client is built from the same code as
 the program.
