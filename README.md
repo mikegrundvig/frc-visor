@@ -185,12 +185,16 @@ middle of the frame leave the lens a guess out at its edges, where the distortio
 
 1. Print `board.png` at 100% scale and fix it flat to something rigid.
 2. On the coprocessor, `visor cameras` lists each camera plugged in: the device to give Visor, and
-   the formats and sizes it offers. A camera with a USB serial is named by its `/dev/v4l/by-id/`
-   name, which follows the camera to any port. A camera with no serial (the ThriftyCam has none) is
-   named by its USB port, its `/dev/v4l/by-path/` name, always, even when it's the only one plugged
-   in: every camera of its model shares one by-id name, which breaks when a second is plugged in.
-   So is a camera whose serial is another's. A camera named by its port must go back in that port:
-   label the ports and the cables.
+   the formats and sizes it offers. Each camera is listed once, by the video device it captures on:
+   the kernel's first for its USB device, the one udev's names end `-video-index0`. Its others (a
+   UVC camera's second, for metadata) are left out, told from the kernel's description of each
+   rather than by opening it. `visor cameras --names` prints only the names, one a line, and opens
+   no camera: it's what Visor's Spotter pack reports to the robot. A camera with a USB serial is
+   named by its `/dev/v4l/by-id/` name, which follows the camera to any port. A camera with no
+   serial (the ThriftyCam has none) is named by its USB port, its `/dev/v4l/by-path/` name, always,
+   even when it's the only one plugged in: every camera of its model shares one by-id name, which
+   breaks when a second is plugged in. So is a camera whose serial is another's. A camera named by
+   its port must go back in that port: label the ports and the cables.
 3. Stop the service, which has the cameras open, and record at the size the camera is to run:
 
    ```bash

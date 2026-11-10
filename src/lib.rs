@@ -2,8 +2,9 @@
 //! ([`capture`]) and a detect thread ([`pipeline`]) joined by a one-frame slot ([`latest`]); frames
 //! go to the robot as [`wire`] datagrams stamped with robot time ([`clock`]), each with the
 //! exposure and gain it was taken at ([`settings`]) and how bright it is ([`brightness`]). While
-//! anyone watches, each camera's live view is served over HTTP ([`stream`]). As it starts, the
-//! service says what it's running for Visor's Spotter pack ([`running`]).
+//! anyone watches, each camera's live view is served over HTTP ([`stream`]). The service
+//! ([`service`]) runs every camera's threads; as it starts, it says what it's running for Visor's
+//! Spotter pack ([`running`]).
 
 pub mod brightness;
 pub mod cameras;
