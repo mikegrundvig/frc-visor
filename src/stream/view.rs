@@ -60,9 +60,36 @@ impl View {
     }
 }
 
-/// Makes pictures from the camera's frames while anyone watches, until `stop` is set. Each frame's
-/// image goes back to `latest` once its picture is made.
-pub fn run(camera: &Camera, feed: &Feed, latest: &Latest, view: &View, stop: &AtomicBool) {
+/// The time the view paces its pictures by: the real one ([`RealTime`]), or a test's.
+pub trait Pace {
+    fn now(&self) -> Instant;
+    fn sleep(&self, how_long: Duration);
+}
+
+/// The real time.
+pub struct RealTime;
+
+impl Pace for RealTime {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep(&self, how_long: Duration) {
+        thread::sleep(how_long);
+    }
+}
+
+/// Makes pictures from the camera's frames while anyone watches, until `stop` is set, one each
+/// period of the view's rate by `pace`. Each frame's image goes back to `latest` once its picture
+/// is made.
+pub fn run(
+    camera: &Camera,
+    feed: &Feed,
+    latest: &Latest,
+    view: &View,
+    pace: &impl Pace,
+    stop: &AtomicBool,
+) {
     super::lower_priority(&format!("{}'s live view", camera.name));
     let period = Duration::from_secs_f64(1.0 / f64::from(camera.stream.fps));
     let mut painter = Painter::new(camera.stream);
@@ -78,7 +105,7 @@ pub fn run(camera: &Camera, feed: &Feed, latest: &Latest, view: &View, stop: &At
             thread::sleep(IDLE_CHECK);
             continue;
         }
-        let started = Instant::now();
+        let started = pace.now();
         if let Some(left) = feed.ask() {
             latest.recycle(left);
         }
@@ -100,8 +127,8 @@ pub fn run(camera: &Camera, feed: &Feed, latest: &Latest, view: &View, stop: &At
             Err(_) => {}
         }
         // The next a period after this one began; when this one took longer, straight away.
-        if let Some(rest) = period.checked_sub(started.elapsed()) {
-            thread::sleep(rest);
+        if let Some(rest) = period.checked_sub(pace.now() - started) {
+            pace.sleep(rest);
         }
     }
 }

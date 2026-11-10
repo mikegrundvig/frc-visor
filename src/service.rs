@@ -19,7 +19,7 @@ use crate::napa::Detector;
 use crate::pipeline;
 use crate::stream::feed::Feed;
 use crate::stream::server;
-use crate::stream::view::{self, View};
+use crate::stream::view::{self, RealTime, View};
 
 /// One camera and what its threads are given: where its frames come from, its detector, the
 /// socket its frames go to the robot from, and the slot between its capture and detect threads.
@@ -89,7 +89,7 @@ pub fn run<S: Source + Send>(
                 let mut send = |bytes: &[u8]| socket.send_to(bytes, robot).map(|_| ());
                 pipeline::run(camera, latest, detector, clocks, &mut send, feed, stop)
             });
-            scope.spawn(move || view::run(camera, feed, latest, shown, stop));
+            scope.spawn(move || view::run(camera, feed, latest, shown, &RealTime, stop));
         }
     });
 }

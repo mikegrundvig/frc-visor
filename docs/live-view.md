@@ -65,8 +65,12 @@ Detection comes first, and the view never holds it up or makes it drop a frame:
 The server is axum on a single-threaded tokio runtime, on a thread of its own; the picture is
 fast_image_resize's averaging, embedded-graphics' drawing and jpeg-encoder's JPEG.
 
-`tests/stream.rs` runs a camera end to end, frames in and datagrams out on loopback, with the view
-fetched over HTTP: the outline lands on the tag at the view's size and rate; no picture is made
-with no one watching; a slow watcher, a stalled one and ones that vanish mid-picture together leave
-every frame reaching the robot on time with none dropped, and the stalled one is closed; and
-watchers past the most are turned away.
+`tests/stream.rs` runs a camera end to end, frames in at the camera's 60 fps whatever detection is
+doing and datagrams out on loopback, with the view fetched over HTTP: the outline lands on the tag
+at the view's size, and at its rate, counted per second of a test clock the view is paced by; no
+picture is made with no one watching; and watchers past the most are turned away. It measures the
+claim above: the same camera runs with no one watching, then with a slow watcher, a stalled one and
+ones that vanish mid-picture, and every frame reaches the robot with none dropped, while the worst
+time from slot to robot and the worst detection (each bar the worst 1%, for a busy machine's
+hiccups) stay within 4 ms of the run with no one watching. A detect thread held up 20 ms at each
+hand-off fails it. The stream tests run one at a time.

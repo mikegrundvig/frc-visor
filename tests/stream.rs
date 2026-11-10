@@ -1,15 +1,15 @@
-//! The live view end to end: a camera's frames into its slot as capture puts them, the detect thread
+//! The live view end to end: a camera's frames into its slot at the camera's rate, the detect thread
 //! sending each to the robot over UDP on loopback, the camera's live view, and the server on a free
 //! port, fetched over HTTP as a browser would. Watchers that read slowly, stall or vanish never hold
-//! detection up.
+//! detection up: measured against the same camera with no one watching.
 
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,7 @@ use visor::pipeline;
 use visor::settings::InEffect;
 use visor::stream::feed::Feed;
 use visor::stream::server::{self, Options};
-use visor::stream::view::{self, View};
+use visor::stream::view::{self, Pace, RealTime, View};
 use visor::wire::Frame;
 
 /// The robot's clock, synced, as the pipeline's tests have it.
@@ -62,44 +62,96 @@ fn camera() -> Camera {
 
 const STREAM: &str = "/stream/front%20left";
 
+/// The stream tests time detection, so they run one at a time, whatever the test runner's threads.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    // A test that failed holding it says so itself; the others run on.
+    SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// What the rig gives a test while it runs.
 struct Rig<'a> {
     address: SocketAddr,
     view: &'a View,
 }
 
-/// What the robot received while the test ran.
+/// What the robot received while the test ran, and when.
 struct Received {
+    /// How many frames the camera put in its slot.
+    put: usize,
     frames: Vec<Frame>,
-    /// Frames whose datagram didn't arrive within a second: detection was held up.
-    late: usize,
+    /// How long after it was put in the slot each frame reached the robot.
+    delays: Vec<Duration>,
     /// Visor's own count of frames replaced before detection took them.
     dropped: u64,
 }
 
-/// Runs a camera end to end while `test` runs, and for a second at least: one frame at a time,
-/// every 16 ms, each waited for at the robot, so any frame detection is held up for shows as late.
-fn with_camera(options: Options, test: impl FnOnce(&Rig)) -> Received {
+impl Received {
+    /// The worst delay from the slot to the robot, bar the worst 1%.
+    fn worst_delay(&self) -> Duration {
+        nearly_worst(self.delays.clone())
+    }
+
+    /// The worst detection, bar the worst 1%.
+    fn worst_detect(&self) -> Duration {
+        let times = self
+            .frames
+            .iter()
+            .map(|f| Duration::from_micros(u64::from(f.detect_us)));
+        nearly_worst(times.collect())
+    }
+}
+
+/// The worst of `times`, bar the worst 1%. A hiccup of a shared machine's scheduler can hold up a
+/// frame or two whatever the view does; a view that held detection up would hold up a frame for
+/// each of its pictures, a sixth of them.
+fn nearly_worst(mut times: Vec<Duration>) -> Duration {
+    times.sort();
+    let left_out = times.len() / 100;
+    times
+        .len()
+        .checked_sub(left_out + 1)
+        .map_or(Duration::ZERO, |i| times[i])
+}
+
+/// What the robot's clock is behind the monotonic clock, by [`Synced`]: a frame's capture time
+/// plus this is when it was put in the slot.
+const ROBOT_BEHIND_NANOS: i64 = 1_000_000_000_000;
+
+/// Runs a camera end to end while `test` runs, and for a second at least. The camera runs free at
+/// its rate, as a real one does, putting each frame in the slot on time whatever detection is
+/// doing; the robot notes when each arrives. A frame detection is held up for arrives late, and
+/// one held up for longer than a frame is replaced, and counted as dropped. The view paces its
+/// pictures by `pace`.
+fn with_camera(options: Options, pace: &(impl Pace + Sync), test: impl FnOnce(&Rig)) -> Received {
     let scene = common::scene("one-tag");
     let robot = UdpSocket::bind("127.0.0.1:0").unwrap();
     robot
-        .set_read_timeout(Some(Duration::from_secs(1)))
+        .set_read_timeout(Some(Duration::from_millis(100)))
         .unwrap();
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
     sender.connect(robot.local_addr().unwrap()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let camera = camera();
+    let period = Duration::from_secs(1) / camera.fps;
     let latest = Latest::new();
     let feed = Feed::new();
     let views = Arc::new(vec![View::new(&camera.name)]);
     let stop = AtomicBool::new(false);
     let done = AtomicBool::new(false);
+    // How many frames the robot is to receive, once the camera has stopped.
+    let expected = AtomicUsize::new(usize::MAX);
+    let started = Instant::now();
+    let since_start = || started.elapsed().as_nanos() as i64;
     thread::scope(|scope| {
         let (camera, latest, feed, stop, views) = (&camera, &latest, &feed, &stop, &views);
         let served = Arc::clone(views);
         scope.spawn(move || server::run(listener, served, options, stop));
-        scope.spawn(move || view::run(camera, feed, latest, &views[0], stop));
+        scope.spawn(move || view::run(camera, feed, latest, &views[0], pace, stop));
         scope.spawn(|| {
             let mut detector = Detector::new(camera.min_tag_px).unwrap();
             let mut send = |bytes: &[u8]| sender.send(bytes).map(|_| ());
@@ -114,16 +166,16 @@ fn with_camera(options: Options, test: impl FnOnce(&Rig)) -> Received {
             );
         });
         let capture = scope.spawn(|| {
-            let mut frames = Vec::new();
-            let mut late = 0;
-            let mut buffer = [0u8; 2048];
-            let mut at = 0;
+            let mut put = 0;
             while !done.load(Ordering::Relaxed) {
+                if let Some(rest) = (period * put).checked_sub(started.elapsed()) {
+                    thread::sleep(rest);
+                }
                 let mut image = latest.spare(1600, 1304);
                 image.pixels.copy_from_slice(&scene.image.pixels);
                 latest.put(Captured {
                     image,
-                    monotonic_nanos: at,
+                    monotonic_nanos: since_start(),
                     dequeue_time: false,
                     settings: InEffect {
                         exposure_us: Some(1000),
@@ -131,16 +183,35 @@ fn with_camera(options: Options, test: impl FnOnce(&Rig)) -> Received {
                         auto_exposure: Some(false),
                     },
                 });
-                match robot.recv(&mut buffer) {
-                    Ok(n) => frames.push(Frame::decode(&buffer[..n]).expect("a frame")),
-                    Err(_) => late += 1,
-                }
-                at += 16_666_667;
-                thread::sleep(Duration::from_millis(16));
+                put += 1;
             }
-            (frames, late)
+            put as usize
         });
-        let started = Instant::now();
+        let robot_side = scope.spawn(|| {
+            let mut frames = Vec::new();
+            let mut delays = Vec::new();
+            let mut buffer = [0u8; 2048];
+            // Once the camera stops, the last frames have a second to arrive.
+            let mut deadline = None;
+            while frames.len() < expected.load(Ordering::Relaxed) {
+                if expected.load(Ordering::Relaxed) != usize::MAX {
+                    let at =
+                        *deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(1));
+                    if Instant::now() > at {
+                        break;
+                    }
+                }
+                let Ok(n) = robot.recv(&mut buffer) else {
+                    continue;
+                };
+                let arrived = since_start();
+                let frame = Frame::decode(&buffer[..n]).expect("a frame");
+                let put_at = frame.capture_nanos + ROBOT_BEHIND_NANOS;
+                delays.push(Duration::from_nanos((arrived - put_at) as u64));
+                frames.push(frame);
+            }
+            (frames, delays)
+        });
         test(&Rig {
             address,
             view: &views[0],
@@ -150,14 +221,47 @@ fn with_camera(options: Options, test: impl FnOnce(&Rig)) -> Received {
             thread::sleep(rest);
         }
         done.store(true, Ordering::Relaxed);
-        let (frames, late) = capture.join().unwrap();
+        let put = capture.join().unwrap();
+        expected.store(put, Ordering::Relaxed);
+        let (frames, delays) = robot_side.join().unwrap();
         stop.store(true, Ordering::Relaxed);
         Received {
+            put,
             frames,
-            late,
+            delays,
             dropped: latest.dropped(),
         }
     })
+}
+
+/// The view's time, moving only when the view sleeps between pictures: its pictures can be
+/// counted per second of it, however busy the machine.
+struct Paced {
+    start: Instant,
+    slept: Mutex<Duration>,
+}
+
+impl Paced {
+    fn new() -> Paced {
+        Paced {
+            start: Instant::now(),
+            slept: Mutex::new(Duration::ZERO),
+        }
+    }
+
+    fn seconds(&self) -> f64 {
+        self.slept.lock().unwrap().as_secs_f64()
+    }
+}
+
+impl Pace for Paced {
+    fn now(&self) -> Instant {
+        self.start + *self.slept.lock().unwrap()
+    }
+
+    fn sleep(&self, how_long: Duration) {
+        *self.slept.lock().unwrap() += how_long;
+    }
 }
 
 fn agent() -> ureq::Agent {
@@ -206,14 +310,19 @@ fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
-/// Nothing held detection up: every frame reached the robot in time, and none was dropped.
+/// Nothing held detection up long enough to cost a frame: every frame the camera put in its slot
+/// reached the robot, and none was dropped.
 fn assert_detection_kept_up(received: &Received) {
     assert!(
         received.frames.len() > 20,
         "{} frames",
         received.frames.len()
     );
-    assert_eq!(received.late, 0, "frames detection was held up for");
+    assert_eq!(
+        received.frames.len(),
+        received.put,
+        "frames that never arrived"
+    );
     assert_eq!(received.dropped, 0);
     assert!(received.frames.iter().all(|f| f.dropped == 0));
     assert!(received.frames.iter().all(|f| f.tags.len() == 1));
@@ -221,8 +330,10 @@ fn assert_detection_kept_up(received: &Received) {
 
 #[test]
 fn a_watcher_sees_the_tags_outlined_at_the_views_size_and_rate() {
+    let _one = one_at_a_time();
     let scene = common::scene("one-tag");
-    let received = with_camera(Options::default(), |rig| {
+    let pace = Paced::new();
+    let received = with_camera(Options::default(), &pace, |rig| {
         let agent = agent();
         let mut index = agent
             .get(format!("http://{}/", rig.address))
@@ -243,14 +354,20 @@ fn a_watcher_sees_the_tags_outlined_at_the_views_size_and_rate() {
         );
         let mut reader = BufReader::new(response.body_mut().as_reader());
         next_picture(&mut reader);
-        let started = Instant::now();
+        let (made, seconds) = (rig.view.made(), pace.seconds());
         let mut jpeg = Vec::new();
         for _ in 0..10 {
             jpeg = next_picture(&mut reader);
         }
-        let seconds = started.elapsed().as_secs_f64();
-        // Ten pictures at 10 a second, of a camera detecting about 60.
-        assert!((0.8..2.0).contains(&seconds), "{seconds} s");
+        // Ten a second of the view's time: one each 100 ms it slept. A picture may be counted
+        // before its sleep is, so one either way.
+        let (made, seconds) = (rig.view.made() - made, pace.seconds() - seconds);
+        assert!(made >= 10, "{made} pictures made for the 10 seen");
+        let per_second = made as f64 / seconds;
+        assert!(
+            (made as f64 - seconds * 10.0).abs() <= 1.0,
+            "{made} pictures in {seconds} s: {per_second:.1} a second"
+        );
         let picture = image::load_from_memory(&jpeg).unwrap().to_luma8();
         assert_eq!(picture.dimensions(), (800, 652));
         // The tag's outline runs between its corners, halved: bright on the line, whatever the
@@ -286,7 +403,8 @@ fn a_watcher_sees_the_tags_outlined_at_the_views_size_and_rate() {
 
 #[test]
 fn nobody_watching_means_no_pictures_made() {
-    let received = with_camera(Options::default(), |rig| {
+    let _one = one_at_a_time();
+    let received = with_camera(Options::default(), &RealTime, |rig| {
         thread::sleep(Duration::from_millis(600));
         assert_eq!(rig.view.made(), 0);
         // Asking for a camera Visor doesn't have, or for the list, makes none either.
@@ -317,14 +435,33 @@ fn stalled(address: SocketAddr) -> socket2::Socket {
     socket
 }
 
+/// How much worse the watched run's may be than the unwatched run's: room for a shared machine's
+/// scheduler, and well under a frame (16.7 ms at 60 fps). A detect thread held up a frame's time
+/// for each picture makes the next frame late by more than this.
+const SLACK: Duration = Duration::from_millis(4);
+
+/// That the watched run's worst is near the unwatched run's: no more than [`SLACK`] over it.
+fn assert_near(what: &str, watched: Duration, alone: Duration) {
+    assert!(
+        watched <= alone + SLACK,
+        "{what}: {watched:?} watched, {alone:?} with no one watching"
+    );
+}
+
 #[test]
 fn slow_stalled_and_vanishing_watchers_never_hold_detection_up() {
+    let _one = one_at_a_time();
     let options = Options {
         write_timeout: Duration::from_secs(1),
         most_watchers: 8,
         send_buffer: 16 * 1024,
     };
-    let received = with_camera(options, |rig| {
+    // The same camera with no one watching, for as long as the watchers take.
+    let alone = with_camera(options, &RealTime, |_| {
+        thread::sleep(Duration::from_secs(4))
+    });
+    assert_detection_kept_up(&alone);
+    let watched = with_camera(options, &RealTime, |rig| {
         let address = rig.address;
         // A watcher that reads a picture every half second, slower than they're made.
         let slow = thread::spawn(move || {
@@ -369,16 +506,27 @@ fn slow_stalled_and_vanishing_watchers_never_hold_detection_up() {
         drop(stalled);
         wait_until("every watcher's gone", || rig.view.watchers() == 0);
     });
-    assert_detection_kept_up(&received);
+    assert_detection_kept_up(&watched);
+    assert_near(
+        "the worst arrival at the robot",
+        watched.worst_delay(),
+        alone.worst_delay(),
+    );
+    assert_near(
+        "the worst detection",
+        watched.worst_detect(),
+        alone.worst_detect(),
+    );
 }
 
 #[test]
 fn watchers_past_the_most_are_turned_away() {
+    let _one = one_at_a_time();
     let options = Options {
         most_watchers: 2,
         ..Options::default()
     };
-    let received = with_camera(options, |rig| {
+    let received = with_camera(options, &RealTime, |rig| {
         let agent = agent();
         let url = format!("http://{}{STREAM}", rig.address);
         let first = agent.get(&url).call().unwrap();
