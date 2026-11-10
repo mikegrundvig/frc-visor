@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.within;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.IOException;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
@@ -13,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
@@ -84,6 +87,38 @@ class NtpResponderTest {
       assertThat(reply.remaining()).isEqualTo(48);
       assertThat(reply.getLong(24)).isEqualTo(7);
       assertThat(reply.getLong(40)).isEqualTo(NtpResponder.ntpTime(42_000_000_000L));
+      assertThat(responder.answered()).isEqualTo(1);
+    }
+  }
+
+  /**
+   * The robot's clock throws on the first request (robot code, after all): that request goes
+   * unanswered, and the responder answers the next one.
+   */
+  @Test
+  void aClockThatThrowsCostsOneAnswerNotTheResponder() throws IOException {
+    AtomicInteger read = new AtomicInteger();
+    try (NtpResponder responder =
+            NtpResponder.start(
+                0,
+                () -> {
+                  if (read.getAndIncrement() == 0) {
+                    throw new IllegalStateException("the robot's clock failed");
+                  }
+                  return 42_000_000_000L;
+                });
+        DatagramSocket client = new DatagramSocket()) {
+      client.connect(new InetSocketAddress("127.0.0.1", responder.port()));
+      // A responder whose thread died answers nothing: the test fails, rather than waits.
+      client.setSoTimeout(5000);
+      for (long transmit : new long[] {7, 8}) {
+        client.send(new DatagramPacket(request(transmit).array(), 48));
+      }
+      DatagramPacket reply = new DatagramPacket(new byte[64], 64);
+      client.receive(reply);
+      long theirs = ByteBuffer.wrap(reply.getData(), 0, reply.getLength()).getLong(24);
+      assertThat(theirs).as("the second request's answer").isEqualTo(8);
+      assertThat(responder.failures()).isEqualTo(1);
       assertThat(responder.answered()).isEqualTo(1);
     }
   }

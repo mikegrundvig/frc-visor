@@ -44,6 +44,7 @@ public final class NtpResponder implements AutoCloseable {
   private final DatagramChannel channel;
   private final Thread thread;
   private volatile long answered;
+  private volatile long failures;
 
   private NtpResponder(DatagramChannel channel, LongSupplier robotNanos) {
     this.channel = channel;
@@ -81,6 +82,11 @@ public final class NtpResponder implements AutoCloseable {
     return answered;
   }
 
+  /** Requests left unanswered because the socket failed or the robot's clock threw. */
+  public long failures() {
+    return failures;
+  }
+
   @Override
   public void close() {
     try {
@@ -93,31 +99,41 @@ public final class NtpResponder implements AutoCloseable {
   private void serve(LongSupplier robotNanos) {
     ByteBuffer request = ByteBuffer.allocateDirect(512).order(ByteOrder.BIG_ENDIAN);
     ByteBuffer reply = ByteBuffer.allocateDirect(PACKET_BYTES).order(ByteOrder.BIG_ENDIAN);
+    RepeatedErrors errors = new RepeatedErrors();
     while (channel.isOpen()) {
-      request.clear();
-      SocketAddress from;
-      long received;
       try {
-        from = channel.receive(request);
-        received = robotNanos.getAsLong();
+        if (answer(robotNanos, request, reply)) {
+          errors.succeeded();
+        }
       } catch (ClosedChannelException e) {
         return;
-      } catch (IOException e) {
-        continue;
-      }
-      request.flip();
-      if (from == null || !reply(request, received, robotNanos.getAsLong(), reply)) {
-        continue;
-      }
-      try {
-        channel.send(reply, from);
-        answered++;
-      } catch (ClosedChannelException e) {
-        return;
-      } catch (IOException e) {
-        // The next request is another chance.
+      } catch (IOException | RuntimeException e) {
+        // The socket failed, or the robot's clock threw: this request goes unanswered, and chrony
+        // asks again. Once the errors keep coming, each waits.
+        failures++;
+        errors.failed();
       }
     }
+  }
+
+  /**
+   * Answers the next request. False for one that gets no answer: it isn't a client's request.
+   *
+   * @throws IOException if the socket fails
+   * @throws RuntimeException if the robot's clock does
+   */
+  private boolean answer(LongSupplier robotNanos, ByteBuffer request, ByteBuffer reply)
+      throws IOException {
+    request.clear();
+    SocketAddress from = channel.receive(request);
+    long received = robotNanos.getAsLong();
+    request.flip();
+    if (from == null || !reply(request, received, robotNanos.getAsLong(), reply)) {
+      return false;
+    }
+    channel.send(reply, from);
+    answered++;
+    return true;
   }
 
   /**

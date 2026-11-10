@@ -207,6 +207,7 @@ public final class VisorReceiver implements AutoCloseable {
 
   private void receive(DatagramChannel channel) {
     ByteBuffer buffer = ByteBuffer.allocateDirect(VisorWire.MAX_BYTES + 1);
+    RepeatedErrors errors = new RepeatedErrors();
     while (channel.isOpen()) {
       buffer.clear();
       SocketAddress from;
@@ -215,10 +216,13 @@ public final class VisorReceiver implements AutoCloseable {
       } catch (ClosedChannelException e) {
         return;
       } catch (IOException e) {
-        // A datagram that couldn't be read is one malformed frame; the socket goes on.
+        // A datagram that couldn't be read is one malformed frame; the socket goes on, after a
+        // wait once the errors keep coming.
         malformed++;
+        errors.failed();
         continue;
       }
+      errors.succeeded();
       buffer.flip();
       // The channel gives the same address object while the sender is the same: no allocation.
       accept(buffer, from instanceof InetSocketAddress inet ? inet.getAddress() : null);
