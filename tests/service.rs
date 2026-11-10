@@ -198,6 +198,7 @@ fn each_camera_s_frames_go_out_under_its_own_index_whether_or_not_the_view_has_i
         let stop = AtomicBool::new(false);
         let robot_address = robot.local_addr().unwrap();
         let mut frames: BTreeMap<u8, Vec<Frame>> = BTreeMap::new();
+        let mut measured = None;
         thread::scope(|scope| {
             let stop = &stop;
             scope.spawn(move || {
@@ -233,6 +234,9 @@ fn each_camera_s_frames_go_out_under_its_own_index_whether_or_not_the_view_has_i
                     );
                 }
             }
+            if view.is_some() {
+                measured = Some(Measured::now());
+            }
             stop.store(true, Ordering::Relaxed);
         });
         assert_eq!(
@@ -246,5 +250,59 @@ fn each_camera_s_frames_go_out_under_its_own_index_whether_or_not_the_view_has_i
                 assert_eq!(ids, [expected[index]], "{name}: camera {index}");
             }
         }
+        if let Some(measured) = measured {
+            measured.fits_the_unit(name);
+        }
+    }
+}
+
+/// What this test's process holds while both cameras run and the view is served: the service's
+/// files and memory, and the test's own few beside them.
+struct Measured {
+    files: usize,
+    /// The most resident memory so far, in KiB.
+    peak_kib: u64,
+}
+
+impl Measured {
+    fn now() -> Measured {
+        let files = std::fs::read_dir("/proc/self/fd").unwrap().count();
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let peak = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmHWM:"))
+            .expect("the peak resident size");
+        let peak_kib = peak.trim().trim_end_matches(" kB").parse().unwrap();
+        Measured { files, peak_kib }
+    }
+
+    /// That the unit's limits (deploy/visor.service) keep their margins over what's measured: twice
+    /// the files with every connection the view allows open, and four times the memory.
+    fn fits_the_unit(&self, name: &str) {
+        let unit = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/visor.service"),
+        )
+        .unwrap();
+        let setting = |key: &str| -> u64 {
+            let line = unit.lines().find_map(|line| line.strip_prefix(key));
+            let value = line.unwrap_or_else(|| panic!("deploy/visor.service sets no {key}"));
+            match value.strip_suffix('M') {
+                Some(mib) => mib.parse::<u64>().unwrap() * 1024,
+                None => value.parse().unwrap(),
+            }
+        };
+        let options = Options::default();
+        let connections = options.most_connections + options.kept_for_controller;
+        let files = (self.files + connections) as u64;
+        assert!(
+            files * 2 <= setting("LimitNOFILE="),
+            "{name}: {} files open, and {connections} connections",
+            self.files
+        );
+        assert!(
+            self.peak_kib * 4 <= setting("MemoryMax="),
+            "{name}: {} KiB resident at most",
+            self.peak_kib
+        );
     }
 }

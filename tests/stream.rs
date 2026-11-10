@@ -6,7 +6,7 @@
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -62,6 +62,10 @@ fn camera() -> Camera {
 }
 
 const STREAM: &str = "/stream/front%20left";
+
+/// The robot controller's address, as the rig's server keeps places for it: another loopback
+/// address than the watchers', which connect from 127.0.0.1.
+const CONTROLLER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2));
 
 /// The stream tests time detection, so they run one at a time, whatever the test runner's threads.
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -151,7 +155,7 @@ fn with_camera(options: Options, pace: &(impl Pace + Sync), test: impl FnOnce(&R
     thread::scope(|scope| {
         let (camera, latest, feed, stop, views) = (&camera, &latest, &feed, &stop, &views);
         let served = Arc::clone(views);
-        scope.spawn(move || server::run(listener, served, options, stop));
+        scope.spawn(move || server::run(listener, served, options, CONTROLLER, stop));
         scope.spawn(move || view::run(camera, feed, latest, &views[0], pace, stop));
         scope.spawn(|| {
             let mut detector = Detector::new(camera.min_tag_px).unwrap();
@@ -213,10 +217,19 @@ fn with_camera(options: Options, pace: &(impl Pace + Sync), test: impl FnOnce(&R
             }
             (frames, delays)
         });
-        test(&Rig {
-            address,
-            view: &views[0],
-        });
+        // A test that fails stops the rig, so it's reported rather than waited on for good.
+        let tested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            test(&Rig {
+                address,
+                view: &views[0],
+            })
+        }));
+        if let Err(failed) = tested {
+            done.store(true, Ordering::Relaxed);
+            expected.store(0, Ordering::Relaxed);
+            stop.store(true, Ordering::Relaxed);
+            std::panic::resume_unwind(failed);
+        }
         // At least a second of frames, for what the robot received to say anything.
         if let Some(rest) = Duration::from_secs(1).checked_sub(started.elapsed()) {
             thread::sleep(rest);
@@ -454,8 +467,8 @@ fn slow_stalled_and_vanishing_watchers_never_hold_detection_up() {
     let _one = one_at_a_time();
     let options = Options {
         write_timeout: Duration::from_secs(1),
-        most_watchers: 8,
         send_buffer: 16 * 1024,
+        ..Options::default()
     };
     // The same camera with no one watching, for as long as the watchers take.
     let alone = with_camera(options, &RealTime, |_| {
@@ -520,11 +533,74 @@ fn slow_stalled_and_vanishing_watchers_never_hold_detection_up() {
     );
 }
 
+/// A connection to `address` from `from`, one of the loopback addresses.
+fn connect_from(from: IpAddr, address: SocketAddr) -> TcpStream {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    socket.bind(&SocketAddr::new(from, 0).into()).unwrap();
+    socket.connect(&address.into()).unwrap();
+    let stream: TcpStream = socket.into();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+}
+
+/// A request for `path` addressed to `host`, from `from`, on a connection of its own: the
+/// answer's status, and its body up to the first picture's part.
+fn get_from(from: IpAddr, address: SocketAddr, path: &str, host: &str) -> (u16, String) {
+    let mut connection = connect_from(from, address);
+    write!(
+        connection,
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    answer(&mut connection)
+}
+
+/// An answer's status, and its body when it says its length: a stream's never ends, so it's left
+/// unread.
+fn answer(connection: &mut TcpStream) -> (u16, String) {
+    let mut reader = BufReader::new(connection);
+    let mut status = String::new();
+    reader.read_line(&mut status).unwrap();
+    let code = status
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_else(|| panic!("no status: {status:?}"))
+        .parse()
+        .unwrap();
+    let mut length = None;
+    let mut line = String::new();
+    while reader.read_line(&mut line).unwrap() > 2 {
+        if let Some((name, value)) = line.trim_end().split_once(": ")
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = Some(value.parse::<usize>().unwrap());
+        }
+        line.clear();
+    }
+    let mut body = vec![0; length.unwrap_or(0)];
+    reader.read_exact(&mut body).unwrap();
+    (code, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// Whether the server closed `connection` within `within`, without answering.
+fn closed_within(connection: &mut TcpStream, within: Duration) -> bool {
+    connection.set_read_timeout(Some(within)).unwrap();
+    let mut byte = [0u8; 1];
+    match connection.read(&mut byte) {
+        Ok(0) => true,
+        Err(error) => error.kind() == std::io::ErrorKind::ConnectionReset,
+        Ok(_) => false,
+    }
+}
+
 #[test]
-fn watchers_past_the_most_are_turned_away() {
+fn watchers_past_the_most_are_turned_away_but_the_controller_has_its_own() {
     let _one = one_at_a_time();
     let options = Options {
         most_watchers: 2,
+        kept_for_controller: 1,
         ..Options::default()
     };
     let received = with_camera(options, &RealTime, |rig| {
@@ -542,12 +618,103 @@ fn watchers_past_the_most_are_turned_away() {
             third.into_body().read_to_string().unwrap(),
             "2 watchers already, the most Visor serves: close another view\n"
         );
+        // The controller's address still has a seat, and only the one kept for it.
+        let host = rig.address.to_string();
+        let mut kept = connect_from(CONTROLLER, rig.address);
+        write!(kept, "GET {STREAM} HTTP/1.1\r\nHost: {host}\r\n\r\n").unwrap();
+        assert_eq!(answer(&mut kept).0, 200, "the controller's seat");
+        let (status, _) = get_from(CONTROLLER, rig.address, STREAM, &host);
+        assert_eq!(status, 503, "the controller past its kept seat");
         // One leaves, and there's room again.
         drop(first);
         wait_until("a seat's free", || {
             agent.get(&url).call().unwrap().status() == 200
         });
         drop(second);
+        drop(kept);
+    });
+    assert_detection_kept_up(&received);
+}
+
+#[test]
+fn idle_connections_are_closed_and_those_past_the_most_turned_away_but_the_controller_s() {
+    let _one = one_at_a_time();
+    let options = Options {
+        header_timeout: Duration::from_millis(300),
+        most_connections: 2,
+        kept_for_controller: 1,
+        ..Options::default()
+    };
+    let received = with_camera(options, &RealTime, |rig| {
+        let address = rig.address;
+        let host = address.to_string();
+        let anyone = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        // (what the connection sends before it waits)
+        let idle = [
+            ("nothing", String::new()),
+            (
+                "half a request's headers",
+                format!("GET / HTTP/1.1\r\nHost: {host}\r\n"),
+            ),
+            (
+                "a request, then nothing more",
+                format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n"),
+            ),
+        ];
+        for (sent, bytes) in idle {
+            let mut connection = connect_from(anyone, address);
+            connection.write_all(bytes.as_bytes()).unwrap();
+            if !bytes.ends_with("\r\n\r\n") {
+                let started = Instant::now();
+                assert!(
+                    closed_within(&mut connection, Duration::from_secs(3)),
+                    "{sent}"
+                );
+                assert!(started.elapsed() >= Duration::from_millis(250), "{sent}");
+                continue;
+            }
+            assert_eq!(answer(&mut connection).0, 200, "{sent}");
+            assert!(
+                closed_within(&mut connection, Duration::from_secs(3)),
+                "{sent}"
+            );
+        }
+        // Two connections that send nothing yet are as many as anyone may have: a third is closed
+        // as it's accepted, while the controller is still answered.
+        let held: Vec<TcpStream> = (0..2).map(|_| connect_from(anyone, address)).collect();
+        thread::sleep(Duration::from_millis(50));
+        let mut turned_away = connect_from(anyone, address);
+        assert!(closed_within(&mut turned_away, Duration::from_millis(200)));
+        assert_eq!(get_from(CONTROLLER, address, "/", &host).0, 200);
+        // Once they're closed for sending nothing, there's room again.
+        drop(held);
+        wait_until("a connection's place is free", || {
+            get_from(anyone, address, "/", &host).0 == 200
+        });
+    });
+    assert_detection_kept_up(&received);
+}
+
+#[test]
+fn a_request_not_addressed_to_the_board_is_refused() {
+    let _one = one_at_a_time();
+    let received = with_camera(Options::default(), &RealTime, |rig| {
+        let anyone = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        let port = rig.address.port();
+        // (the request's Host, its status)
+        let rows = [
+            (format!("10.12.34.11:{port}"), 200),
+            ("localhost".to_string(), 200),
+            (format!("[::1]:{port}"), 200),
+            // A web page's own name pointed at the board.
+            (format!("visor.example.com:{port}"), 421),
+        ];
+        for (host, status) in rows {
+            for path in ["/", STREAM] {
+                let (got, body) = get_from(anyone, rig.address, path, &host);
+                assert_eq!(got, status, "{host} {path}: {body}");
+            }
+        }
     });
     assert_detection_kept_up(&received);
 }

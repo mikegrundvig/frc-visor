@@ -70,7 +70,7 @@ pub fn run<S: Source + Send>(
     thread::scope(|scope| {
         if let Some(listener) = listener {
             let views = Arc::clone(&views);
-            scope.spawn(move || server::run(listener, views, options, stop));
+            scope.spawn(move || server::run(listener, views, options, robot.ip(), stop));
         }
         for ((wired, feed), shown) in cameras.iter_mut().zip(&feeds).zip(views.iter()) {
             let Wired {

@@ -25,6 +25,14 @@ RuntimeDirectory=visor
 # Which cores are the fast ones is the board's: its image pins Visor to them with a drop-in
 # (CPUAffinity=).
 Nice=-5
+# Bounds on what a fault or a flood can take from the board. tests/service.rs measures both cameras
+# running with the view served: 12 files open (with the test's own) and 34 MB resident at most in a
+# debug build (26 MB in a release). The live view takes at most 34 connections at once (32, and 2
+# kept for the controller: src/stream/server.rs), so 46 files at most, and 128 is over twice that,
+# with room for each camera's device. 256 MB is over seven times the memory: room for each camera's
+# frame buffers and every connection's send buffer. tests/service.rs checks these margins.
+LimitNOFILE=128
+MemoryMax=256M
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

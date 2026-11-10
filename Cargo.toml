@@ -15,6 +15,10 @@ embedded-graphics = "0.8"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 fast_image_resize = "6"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# The live view's connections are served by hyper directly, for its header read timeout, which
+# axum::serve doesn't set.
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 jpeg-encoder = "0.7"
 libc = "0.2"
 log = "0.4"

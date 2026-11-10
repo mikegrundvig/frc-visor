@@ -1,28 +1,36 @@
-//! The live views over HTTP, on axum: `/` lists the cameras, each with its view, and
+//! The live views over HTTP, on hyper and axum: `/` lists the cameras, each with its view, and
 //! `/stream/<camera>` is one camera's view as an MJPEG stream (`multipart/x-mixed-replace`), which
 //! a browser's `<img>` shows as it comes. It runs on a thread of its own, on a single-threaded
 //! tokio runtime, at a lower priority than detection.
 //!
 //! A watcher is sent the newest picture whenever its connection is ready for one, so a slow
 //! connection skips pictures rather than queueing them, and a stalled one is closed once a write
-//! has waited [`Options::write_timeout`]. Watchers are capped ([`Options::most_watchers`]), since
-//! each costs the board's network.
+//! has waited [`Options::write_timeout`]. A connection that sends no request within
+//! [`Options::header_timeout`] is closed too, so idle sockets can't use up Visor's files.
+//! Connections and watchers are capped ([`Options::most_connections`],
+//! [`Options::most_watchers`]), since each costs the board's network and files, with a few kept for
+//! the robot controller's address ([`Options::kept_for_controller`]), so a laptop's open pages
+//! can't shut the robot out. A request must be addressed to the board, by an IP address or its own
+//! name ([`addressed_here`]), so a web page whose name is pointed at the board (DNS rebinding) can't
+//! read its pictures.
 
 use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::io;
-use std::net::SocketAddr;
-use std::pin::Pin;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::extract::{ConnectInfo, Path, Request, State};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
+use axum::{Extension, Router};
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::service::TowerToHyperService;
 use log::{info, warn};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use socket2::SockRef;
@@ -41,14 +49,25 @@ const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'.')
     .remove(b'~');
 
-/// What a watcher may cost.
+/// What the live view's watchers may cost.
 #[derive(Debug, Clone, Copy)]
 pub struct Options {
     /// How long a write to a watcher may wait before its connection is closed: it's stopped
     /// reading.
     pub write_timeout: Duration,
-    /// The most watchers at once, across every camera; more are turned away.
+    /// How long a connection may take to send a request's headers, the first or the next, before
+    /// it's closed.
+    pub header_timeout: Duration,
+    /// The most connections at once from addresses other than the controller's; more are closed as
+    /// they're accepted. Each holds a file, and Visor's are limited (`LimitNOFILE=`,
+    /// deploy/visor.service).
+    pub most_connections: usize,
+    /// The most watchers at once, across every camera, from addresses other than the
+    /// controller's; more are turned away.
     pub most_watchers: usize,
+    /// How many more connections, and watchers, the robot controller's address may have past the
+    /// most: room for a page and its stream whoever else watches.
+    pub kept_for_controller: usize,
     /// The socket's send buffer for each watcher, in bytes: a few pictures, so a stalled watcher
     /// fills it, and is found, in seconds.
     pub send_buffer: usize,
@@ -58,18 +77,23 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             write_timeout: Duration::from_secs(5),
+            header_timeout: Duration::from_secs(5),
+            most_connections: 32,
             most_watchers: 8,
+            kept_for_controller: 2,
             send_buffer: 256 * 1024,
         }
     }
 }
 
-/// Serves the views on `listener` until `stop` is set, on this thread. Returns at once, saying why,
-/// if the runtime can't start.
+/// Serves the views on `listener` until `stop` is set, on this thread, keeping places for
+/// `controller`, the robot controller's address. Returns at once, saying why, if the runtime
+/// can't start.
 pub fn run(
     listener: std::net::TcpListener,
     views: Arc<Vec<View>>,
     options: Options,
+    controller: IpAddr,
     stop: &AtomicBool,
 ) {
     super::lower_priority("the live view's server");
@@ -85,7 +109,7 @@ pub fn run(
         }
     };
     runtime.block_on(async {
-        let served = serve(listener, views, options);
+        let served = serve(listener, views, options, controller);
         let stopped = async {
             while !stop.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -105,33 +129,132 @@ async fn serve(
     listener: std::net::TcpListener,
     views: Arc<Vec<View>>,
     options: Options,
+    controller: IpAddr,
 ) -> io::Result<()> {
     listener.set_nonblocking(true)?;
-    let listener = Watchers {
-        listener: TcpListener::from_std(listener)?,
-        options,
-    };
+    let listener = TcpListener::from_std(listener)?;
     info!(
         "live view on http://{}/ (/stream/<camera>)",
-        listener.listener.local_addr()?
+        listener.local_addr()?
     );
     let shared = Arc::new(Shared {
         views,
-        watching: AtomicUsize::new(0),
-        most: options.most_watchers,
+        watchers: Places::new(
+            options.most_watchers,
+            options.kept_for_controller,
+            controller,
+        ),
     });
+    let names = Arc::new(own_names());
     let app = Router::new()
         .route("/", get(index))
         .route("/stream/{camera}", get(stream))
-        .with_state(shared);
-    axum::serve(listener, app).await
+        .with_state(shared)
+        .layer(middleware::from_fn_with_state(names, only_addressed_here));
+    let connections = Places::new(
+        options.most_connections,
+        options.kept_for_controller,
+        controller,
+    );
+    let mut http = hyper::server::conn::http1::Builder::new();
+    http.timer(TokioTimer::new())
+        .header_read_timeout(options.header_timeout);
+    loop {
+        let (connection, address) = accept(&listener).await;
+        // Past the most: closed at once, said nowhere, as a flood of them would flood the log.
+        let Some(place) = connections.take(address.ip()) else {
+            continue;
+        };
+        let io = TokioIo::new(Box::pin(watched(connection, &options)));
+        let service = TowerToHyperService::new(app.clone().layer(Extension(ConnectInfo(address))));
+        let served = http.serve_connection(io, service);
+        tokio::spawn(async move {
+            // A connection that ends badly (timed out, reset) is the watcher's business.
+            let _ = served.await;
+            drop(place);
+        });
+    }
+}
+
+/// The next connection. An error (out of files, say) is said and waited out, rather than spun on.
+async fn accept(listener: &TcpListener) -> (TcpStream, SocketAddr) {
+    loop {
+        match listener.accept().await {
+            Ok(accepted) => return accepted,
+            Err(error) => {
+                warn!("the live view can't accept a watcher: {error}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+/// A connection with a small send buffer and a write timeout.
+fn watched(connection: TcpStream, options: &Options) -> TimeoutStream<TcpStream> {
+    let _ = connection.set_nodelay(true);
+    let _ = SockRef::from(&connection).set_send_buffer_size(options.send_buffer);
+    let mut timed = TimeoutStream::new(connection);
+    timed.set_write_timeout(Some(options.write_timeout));
+    timed
+}
+
+/// The board's own names, which a request may be addressed to besides an IP address: `localhost`,
+/// its host name, and that name on the local network (`.local`).
+fn own_names() -> Vec<String> {
+    let mut names = vec!["localhost".to_string()];
+    match std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        Ok(name) if !name.trim().is_empty() => {
+            let name = name.trim().to_ascii_lowercase();
+            names.push(format!("{name}.local"));
+            names.push(name);
+        }
+        Ok(_) => {}
+        Err(error) => warn!("the live view answers by address only: no host name ({error})"),
+    }
+    names
+}
+
+/// Whether a request's `Host` names this board: an IP address, or one of its own `names`. A
+/// request with none (HTTP/1.0) is answered: a page whose name points at the board always sends
+/// one.
+pub fn addressed_here(host: Option<&HeaderValue>, names: &[String]) -> bool {
+    let Some(host) = host else {
+        return true;
+    };
+    let Ok(host) = host.to_str() else {
+        return false;
+    };
+    let host = host.trim().to_ascii_lowercase();
+    // An IPv6 address is in brackets, with the port after them.
+    if let Some(rest) = host.strip_prefix('[') {
+        let Some((address, _port)) = rest.split_once(']') else {
+            return false;
+        };
+        return address.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    let name = host
+        .split_once(':')
+        .map_or(host.as_str(), |(name, _port)| name);
+    name.parse::<std::net::Ipv4Addr>().is_ok() || names.iter().any(|own| own == name)
+}
+
+/// Answers only requests addressed to this board ([`addressed_here`]); others are told so.
+async fn only_addressed_here(
+    State(names): State<Arc<Vec<String>>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !addressed_here(request.headers().get(header::HOST), &names) {
+        let why = "Visor answers requests addressed to its board, by address or name\n";
+        return (StatusCode::MISDIRECTED_REQUEST, why).into_response();
+    }
+    next.run(request).await
 }
 
 /// What every request reads.
 struct Shared {
     views: Arc<Vec<View>>,
-    watching: AtomicUsize,
-    most: usize,
+    watchers: Arc<Places>,
 }
 
 /// The page at `/`: each camera's view, by name.
@@ -176,16 +299,20 @@ fn escaped(text: &str) -> String {
 }
 
 /// A camera's stream: each new picture as a part, for as long as the watcher stays.
-async fn stream(State(shared): State<Arc<Shared>>, Path(camera): Path<String>) -> Response {
+async fn stream(
+    State(shared): State<Arc<Shared>>,
+    ConnectInfo(from): ConnectInfo<SocketAddr>,
+    Path(camera): Path<String>,
+) -> Response {
     let Some(view) = shared.views.iter().find(|view| view.name == camera) else {
         let names: Vec<&str> = shared.views.iter().map(|v| v.name.as_str()).collect();
         let why = format!("no camera {camera:?}: Visor has {}\n", names.join(", "));
         return (StatusCode::NOT_FOUND, why).into_response();
     };
-    let Some(seat) = Seat::take(&shared) else {
+    let Some(seat) = shared.watchers.take(from.ip()) else {
         let why = format!(
             "{} watchers already, the most Visor serves: close another view\n",
-            shared.most
+            shared.watchers.most
         );
         return (StatusCode::SERVICE_UNAVAILABLE, why).into_response();
     };
@@ -223,58 +350,47 @@ fn part(jpeg: &Bytes) -> Bytes {
     Bytes::from(bytes)
 }
 
-/// A watcher's place among the most allowed, given back when its stream ends.
-struct Seat(Arc<Shared>);
+/// Places for connections or watchers: at most `most` taken by anyone, and `kept` more that only
+/// the controller's address may take.
+struct Places {
+    taken: AtomicUsize,
+    most: usize,
+    kept: usize,
+    controller: IpAddr,
+}
 
-impl Seat {
-    fn take(shared: &Arc<Shared>) -> Option<Seat> {
-        let taken = shared
-            .watching
+impl Places {
+    fn new(most: usize, kept: usize, controller: IpAddr) -> Arc<Places> {
+        Arc::new(Places {
+            taken: AtomicUsize::new(0),
+            most,
+            kept,
+            controller: controller.to_canonical(),
+        })
+    }
+
+    /// A place for a connection or watcher from `from`, or none if they're all taken.
+    fn take(self: &Arc<Places>, from: IpAddr) -> Option<Place> {
+        let most = if from.to_canonical() == self.controller {
+            self.most + self.kept
+        } else {
+            self.most
+        };
+        let taken = self
+            .taken
             .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < shared.most).then_some(n + 1)
+                (n < most).then_some(n + 1)
             });
-        taken.ok().map(|_| Seat(Arc::clone(shared)))
+        taken.ok().map(|_| Place(Arc::clone(self)))
     }
 }
 
-impl Drop for Seat {
+/// A place taken, given back when its connection or stream ends.
+struct Place(Arc<Places>);
+
+impl Drop for Place {
     fn drop(&mut self) {
-        self.0.watching.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-/// The listener: each connection with a small send buffer, and a write timeout.
-struct Watchers {
-    listener: TcpListener,
-    options: Options,
-}
-
-impl axum::serve::Listener for Watchers {
-    type Io = Pin<Box<TimeoutStream<TcpStream>>>;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, SocketAddr) {
-        loop {
-            match self.listener.accept().await {
-                Ok((connection, address)) => {
-                    let _ = connection.set_nodelay(true);
-                    let _ =
-                        SockRef::from(&connection).set_send_buffer_size(self.options.send_buffer);
-                    let mut timed = TimeoutStream::new(connection);
-                    timed.set_write_timeout(Some(self.options.write_timeout));
-                    return (Box::pin(timed), address);
-                }
-                // Out of file descriptors, say: wait, rather than spin.
-                Err(error) => {
-                    warn!("the live view can't accept a watcher: {error}");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-        }
-    }
-
-    fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.listener.local_addr()
+        self.0.taken.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -300,6 +416,30 @@ mod tests {
             escaped("<b>\"Tom's\" & co</b>"),
             "&lt;b&gt;&quot;Tom&#39;s&quot; &amp; co&lt;/b&gt;"
         );
+    }
+
+    #[test]
+    fn a_request_is_addressed_here_by_an_ip_address_or_the_board_s_own_name() {
+        let names = ["localhost".to_string(), "visor-front.local".to_string()];
+        // (the request's Host, whether it's answered)
+        let rows = [
+            (None, true),
+            (Some("10.12.34.11"), true),
+            (Some("10.12.34.11:5809"), true),
+            (Some("[fe80::1]:5809"), true),
+            (Some("[::1]"), true),
+            (Some("LOCALHOST:5809"), true),
+            (Some("visor-front.local"), true),
+            (Some("visor.example.com"), false),
+            (Some("10.12.34.11.example.com"), false),
+            (Some("[visor]:5809"), false),
+            (Some("[::1"), false),
+            (Some(""), false),
+        ];
+        for (host, answered) in rows {
+            let value = host.map(|h| HeaderValue::from_str(h).unwrap());
+            assert_eq!(addressed_here(value.as_ref(), &names), answered, "{host:?}");
+        }
     }
 
     #[test]

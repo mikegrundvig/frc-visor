@@ -55,20 +55,29 @@ Detection comes first, and the view never holds it up or makes it drop a frame:
   on a busy board the view slows, not detection. On a laptop core a picture takes about 2.2 ms at
   the defaults: about 2% of one core.
 - **Many watching:** one picture is made for all of them. At most 8 watch at once, across every
-  camera; more are answered 503.
+  camera; more are answered 503. The robot controller's address has 2 more of its own, so a
+  laptop's open pages can't shut it out.
+- **Many connecting:** at most 32 connections at once (and the controller's 2 more); more are
+  closed as they're accepted. A connection that sends no request's headers within 5 s, the first
+  or the next, is closed.
+- **Addressed elsewhere:** a request whose `Host` is neither an IP address nor the board's own name
+  (`localhost`, its host name, or that `.local`) is answered 421, so a web page whose name is
+  pointed at the board can't read its pictures.
 - **A slow watcher:** each gets the newest picture whenever its connection is ready for another,
   so a slow one skips pictures rather than queueing them.
 - **A watcher that stops reading:** its socket's send buffer is kept small (256 KB), and once a
   write to it has waited 5 s its connection is closed.
 - **The port taken:** Visor says so in its log, and detects without the view.
 
-The server is axum on a single-threaded tokio runtime, on a thread of its own; the picture is
+The server is axum, its connections served by hyper (for the header timeout), on a
+single-threaded tokio runtime, on a thread of its own; the picture is
 fast_image_resize's averaging, embedded-graphics' drawing and jpeg-encoder's JPEG.
 
 `tests/stream.rs` runs a camera end to end, frames in at the camera's 60 fps whatever detection is
 doing and datagrams out on loopback, with the view fetched over HTTP: the outline lands on the tag
 at the view's size, and at its rate, counted per second of a test clock the view is paced by; no
-picture is made with no one watching; and watchers past the most are turned away. It measures the
+picture is made with no one watching; watchers and connections past the most are turned away, but
+the controller's; idle connections are closed; and a request addressed elsewhere is refused. It measures the
 claim above: the same camera runs with no one watching, then with a slow watcher, a stalled one and
 ones that vanish mid-picture, and every frame reaches the robot with none dropped, while the worst
 time from slot to robot and the worst detection (each bar the worst 1%, for a busy machine's
