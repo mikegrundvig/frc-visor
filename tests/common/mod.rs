@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use nalgebra::{Rotation3, Vector3};
 use visor::image::GrayImage;
 
 /// A rendered frame and the tags in it.
@@ -14,12 +15,18 @@ pub struct Scene {
     pub tags: Vec<KnownTag>,
 }
 
-/// A tag's true corners, in NAPA's convention (see tools/render_frames.py).
+/// A tag's true corners, in NAPA's convention, and its true pose (see tools/render_frames.py).
 pub struct KnownTag {
     pub id: i32,
     pub corners: [f64; 8],
-    /// How far in front of the camera the tag's centre is: its z in the camera's frame.
-    pub distance_m: f64,
+    pub pose: TruePose,
+}
+
+/// Where the renderer put a tag: its rotation and centre in the camera's frame, in the tag frame
+/// Visor solves for (src/pose.rs).
+pub struct TruePose {
+    pub rotation: Rotation3<f64>,
+    pub translation_m: Vector3<f64>,
 }
 
 /// The renderer's lens (tools/render_frames.py): no distortion, an 80 degree diagonal, centred.
@@ -63,11 +70,24 @@ pub fn scene(name: &'static str) -> Scene {
             KnownTag {
                 id: tag["id"].as_i64().unwrap() as i32,
                 corners: points.try_into().unwrap(),
-                distance_m: tag["distance_m"].as_f64().unwrap(),
+                pose: TruePose {
+                    rotation: Rotation3::new(vector(&tag["pose"]["rvec"])),
+                    translation_m: vector(&tag["pose"]["tvec"]),
+                },
             }
         })
         .collect();
     Scene { name, image, tags }
+}
+
+fn vector(value: &serde_json::Value) -> Vector3<f64> {
+    let numbers: Vec<f64> = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    Vector3::from_column_slice(&numbers)
 }
 
 /// The worst corner's distance between two sets of corners, in pixels, in the order given.

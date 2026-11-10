@@ -115,6 +115,98 @@ const AT_1_MS: InEffect = InEffect {
     auto_exposure: Some(false),
 };
 
+/// How near each rendered tag's solve comes to the renderer's true pose, as measured with about
+/// twice the margin: each axis of the best pose's position, in metres, and the angle from the
+/// true rotation to the best pose's, in degrees.
+struct PoseBound {
+    scene: &'static str,
+    id: i32,
+    position_m: f64,
+    rotation_deg: f64,
+}
+
+const POSE_BOUNDS: [PoseBound; 4] = [
+    // 2 m at 30 degrees: measured 0.01 mm and 0.008 degrees.
+    PoseBound {
+        scene: "one-tag",
+        id: 7,
+        position_m: 0.001,
+        rotation_deg: 0.05,
+    },
+    // 3 m face on: measured 0.1 mm and 0.012 degrees.
+    PoseBound {
+        scene: "two-tags",
+        id: 3,
+        position_m: 0.001,
+        rotation_deg: 0.05,
+    },
+    // 8 m at 20 degrees, about 25 px across: measured 19 mm in z and 2.3 degrees, with the other
+    // pose 17 degrees off. Far tags fix their position better than their rotation.
+    PoseBound {
+        scene: "two-tags",
+        id: 12,
+        position_m: 0.04,
+        rotation_deg: 5.0,
+    },
+    // 6 m at 55 degrees, the steep one, where the two poses are nearly the same distance away:
+    // measured 2 mm in z and 0.04 degrees, with the other pose 110 degrees off.
+    PoseBound {
+        scene: "steep-far",
+        id: 21,
+        position_m: 0.005,
+        rotation_deg: 0.1,
+    },
+];
+
+/// A pose as the robot decodes it, as a rotation and a position.
+fn pose_of(pose: visor::wire::Pose) -> (nalgebra::Rotation3<f64>, nalgebra::Vector3<f64>) {
+    let rvec = nalgebra::Vector3::from(pose.rvec.map(f64::from));
+    let tvec = nalgebra::Vector3::from(pose.tvec.map(f64::from));
+    (nalgebra::Rotation3::new(rvec), tvec)
+}
+
+/// The whole transform against the renderer's: the true pose is one of the two, and the best is
+/// it, within the tag's bounds. Checking both tells a wrong choice from a wrong solve.
+fn assert_pose_is_true(
+    scene: &str,
+    known: &common::KnownTag,
+    poses: [(nalgebra::Rotation3<f64>, nalgebra::Vector3<f64>); 2],
+) {
+    let bound = POSE_BOUNDS
+        .iter()
+        .find(|b| b.scene == scene && b.id == known.id)
+        .expect("a bound for every rendered tag");
+    let degrees_off = |rotation: &nalgebra::Rotation3<f64>| {
+        (rotation.inverse() * known.pose.rotation)
+            .angle()
+            .to_degrees()
+    };
+    let nearer = poses
+        .iter()
+        .map(|(r, _)| degrees_off(r))
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        nearer < bound.rotation_deg,
+        "{scene} tag {}: neither pose is the true one, the nearer {nearer:.3} degrees off",
+        known.id
+    );
+    let (rotation, position) = &poses[0];
+    let best = degrees_off(rotation);
+    assert!(
+        best < bound.rotation_deg,
+        "{scene} tag {}: the best pose is {best:.3} degrees from the true rotation",
+        known.id
+    );
+    let off = position - known.pose.translation_m;
+    for (axis, error) in ["x", "y", "z"].iter().zip(off.iter()) {
+        assert!(
+            error.abs() < bound.position_m,
+            "{scene} tag {}: the best pose's {axis} is {error:.4} m from the true position",
+            known.id
+        );
+    }
+}
+
 #[test]
 fn each_frame_reaches_the_robot_with_its_tags_and_robot_time() {
     let scenes: Vec<common::Scene> = common::SCENES.iter().map(|n| common::scene(n)).collect();
@@ -169,22 +261,13 @@ fn each_frame_reaches_the_robot_with_its_tags_and_robot_time() {
                 scene.name
             );
             assert!(tag.decision_margin > 0.0);
-            // Solved: the best pose puts the tag where the renderer did, to half a percent.
             let [best, alt] = tag.poses.expect("poses, with a lens");
-            let z = f64::from(best.tvec[2]);
-            assert!(
-                (z - known.distance_m).abs() < 0.005 * known.distance_m,
-                "{} tag {}: {z} m, rendered at {} m",
-                scene.name,
-                known.id,
-                known.distance_m
-            );
+            assert_pose_is_true(scene.name, known, [best, alt].map(pose_of));
             assert!(best.error_px <= alt.error_px);
             // NAPA's corner order and the solve's tag frame agree: a printed tag seen from the
             // front has its z axis (out of its face) pointing back toward the camera.
-            let rvec = nalgebra::Vector3::from(best.rvec.map(f64::from));
-            let tvec = nalgebra::Vector3::from(best.tvec.map(f64::from));
-            let face = nalgebra::Rotation3::new(rvec) * nalgebra::Vector3::z();
+            let (rotation, tvec) = pose_of(best);
+            let face = rotation * nalgebra::Vector3::z();
             assert!(
                 face.dot(&tvec) < 0.0,
                 "{} tag {}: facing away",

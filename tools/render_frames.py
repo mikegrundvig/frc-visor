@@ -10,7 +10,9 @@ Run from the repository root:
 
 Each scene writes testdata/<name>.png and testdata/<name>.json. The JSON's corners are in NAPA's
 convention, the one Visor sends: OpenCV's corner order (the printed tag's top-left, top-right,
-bottom-right, bottom-left) and pixel-centre coordinates (pixel (0, 0)'s centre is at 0, 0).
+bottom-right, bottom-left) and pixel-centre coordinates (pixel (0, 0)'s centre is at 0, 0). Its pose
+is the true one, as Visor solves it: OpenCV's rvec and tvec of the tag in the camera's frame, the
+tag's own frame with x right and y up as printed and z out of its face (src/pose.rs).
 """
 
 import json
@@ -58,7 +60,8 @@ def background(rng):
 
 
 def project_tag(distance, yaw_deg, where):
-    """The tag's black-square corners and its outer (quiet zone) corners, in edge coordinates."""
+    """The tag's black-square corners and its outer (quiet zone) corners, in edge coordinates, and
+    its true pose."""
     half = TAG_M / 2
     margin = half * 10 / 8
     u, v = where
@@ -75,14 +78,18 @@ def project_tag(distance, yaw_deg, where):
 
     square = np.array([[-half, -half, 0], [half, -half, 0], [half, half, 0], [-half, half, 0]])
     outer = np.array([[-margin, -margin, 0], [margin, -margin, 0], [margin, margin, 0], [-margin, margin, 0]])
-    return project(square), project(outer)
+    # The tag is drawn in a frame with y down as printed, so its z points away from a camera that
+    # sees it. Visor's tag frame has y up and z out of the face: the same turned half a turn about x.
+    rvec, _ = cv2.Rodrigues(R @ np.diag([1.0, -1.0, -1.0]))
+    pose = {"rvec": rvec.ravel().round(6).tolist(), "tvec": t.round(6).tolist()}
+    return project(square), project(outer), pose
 
 
 def render(rng, tags):
     frame = cv2.resize(background(rng), (W * SS, H * SS), interpolation=cv2.INTER_LINEAR)
     truth = []
     for tag_id, distance, yaw, where in tags:
-        corners, outer = project_tag(distance, yaw, where)
+        corners, outer, pose = project_tag(distance, yaw, where)
         img = tag_image(tag_id).astype(np.float32)
         size = img.shape[0]
         # warpPerspective works in pixel indices: shift by a half at both ends so the tag's edges land
@@ -95,7 +102,9 @@ def render(rng, tags):
         shaded = black + (big / 255.0) * (white - black)
         frame = frame * (1 - mask) + shaded * mask
         # Edge coordinates (pixel (0, 0) spans 0 to 1) to pixel-centre coordinates.
-        truth.append({"id": tag_id, "distance_m": distance, "corners": (corners - 0.5).round(4).tolist()})
+        truth.append(
+            {"id": tag_id, "distance_m": distance, "corners": (corners - 0.5).round(4).tolist(), "pose": pose}
+        )
     frame = cv2.resize(frame, (W, H), interpolation=cv2.INTER_AREA)
     frame = frame + rng.normal(0, 1.5, frame.shape)
     return np.clip(frame, 0, 255).astype(np.uint8), truth
