@@ -3,6 +3,8 @@ name = "visor"
 # The version is a date, and the version ID every frame carries is made from it: 2026.11.2 is 20261102.
 version = "2026.11.9"
 edition = "2024"
+# The compiler it's built and tested with (rust-toolchain.toml); older ones aren't tried.
+rust-version = "1.99"
 license = "GPL-3.0-only"
 description = "AprilTag vision for an FRC robot's coprocessor: USB cameras, NAPA, raw corners to the robot over UDP"
 repository = "https://github.com/mikegrundvig/frc-visor"

@@ -1,0 +1,6 @@
+# The compiler every build uses, here, in CI and for a release, so a tag always builds with the
+# same one; rustup installs it on first use. Raise it on purpose, with Cargo.toml's rust-version.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

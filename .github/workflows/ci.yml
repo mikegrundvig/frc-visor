@@ -1,6 +1,6 @@
 name: CI
 
-# The coprocessor program's formatting, lints and tests, on x86-64 and on arm64 (the coprocessor's
+# The coprocessor program's crates (cargo deny), formatting, lints and tests, on x86-64 and on arm64 (the coprocessor's
 # architecture, where NAPA takes its NEON path), with the lens calibration tool's tests against the
 # built program; and the robot client's Gradle ci. On every branch's pushes and pull requests.
 on:
@@ -31,10 +31,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Rust's formatter and linter, and libclang for the V4L2 bindings
+      # rust-toolchain.toml's compiler, with its formatter and linter.
+      - name: Rust, and libclang for the V4L2 bindings
         run: |
-          rustup component add rustfmt clippy
+          rustup toolchain install --no-self-update
           sudo apt-get install -y libclang-dev
+      - name: cargo-deny, at a fixed version, built from crates.io with its own lock file
+        run: cargo install --locked cargo-deny@0.20.2
+      - name: Licences, advisories, sources (deny.toml)
+        run: cargo deny --locked check
       - name: Formatting
         run: cargo fmt --check
       - name: Lints

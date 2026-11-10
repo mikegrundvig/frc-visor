@@ -43,13 +43,17 @@ field layout, no multi-tag solving. Its one page is each camera's live view, to 
 
 ## Building
 
-Rust (stable), a C compiler, and libclang for the V4L2 bindings:
+Rust (rust-toolchain.toml names the version, and rustup installs it), a C compiler, and libclang
+for the V4L2 bindings:
 
 ```bash
 sudo apt-get install -y clang libclang-dev
-cargo build --release
-cargo test
+cargo build --release --locked
+cargo test --locked
+cargo deny check                           # licences, advisories, sources (deny.toml)
 ```
+
+`--locked` builds the crates Cargo.lock names, and no others.
 
 The binary is `target/release/visor`. Build on the coprocessor's architecture (arm64 for an Orange
 Pi); NAPA uses SSE2 on x86-64 and NEON on arm64.
