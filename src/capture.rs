@@ -352,6 +352,8 @@ mod tests {
         Offers(&'static [[u8; 4]]),
         /// It gives another size than the one asked for.
         Gives(u32, u32),
+        /// It refuses the value of a control the configuration names: busy, say.
+        RefusesControl,
         /// It streams these, in order.
         Streams(Vec<Event>),
     }
@@ -402,6 +404,8 @@ mod tests {
         offers: &'static [[u8; 4]],
         gives: (u32, u32),
         events: VecDeque<Event>,
+        /// Whether it refuses its brightness.
+        refuses_control: bool,
         values: RefCell<Vec<(u32, i64)>>,
         frame: Vec<u8>,
         meta: Metadata,
@@ -421,10 +425,12 @@ mod tests {
             if self.plugs.is_empty() && !matches!(plug, Plug::Streams(_)) {
                 self.stop.store(true, Ordering::Relaxed);
             }
+            let refuses_control = matches!(plug, Plug::RefusesControl);
             let (offers, gives, events) = match plug {
                 Plug::Absent => return Err(io::Error::from_raw_os_error(libc::ENOENT)),
                 Plug::Offers(offers) => (offers, (WIDTH, HEIGHT), Vec::new()),
                 Plug::Gives(width, height) => (GREY, (width, height), Vec::new()),
+                Plug::RefusesControl => (GREY, (WIDTH, HEIGHT), Vec::new()),
                 Plug::Streams(events) => (GREY, (WIDTH, HEIGHT), events),
             };
             self.opened += 1;
@@ -433,15 +439,23 @@ mod tests {
                 offers,
                 gives,
                 events: events.into(),
+                refuses_control,
                 // Its controls at their defaults, as one just plugged in is.
-                values: RefCell::new(vec![(AUTO_EXPOSURE, 3), (EXPOSURE_TIME, 156)]),
+                values: RefCell::new(vec![
+                    (AUTO_EXPOSURE, 3),
+                    (EXPOSURE_TIME, 156),
+                    (BRIGHTNESS, 0),
+                ]),
                 frame: vec![0; (WIDTH * HEIGHT) as usize],
                 meta: Metadata::default(),
             })
         }
     }
 
-    /// Manual and automatic exposure, and an exposure time: no gain control.
+    /// Its brightness control's ID, V4L2's.
+    const BRIGHTNESS: u32 = 0x0098_0900;
+
+    /// Manual and automatic exposure, an exposure time and a brightness: no gain control.
     impl Controls for FakeCamera<'_, '_> {
         fn list(&self) -> io::Result<Vec<Control>> {
             let control = |id, name: &str, kind, maximum, default| Control {
@@ -464,6 +478,7 @@ mod tests {
                     5000,
                     156,
                 ),
+                control(BRIGHTNESS, "brightness", Kind::Integer, 64, 0),
             ])
         }
 
@@ -473,6 +488,9 @@ mod tests {
         }
 
         fn set(&self, control: &Control, value: i64) -> io::Result<()> {
+            if control.id == BRIGHTNESS && self.refuses_control {
+                return Err(io::Error::from_raw_os_error(libc::EBUSY));
+            }
             if control.id == EXPOSURE_TIME {
                 self.fake
                     .exposures_set
@@ -605,14 +623,15 @@ mod tests {
         }
     }
 
-    /// What the camera does each time it's opened, and the configured gain (it has no gain
-    /// control); then the frames that reached the slot by number, the short frames, the frames
+    /// What the camera does each time it's opened, the configured gain (it has no gain control)
+    /// and named controls; then the frames that reached the slot by number, the short frames, the frames
     /// dropped (short or broken), how many times it was opened, how many times it was set up to
     /// stream, and part of each warning, in order.
     struct Case {
         name: &'static str,
         plugs: Vec<Plug>,
         gain: Option<i64>,
+        named: Vec<(&'static str, i64)>,
         taken: Vec<i64>,
         short: u32,
         dropped: u64,
@@ -631,6 +650,7 @@ mod tests {
                 name: "a short frame is skipped and counted, and the camera streams on",
                 plugs: vec![Plug::Streams(vec![Frame, Short, Frame])],
                 gain: None,
+                named: vec![],
                 taken: vec![1, 3],
                 short: 1,
                 dropped: 1,
@@ -642,6 +662,7 @@ mod tests {
                 name: "a frame the driver marks bad is counted as dropped, and the camera streams on",
                 plugs: vec![Plug::Streams(vec![Frame, Errored, Frame])],
                 gain: None,
+                named: vec![],
                 taken: vec![1, 3],
                 short: 0,
                 dropped: 1,
@@ -656,6 +677,7 @@ mod tests {
                     Plug::Streams(vec![Frame]),
                 ],
                 gain: None,
+                named: vec![],
                 taken: vec![1, 3],
                 short: 0,
                 dropped: 0,
@@ -671,6 +693,7 @@ mod tests {
                     Plug::Streams(vec![Frame]),
                 ],
                 gain: None,
+                named: vec![],
                 taken: vec![1],
                 short: 0,
                 dropped: 0,
@@ -682,6 +705,7 @@ mod tests {
                 name: "a size the camera won't give: said, and tried again",
                 plugs: vec![Plug::Gives(4, 4), Plug::Streams(vec![Frame])],
                 gain: None,
+                named: vec![],
                 taken: vec![1],
                 short: 0,
                 dropped: 0,
@@ -698,6 +722,7 @@ mod tests {
                     Plug::Streams(vec![Frame, Frame]),
                 ],
                 gain: None,
+                named: vec![],
                 taken: vec![1, 2],
                 short: 0,
                 dropped: 0,
@@ -706,6 +731,23 @@ mod tests {
                 warnings: vec![
                     "/dev/v4l/by-path/test-usb-0:1:1.0-video-index0: No such file or directory",
                 ],
+            },
+            Case {
+                name: "a named control the camera refuses: the open fails, said once, and is tried \
+                       until the camera takes it",
+                plugs: vec![
+                    Plug::RefusesControl,
+                    Plug::RefusesControl,
+                    Plug::Streams(vec![Frame]),
+                ],
+                gain: None,
+                named: vec![("brightness", 10)],
+                taken: vec![1],
+                short: 0,
+                dropped: 0,
+                opened: 3,
+                set_up: 3,
+                warnings: vec!["setting brightness: Device or resource busy"],
             },
             Case {
                 name: "unplugged and plugged back in: set up again, each cause said once, and the \
@@ -717,6 +759,7 @@ mod tests {
                     Plug::Streams(vec![Frame]),
                 ],
                 gain: Some(40),
+                named: vec![],
                 taken: vec![1, 3],
                 short: 0,
                 dropped: 0,
@@ -731,7 +774,12 @@ mod tests {
         ];
         for (row, case) in cases.into_iter().enumerate() {
             let name = format!("camera-{row}");
-            let camera = camera(&name, case.gain);
+            let mut camera = camera(&name, case.gain);
+            camera.controls = case
+                .named
+                .iter()
+                .map(|(n, v)| (n.to_string(), *v))
+                .collect();
             let latest = Latest::new();
             let stop = AtomicBool::new(false);
             let mut fake = Fake {

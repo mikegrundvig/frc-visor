@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn named_controls_come_after_and_an_unknown_one_fails_the_open() {
+    fn named_controls_come_after_and_an_unknown_or_refused_one_fails_the_open() {
         let device = Fake::new(vec![auto_exposure(), exposure_time(), gain(), brightness()]);
         let mut named = camera(Some(1000), None);
         named.controls = vec![("brightness".into(), 10), ("auto_exposure".into(), 3)];
@@ -829,13 +829,26 @@ mod tests {
         assert_eq!(applied.in_effect.auto_exposure, Some(true));
         assert_eq!(applied.in_effect.exposure_us, None, "the camera chooses it");
 
-        let mut misspelt = camera(Some(1000), None);
-        misspelt.controls = vec![("gian".into(), 10)];
-        let error = apply(&device, &misspelt).unwrap_err().to_string();
-        assert!(
-            error.contains("no control gian; the camera has auto_exposure"),
-            "{error}"
-        );
+        // The open fails, and capture tries it again (capture.rs's tests).
+        let mut refusing = Fake::new(vec![auto_exposure(), exposure_time(), gain(), brightness()]);
+        refusing.refuses = Some(brightness().id);
+        // (the controls named, part of why the open fails)
+        let rows = [
+            (
+                ("gian", 10),
+                "no control gian; the camera has auto_exposure",
+            ),
+            (
+                ("brightness", 10),
+                "setting brightness: Device or resource busy",
+            ),
+        ];
+        for ((name, value), why) in rows {
+            let mut named = camera(Some(1000), None);
+            named.controls = vec![(name.into(), value)];
+            let error = apply(&refusing, &named).unwrap_err().to_string();
+            assert!(error.contains(why), "{name}: {error}");
+        }
     }
 
     #[test]
