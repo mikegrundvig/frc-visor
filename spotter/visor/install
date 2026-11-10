@@ -1,9 +1,12 @@
 #!/bin/sh
-# Installs the Visor release on standard input (visor-<version>-linux-arm64.tar.gz): checks it holds
-# only files and folders, unpacks it beside the running one, has the new program say its version
-# (so it runs on this board), and only then moves it into place and restarts Visor. A release that
-# won't run leaves the board as it was. VISOR_DIR (/opt/visor) and VISOR_RESTART (a program run in
-# place of `systemctl restart visor.service`) are for an image laid out otherwise, and tests.
+# Installs the Visor release on standard input: a line `sha256=<the archive's SHA-256>`, then the
+# archive (visor-<version>-linux-arm64.tar.gz). Checks the archive is the one that line names, so
+# it's the release the robot's Visor client was published with, and that it holds only files and
+# folders, before anything in it runs; unpacks it beside the running one, has the new program say
+# its version (so it runs on this board), and only then moves it into place and restarts Visor. A
+# release that won't run leaves the board as it was. VISOR_DIR (/opt/visor) and VISOR_RESTART (a
+# program run in place of `systemctl restart visor.service`) are for an image laid out otherwise,
+# and tests.
 set -eu
 # The agent runs its packs with a umask of 0077; Visor runs as its own user, who must read
 # what this writes.
@@ -15,7 +18,31 @@ rm -rf "$work"
 mkdir -p "$work"
 trap 'rm -rf "$work"' EXIT
 archive="$work/release.tar.gz"
+# The shell's read takes the first line alone, a byte at a time, and leaves the archive after it.
+expected=""
+IFS= read -r expected || true
+case $expected in
+  sha256=*) expected=${expected#sha256=} ;;
+  *)
+    echo "the input names no SHA-256: a line sha256=<the archive's> comes before the archive" >&2
+    exit 1
+    ;;
+esac
+# Anything but hex digits counts as none.
+case $expected in
+  *[!0-9a-f]*) expected="" ;;
+esac
+if [ ${#expected} -ne 64 ]; then
+  echo "the SHA-256 the input names isn't 64 lowercase hex digits" >&2
+  exit 1
+fi
 cat > "$archive"
+# Before anything else looks inside it: an archive the robot didn't name is refused whole.
+actual=$(sha256sum "$archive" | cut -d ' ' -f 1)
+if [ "$actual" != "$expected" ]; then
+  echo "the archive isn't the release the robot names: its SHA-256 is $actual, not $expected" >&2
+  exit 1
+fi
 
 # Every member a file or a folder, by the type tar lists first ('-' and 'd'): a link could lead
 # the program, or what's unpacked, outside the folder, and a device or a pipe has no place in a

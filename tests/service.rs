@@ -134,6 +134,7 @@ fn camera(name: &str, index: u8) -> Camera {
         lens: None,
         tag_size_m: 0.1651,
         stream: Stream::default(),
+        config_id: 0,
     }
 }
 

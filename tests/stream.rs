@@ -57,6 +57,7 @@ fn camera() -> Camera {
         lens: Some(common::rendered_lens()),
         tag_size_m: 0.1651,
         stream: Stream::default(),
+        config_id: 0,
     }
 }
 

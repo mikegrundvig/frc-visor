@@ -4,9 +4,9 @@ Visor sends one UDP datagram per captured frame to the robot controller, port 58
 frame is sent for every image, with or without tags, so silence means a camera or Visor is down.
 A lost datagram is simply lost: the next frame is 16 ms behind it.
 
-Everything is little-endian, with fixed sizes and no padding: a 48-byte header, then 96 bytes per
-tag. Eight tags is 816 bytes; 14, the most a frame carries, is 1,392, inside one Ethernet packet's
-1,472 bytes of UDP payload (15 would be 1,488).
+Everything is little-endian, with fixed sizes and no padding: a 52-byte header, then 96 bytes per
+tag. Eight tags is 820 bytes; 14, the most a frame carries, is 1,396, inside one Ethernet packet's
+1,472 bytes of UDP payload (15 would be 1,492).
 
 ## Header
 
@@ -29,6 +29,7 @@ tag. Eight tags is 816 bytes; 14, the most a frame carries, is 1,392, inside one
 | 38 | Clipped | u16 | The share of those pixels at 250 or brighter, in hundredths of a percent: 0 to 10,000 |
 | 40 | Detect time | u32 | How long finding this frame's tags and solving their poses took, in microseconds |
 | 44 | Dropped | u32 | The camera's frames Visor never sent, from its start: replaced by a newer one before detection got to them, or broken (marked bad by the driver, or short). Wraps, as the sequence does |
+| 48 | Configuration ID | u32 | The configuration Visor runs: the first four bytes of its file's SHA-256, read big-endian (below) |
 
 ## Each tag
 
@@ -58,6 +59,24 @@ mirror images about the line of sight; both come, the better first, as OpenCV's
 `solvePnPGeneric` with `SOLVEPNP_IPPE_SQUARE` gives them (Visor's solve matches OpenCV's to about
 1e-10 from the same undistorted corners). The usual ambiguity is the best error over the
 other's. A client converts to its own axes once.
+
+## The configuration ID
+
+A frame's camera index and its poses mean what the configuration Visor runs says: which camera has
+which index, and the lens its poses were solved with. So each frame names that configuration: the
+first four bytes of the SHA-256 of `visor.toml`, exactly as read, as one big-endian number. Written
+in hex it's the first eight digits of the hash Visor's Spotter pack reports for the file
+(`visor.status.config`): a file whose SHA-256 starts `6a5d27df` sends ID `0x6a5d27df`, which is the
+bytes `df 27 5d 6a` on the wire, as every field is little-endian.
+
+Visor never runs without a configuration (its unit waits for one), so every frame names one. Any
+change to the file, a comment or a tuned exposure included, is another ID. Four bytes tell the
+configurations a robot gives its boards apart: it's a check that a board runs the file the robot
+gave it, not a defence against a forged one.
+
+The robot reads a frame only when its ID is one it gave that camera's board; another is refused
+with its own reason and count, as another version is. Which IDs it takes, and what it does before
+it knows, is the robot's: the runtime's `docs/visor.md`.
 
 ## Exposure and brightness
 
@@ -101,7 +120,8 @@ values):
 - version ID 20261102, sequence 4,000,000,001, 1600 × 1304, capture time 1,234,567,890,123 ns,
   camera 3, clock synced, driver timestamp, exposure 1,000 µs and gain 40 known, the camera's
   automatic exposure off, median brightness 37, high 201, clipped 125 (1.25%), detect time 4,250
-  µs, 17 dropped;
+  µs, 17 dropped, configuration ID `0x6a5d27df` (that of the one-line configuration `team = 1234`
+  and its newline, whose SHA-256 starts `6a5d27df`);
 - tag 7, hamming 0, margin 61.25, corners (100.5, 200.25) (180, 201) (179.75, 280.5) (99, 279),
   poses solved: best rvec (0.125, -2.5, 0.0625), tvec (-0.5, 0.25, 3.75), error 0.1875; other
   rvec (-0.25, 2, -0.5), tvec (-0.5, 0.25, 3.5), error 1.5;

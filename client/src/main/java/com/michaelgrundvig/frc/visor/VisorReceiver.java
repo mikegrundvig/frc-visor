@@ -38,8 +38,11 @@ public final class VisorReceiver implements AutoCloseable {
   /** The port Visor sends to by default. */
   public static final int DEFAULT_PORT = 5807;
 
-  /** Frames waiting for the loop: about a quarter second of four cameras at 60 fps. */
-  private static final int RING_FRAMES = 64;
+  /**
+   * The most frames that wait for the loop, past which new ones are dropped: about a quarter second
+   * of four cameras at 60 fps.
+   */
+  public static final int RING_FRAMES = 64;
 
   private final FrameRing ring = new FrameRing(RING_FRAMES);
   private final @Nullable DatagramChannel channel;
@@ -54,6 +57,7 @@ public final class VisorReceiver implements AutoCloseable {
   private volatile long malformed;
   private volatile long otherVersion;
   private volatile int lastOtherVersionId;
+  private volatile int lastOtherVersionCamera = -1;
   private volatile long dropped;
   private volatile long gaps;
   private volatile long restarts;
@@ -153,6 +157,14 @@ public final class VisorReceiver implements AutoCloseable {
     return lastOtherVersionId;
   }
 
+  /**
+   * The camera index the last other-version frame named, or -1 for none: which of the robot's
+   * cameras the stale coprocessor runs.
+   */
+  public int lastOtherVersionCamera() {
+    return lastOtherVersionCamera;
+  }
+
   /** Frames dropped because the loop fell behind and the ring was full. */
   public long dropped() {
     return dropped;
@@ -230,6 +242,7 @@ public final class VisorReceiver implements AutoCloseable {
     slot.sender = sender;
     if (slot.versionId != VisorVersion.ID) {
       lastOtherVersionId = slot.versionId;
+      lastOtherVersionCamera = slot.camera;
       otherVersion++;
       return;
     }

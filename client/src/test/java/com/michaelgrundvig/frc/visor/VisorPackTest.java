@@ -1,6 +1,7 @@
 package com.michaelgrundvig.frc.visor;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.michaelgrundvig.frc.spotter.manager.Board;
 import com.michaelgrundvig.frc.spotter.manager.BoardDefinition;
@@ -23,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
@@ -70,6 +72,15 @@ class VisorPackTest {
     byte[] make(Path folder) throws Exception;
   }
 
+  /** What the install is given for an archive. */
+  private interface Input {
+    byte[] of(byte[] archive);
+  }
+
+  /** As the robot gives it: the archive after the line naming its own SHA-256. */
+  private static final Input NAMED =
+      archive -> VisorPack.installInput(archive, VisorPack.sha256(archive));
+
   /**
    * An install's row: the archive, how the restart goes, what the install ends in and says, then
    * the Visor on disk, the one running, and how many restarts there were.
@@ -77,6 +88,7 @@ class VisorPackTest {
   private record InstallRow(
       String why,
       Archive archive,
+      Input input,
       Restart restart,
       Exit exit,
       String says,
@@ -89,11 +101,14 @@ class VisorPackTest {
     Path outside = work.resolve("outside");
     Path ranOutside = work.resolve("outside.ran");
     PackBoard.executable(outside, "#!/bin/sh\ntouch " + ranOutside + "\necho visor 2099.9.9\n");
+    // A program that says it ran, in an archive the robot didn't name.
+    String says = "#!/bin/sh\ntouch " + ranOutside + "\necho visor " + NEW + "\n";
     List<InstallRow> rows =
         List.of(
             new InstallRow(
                 "a release installs, and Visor runs it",
                 folder -> release(folder, Map.of("visor", PackBoard.program(NEW))),
+                NAMED,
                 Restart.STARTS,
                 Exit.OK,
                 "installed visor " + NEW,
@@ -104,6 +119,7 @@ class VisorPackTest {
                 "the same version again: put in place and restarted, so a board whose restart"
                     + " failed is put right",
                 folder -> release(folder, Map.of("visor", PackBoard.program(OLD))),
+                NAMED,
                 Restart.STARTS,
                 Exit.OK,
                 "installed visor " + OLD,
@@ -113,6 +129,7 @@ class VisorPackTest {
             new InstallRow(
                 "no visor in the archive",
                 folder -> release(folder, Map.of("README.md", "a release\n")),
+                NAMED,
                 Restart.STARTS,
                 Exit.FAILS,
                 "the archive has no visor program",
@@ -122,6 +139,7 @@ class VisorPackTest {
             new InstallRow(
                 "a program whose version fails: it doesn't run on this board",
                 folder -> release(folder, Map.of("visor", "#!/bin/sh\nexit 3\n")),
+                NAMED,
                 Restart.STARTS,
                 Exit.FAILS,
                 "doesn't run here",
@@ -134,6 +152,7 @@ class VisorPackTest {
                   byte[] whole = release(folder, Map.of("visor", PackBoard.program(NEW)));
                   return Arrays.copyOf(whole, whole.length / 2);
                 },
+                NAMED,
                 Restart.STARTS,
                 Exit.FAILS,
                 "can't be read",
@@ -144,6 +163,7 @@ class VisorPackTest {
                 "a visor that's a link to a program outside the archive: refused before anything"
                     + " runs",
                 folder -> release(folder, Map.of("visor", "->" + outside)),
+                NAMED,
                 Restart.STARTS,
                 Exit.FAILS,
                 "only files and folders",
@@ -153,6 +173,7 @@ class VisorPackTest {
             new InstallRow(
                 "a link beside the program",
                 folder -> release(folder, Map.of("visor", PackBoard.program(NEW), "etc", "->/etc")),
+                NAMED,
                 Restart.STARTS,
                 Exit.FAILS,
                 "only files and folders",
@@ -160,8 +181,47 @@ class VisorPackTest {
                 OLD,
                 0),
             new InstallRow(
+                "an archive other than the one the robot names: refused before anything in it"
+                    + " runs",
+                folder -> release(folder, Map.of("visor", says)),
+                archive ->
+                    VisorPack.installInput(
+                        archive, VisorPack.sha256("another".getBytes(StandardCharsets.UTF_8))),
+                Restart.STARTS,
+                Exit.FAILS,
+                "isn't the release the robot names",
+                OLD,
+                OLD,
+                0),
+            new InstallRow(
+                "an archive alone, with no SHA-256 named before it",
+                folder -> release(folder, Map.of("visor", says)),
+                archive -> archive,
+                Restart.STARTS,
+                Exit.FAILS,
+                "names no SHA-256",
+                OLD,
+                OLD,
+                0),
+            new InstallRow(
+                "a SHA-256 cut short",
+                folder -> release(folder, Map.of("visor", says)),
+                archive -> {
+                  byte[] line = "sha256=abc\n".getBytes(StandardCharsets.US_ASCII);
+                  byte[] input = Arrays.copyOf(line, line.length + archive.length);
+                  System.arraycopy(archive, 0, input, line.length, archive.length);
+                  return input;
+                },
+                Restart.STARTS,
+                Exit.FAILS,
+                "isn't 64 lowercase hex digits",
+                OLD,
+                OLD,
+                0),
+            new InstallRow(
                 "a restart that fails once the program is in place: the status says none runs",
                 folder -> release(folder, Map.of("visor", PackBoard.program(NEW))),
+                NAMED,
                 Restart.FAILS,
                 Exit.FAILS,
                 "installed visor " + NEW,
@@ -172,6 +232,7 @@ class VisorPackTest {
                 "an install cut off once the program is in place: the old one runs on, and the"
                     + " status says so",
                 folder -> release(folder, Map.of("visor", PackBoard.program(NEW))),
+                NAMED,
                 Restart.CUT_OFF,
                 Exit.FAILS,
                 "installed visor " + NEW,
@@ -187,7 +248,7 @@ class VisorPackTest {
       Files.writeString(board.visor.resolve(".install/visor"), "#!/bin/sh\nexit 9\n");
       board.restart(row.restart());
       byte[] archive = row.archive().make(Files.createDirectories(work.resolve("release-" + n)));
-      Ran ran = board.script("install", archive);
+      Ran ran = board.script("install", row.input().of(archive));
 
       assertThat(Exit.of(ran)).as(row.why() + ": " + ran).isEqualTo(row.exit());
       assertThat(ran.err()).as(row.why()).contains(row.says());
@@ -344,6 +405,44 @@ class VisorPackTest {
     assertThat(VisorPack.releaseName(NEW)).isEqualTo("visor-2099.1.2-linux-arm64.tar.gz");
   }
 
+  @Test
+  void aConfigurationsIdIsTheStartOfItsHash() {
+    // sha256sum's answers, as the pack reports them, and the IDs Visor's tests give them.
+    record Row(String config, String hash, int id) {}
+    List<Row> rows =
+        List.of(
+            new Row(
+                "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", 0xe3b0c442),
+            new Row(
+                CONFIG,
+                "6a5d27df0fe1c29c85dde1a3e70dca2aaf0c32305ae3598a612142d37193f7a0",
+                0x6a5d27df),
+            new Row(
+                "team = 5678\n",
+                "a6738b08f08e4e5bc22144449d0ac3af5e8423ce86c6b3a06c0cf13927497663",
+                0xa6738b08));
+    for (Row row : rows) {
+      assertThat(VisorPack.configHash(row.config())).isEqualTo(row.hash());
+      assertThat(VisorPack.configId(row.hash())).as(row.config()).isEqualTo(row.id());
+    }
+    for (String notAHash : List.of("", "6a5d27df", rows.get(1).hash().toUpperCase(Locale.ROOT))) {
+      assertThatThrownBy(() -> VisorPack.configId(notAHash))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+  }
+
+  @Test
+  void anInstallsInputNamesTheArchivesHashFirst() {
+    byte[] archive = {0x1f, (byte) 0x8b, 10, 0};
+    String hash = VisorPack.sha256(archive);
+    byte[] input = VisorPack.installInput(archive, hash);
+    byte[] line = ("sha256=" + hash + "\n").getBytes(StandardCharsets.US_ASCII);
+    assertThat(Arrays.copyOf(input, line.length)).isEqualTo(line);
+    assertThat(Arrays.copyOfRange(input, line.length, input.length)).isEqualTo(archive);
+    assertThatThrownBy(() -> VisorPack.installInput(archive, "abc"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
   @AfterEach
   void stop() throws InterruptedException {
     if (manager != null) {
@@ -396,7 +495,10 @@ class VisorPackTest {
             Files.createDirectories(work.resolve("release")),
             Map.of("visor", PackBoard.program(NEW)));
     Files.writeString(board.visor.resolve("visor.toml"), CONFIG);
-    Run installed = run(spotter, on.run(VisorPack.INSTALL, archive));
+    Run installed =
+        run(
+            spotter,
+            on.run(VisorPack.INSTALL, VisorPack.installInput(archive, VisorPack.sha256(archive))));
     assertThat(installed.level()).as(installed.reason()).isEqualTo(Level.OK);
     assertThat(Objects.requireNonNull(installed.response(VisorPack.INSTALLED)).text())
         .isEqualTo(NEW);

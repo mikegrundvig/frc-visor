@@ -57,6 +57,8 @@ pub fn unconfigured(
         lens: None,
         tag_size_m: visor::config::DEFAULT_TAG_SIZE_M,
         stream: visor::config::Stream::default(),
+        // Recording sends no frames, so there's no configuration to name.
+        config_id: 0,
     }
 }
 

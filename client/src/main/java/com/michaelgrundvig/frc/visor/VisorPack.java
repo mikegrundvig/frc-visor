@@ -42,7 +42,10 @@ public final class VisorPack {
   /** Visor's log, its journal. */
   public static final String LOG = "visor.log";
 
-  /** The action that installs a release: its input is the archive ({@link #releaseName}). */
+  /**
+   * The action that installs a release: its input is {@link #installInput}, the archive after a
+   * line naming its SHA-256, which the board checks before anything in the archive runs.
+   */
   public static final String INSTALL = "visor.install";
 
   /** The install's response: the version it installed. */
@@ -90,12 +93,53 @@ public final class VisorPack {
 
   /** A configuration's SHA-256 as the status reports it: of its UTF-8 bytes, in lowercase hex. */
   public static String configHash(String config) {
+    return sha256(config.getBytes(StandardCharsets.UTF_8));
+  }
+
+  /**
+   * The ID frames carry for the configuration with this SHA-256 ({@link #configHash}, or a board's
+   * {@link #CONFIG}): its first eight hex digits, the hash's first four bytes, as one number.
+   *
+   * @throws IllegalArgumentException for anything but 64 lowercase hex digits
+   */
+  public static int configId(String hash) {
+    requireSha256(hash);
+    return HexFormat.fromHexDigits(hash, 0, 8);
+  }
+
+  /**
+   * The install's input: the line {@code sha256=<hex>}, then the archive. The board refuses an
+   * archive whose SHA-256 isn't the one named, before anything in it runs.
+   *
+   * @param archive the release's archive ({@link #releaseName})
+   * @param sha256 the SHA-256 the archive must have: the one this client was published with ({@link
+   *     VisorVersion#RELEASE_SHA256}), in lowercase hex
+   * @throws IllegalArgumentException for a SHA-256 that isn't 64 lowercase hex digits
+   */
+  public static byte[] installInput(byte[] archive, String sha256) {
+    requireSha256(sha256);
+    byte[] line = ("sha256=" + sha256 + "\n").getBytes(StandardCharsets.US_ASCII);
+    byte[] input = Arrays.copyOf(line, line.length + archive.length);
+    System.arraycopy(archive, 0, input, line.length, archive.length);
+    return input;
+  }
+
+  /** The SHA-256 of these bytes, in lowercase hex, as {@code sha256sum} writes it. */
+  public static String sha256(byte[] bytes) {
     try {
-      byte[] digest =
-          MessageDigest.getInstance("SHA-256").digest(config.getBytes(StandardCharsets.UTF_8));
-      return HexFormat.of().formatHex(digest);
+      return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
     } catch (NoSuchAlgorithmException e) {
       throw new IllegalStateException("every Java has SHA-256", e);
     }
+  }
+
+  private static void requireSha256(String hash) {
+    if (hash.length() != 64 || !hash.chars().allMatch(VisorPack::isLowerHex)) {
+      throw new IllegalArgumentException("a SHA-256 is 64 lowercase hex digits, not " + hash);
+    }
+  }
+
+  private static boolean isLowerHex(int c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
   }
 }

@@ -145,12 +145,14 @@ class VisorReceiverTest {
   }
 
   @Test
-  void theOtherVersionIsRemembered() {
+  void theOtherVersionIsRememberedWithTheCameraItNamed() {
     VisorReceiver receiver = VisorReceiver.inMemory();
-    VisorFrame stale = VisorWireTest.built(0, 0);
+    assertThat(receiver.lastOtherVersionCamera()).isEqualTo(-1);
+    VisorFrame stale = VisorWireTest.built(0, 6);
     stale.setVersionId(20251225);
     receiver.offer(stale);
     assertThat(receiver.lastOtherVersionId()).isEqualTo(20251225);
+    assertThat(receiver.lastOtherVersionCamera()).isEqualTo(6);
   }
 
   @Test

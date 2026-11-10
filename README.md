@@ -73,7 +73,9 @@ visor version
   and, as it starts, checks each coprocessor through [Spotter](https://github.com/mikegrundvig/frc-spotter)'s
   agent with Visor's pack ([spotter/visor](spotter/visor/README.md)): it installs the release where
   the board has another, and writes the configuration from the cameras the board has plugged in.
-  The new configuration is checked (`visor check`) before it replaces the old.
+  The new configuration is checked (`visor check`) before it replaces the old. Each frame names
+  the configuration it came from ([docs/wire.md](docs/wire.md#the-configuration-id)), so the robot
+  refuses frames from one it didn't give the board.
 - **Service:** [deploy/visor.service](deploy/visor.service), which runs as a `visor` user in the
   `video` group. Each release carries it under `os/` with the rest of what a board's image installs
   for Visor: the account, `/opt/visor`, and what Spotter's agent needs for Visor's pack
@@ -155,7 +157,9 @@ notices, the chrony configuration, the Spotter pack, and `os/`, what a board's i
 [tools/package.sh](tools/package.sh) makes it) and its SHA-256 to the tag's GitHub release. `tools/release.sh` then publishes the client and that archive into the FRC
 libraries' Maven repository, from which a robot's build takes the archive for its client. It runs
 from a clean checkout of the tag and refuses otherwise, so the client is built from the same code as
-the program.
+the program. The client carries the archive's SHA-256 (`VisorVersion.RELEASE_SHA256`): a robot's
+build stages only an archive with that hash, and a board installs only one, the robot naming the
+hash with the archive.
 
 ## Lens calibration
 

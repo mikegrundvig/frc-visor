@@ -70,15 +70,24 @@ def visorVersion = providers.fileContents(layout.projectDirectory.file("../Cargo
     }
     "${match.group(1)}.${match.group(2)}.${match.group(3)}".toString()
 }
+// And the SHA-256 of the release archive a release publishes beside it (-PvisorTarball, below), so
+// a robot's build and its boards take only that archive (VisorVersion.RELEASE_SHA256). One owner of
+// the hash: the archive itself. A build without one (a developer's) writes it empty.
+def releaseSha256 = providers.fileContents(layout.projectDirectory.file(providers.gradleProperty("visorTarball")))
+        .asBytes
+        .map { bytes -> java.security.MessageDigest.getInstance("SHA-256").digest(bytes).encodeHex().toString() }
+        .orElse("")
 def generatedResources = layout.buildDirectory.dir("generated/resources/visor")
 def writeVersion = tasks.register("writeVisorVersion") {
     def version = visorVersion
+    def sha256 = releaseSha256
     inputs.property("version", version)
+    inputs.property("releaseSha256", sha256)
     outputs.dir(generatedResources)
     doLast {
         def file = generatedResources.get().file("com/michaelgrundvig/frc/visor/version.properties").asFile
         file.parentFile.mkdirs()
-        file.text = "version=${version.get()}\n"
+        file.text = "version=${version.get()}\nrelease-sha256=${sha256.get()}\n"
     }
 }
 sourceSets.main.resources.srcDir(writeVersion)

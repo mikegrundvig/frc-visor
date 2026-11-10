@@ -79,6 +79,7 @@ pub fn run(
             detect_us: u32::try_from(detect_time.as_micros()).unwrap_or(u32::MAX),
             // Wraps, as the robot reads it: only the difference between two frames' counts matters.
             dropped: latest.dropped() as u32,
+            config_id: camera.config_id,
             tags,
         };
         let sent = match frame.encode(&mut bytes) {

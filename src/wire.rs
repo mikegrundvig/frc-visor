@@ -1,13 +1,15 @@
 //! The datagram Visor sends the robot for each frame. The layout is in docs/wire.md: little-endian,
-//! fixed sizes, no padding, a 48-byte header and 96 bytes per tag.
+//! fixed sizes, no padding, a 52-byte header and 96 bytes per tag.
 
 use std::fmt;
+
+use sha2::{Digest, Sha256};
 
 use crate::brightness::Brightness;
 
 /// "VISR" in byte order, so a stray packet on the port is dropped, not misread.
 pub const MAGIC: u32 = 0x5253_4956;
-pub const HEADER_BYTES: usize = 48;
+pub const HEADER_BYTES: usize = 52;
 pub const TAG_BYTES: usize = 96;
 /// One Ethernet packet's UDP payload, in bytes: a frame is never split across packets.
 pub const PACKET_BYTES: usize = 1472;
@@ -19,6 +21,15 @@ const _: () = assert!(HEADER_BYTES + (MAX_TAGS + 1) * TAG_BYTES > PACKET_BYTES);
 
 /// This build's version ID, from its version: 2026.11.2 is 20261102.
 pub const VERSION_ID: u32 = parse_version_id(env!("VISOR_VERSION_ID"));
+
+/// The ID of a configuration, from its file's bytes: the first four bytes of their SHA-256, read
+/// as one big-endian number, so it's written as the first eight hex digits of the hash Visor's
+/// Spotter pack reports for the file. Every frame carries the ID of the configuration Visor runs,
+/// so the robot can tell a board running another configuration than the one it gave it.
+pub fn config_id(file: &[u8]) -> u32 {
+    let hash = Sha256::digest(file);
+    u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
+}
 
 const FLAG_CLOCK_SYNCED: u8 = 1 << 0;
 const FLAG_DEQUEUE_TIME: u8 = 1 << 1;
@@ -57,6 +68,8 @@ pub struct Frame {
     /// The camera's frames Visor never sent, counted from its start: replaced by a newer one before
     /// detection got to them, or broken. It wraps at `u32::MAX`, as the sequence does.
     pub dropped: u32,
+    /// The ID of the configuration Visor runs ([`config_id`]).
+    pub config_id: u32,
     pub tags: Vec<Tag>,
 }
 
@@ -138,6 +151,7 @@ impl Frame {
         out.extend_from_slice(&self.brightness.clipped.to_le_bytes());
         out.extend_from_slice(&self.detect_us.to_le_bytes());
         out.extend_from_slice(&self.dropped.to_le_bytes());
+        out.extend_from_slice(&self.config_id.to_le_bytes());
         for tag in &self.tags {
             out.extend_from_slice(&tag.id.to_le_bytes());
             out.push(tag.hamming);
@@ -192,6 +206,7 @@ impl Frame {
         };
         let detect_us = read.u32();
         let dropped = read.u32();
+        let config_id = read.u32();
         if tag_count > MAX_TAGS {
             return Err(WireError::TooManyTags(tag_count));
         }
@@ -241,6 +256,7 @@ impl Frame {
             brightness,
             detect_us,
             dropped,
+            config_id,
             tags,
         })
     }
@@ -336,6 +352,7 @@ mod tests {
             },
             detect_us: 4250,
             dropped: 17,
+            config_id: 0x6a5d_27df,
             tags: vec![
                 Tag {
                     id: 7,
@@ -395,6 +412,7 @@ mod tests {
         empty.capture_nanos = -5;
         empty.detect_us = u32::MAX;
         empty.dropped = u32::MAX;
+        empty.config_id = u32::MAX;
         cases.push(empty);
         // The camera's own exposure, and no gain control.
         let mut automatic = golden();
@@ -434,7 +452,7 @@ mod tests {
         too_many[26] = 15;
         let cases: Vec<(&str, Vec<u8>, WireError)> = vec![
             ("empty", vec![], WireError::TooShort(0)),
-            ("header cut", good[..47].to_vec(), WireError::TooShort(47)),
+            ("header cut", good[..51].to_vec(), WireError::TooShort(51)),
             (
                 "wrong magic",
                 wrong_magic,
@@ -445,14 +463,29 @@ mod tests {
                 "a tag cut off",
                 good[..good.len() - 1].to_vec(),
                 WireError::WrongLength {
-                    expected: 240,
-                    actual: 239,
+                    expected: 244,
+                    actual: 243,
                 },
             ),
         ];
         for (name, bytes, expected) in cases {
             assert_eq!(Frame::decode(&bytes), Err(expected), "{name}");
         }
+    }
+
+    #[test]
+    fn a_configuration_s_id_is_the_start_of_its_sha_256() {
+        // sha256sum's answers, as the pack reports them: the ID is their first eight hex digits.
+        let cases: [(&[u8], u32); 3] = [
+            (b"", 0xe3b0_c442),
+            (b"team = 1234\n", 0x6a5d_27df),
+            (b"team = 5678\n", 0xa673_8b08),
+        ];
+        for (file, id) in cases {
+            assert_eq!(config_id(file), id, "{:?}", String::from_utf8_lossy(file));
+        }
+        // The golden frame's is the one-line configuration's, which the client checks too.
+        assert_eq!(golden().config_id, config_id(b"team = 1234\n"));
     }
 
     #[test]

@@ -55,6 +55,7 @@ fn camera() -> Camera {
         lens: Some(common::rendered_lens()),
         tag_size_m: 0.1651,
         stream: visor::config::Stream::default(),
+        config_id: 0x6a5d_27df,
     }
 }
 
@@ -220,6 +221,7 @@ fn each_frame_reaches_the_robot_with_its_tags_and_robot_time() {
         assert_eq!(frame.version_id, VERSION_ID);
         assert_eq!(frame.sequence, i as u32, "sequence counts frames");
         assert_eq!((frame.width, frame.height, frame.camera), (1600, 1304, 5));
+        assert_eq!(frame.config_id, 0x6a5d_27df, "its configuration's ID");
         // Captured on the monotonic clock, moved to the robot's, plus the camera's -2 ms offset.
         let monotonic = 4_000_000_000_000 + i as i64 * 16_666_667;
         assert_eq!(

@@ -51,6 +51,7 @@ public final class VisorFrame {
 
   long detectMicros;
   long dropped;
+  int configId;
 
   /** The coprocessor it came from; null for a frame offered in memory. Not on the wire. */
   @Nullable InetAddress sender;
@@ -172,6 +173,14 @@ public final class VisorFrame {
   }
 
   /**
+   * The ID of the configuration Visor ran as it sent the frame: the first four bytes of its file's
+   * SHA-256, as {@link VisorPack#configId} makes it from the hash the board reports.
+   */
+  public int configId() {
+    return configId;
+  }
+
+  /**
    * The coprocessor's address the frame came from: where its camera's live view is served ({@link
    * VisorStream}). Null for a frame offered in memory, as a simulation's are, and for one decoded
    * from bytes alone.
@@ -274,6 +283,7 @@ public final class VisorFrame {
     clipped = other.clipped;
     detectMicros = other.detectMicros;
     dropped = other.dropped;
+    configId = other.configId;
     sender = other.sender;
     tagCount = other.tagCount;
     int n = other.tagCount;
@@ -287,8 +297,9 @@ public final class VisorFrame {
 
   /**
    * Sets everything but the tags, which it clears, the camera's settings and the image's
-   * brightness, which it leaves unknown and black, and the detect time and dropped count, which it
-   * leaves 0: for a simulation or a test building a frame to send. The version ID is this client's.
+   * brightness, which it leaves unknown and black, and the detect time, dropped count and
+   * configuration ID, which it leaves 0: for a simulation or a test building a frame to send. The
+   * version ID is this client's.
    */
   public void setHeader(
       long sequence,
@@ -316,6 +327,7 @@ public final class VisorFrame {
     this.clipped = 0;
     this.detectMicros = 0;
     this.dropped = 0;
+    this.configId = 0;
     this.tagCount = 0;
   }
 
@@ -374,6 +386,11 @@ public final class VisorFrame {
     medianBrightness = median;
     highBrightness = high;
     clipped = (int) Math.round(clippedShare * CLIPPED_UNITS);
+  }
+
+  /** Sets the ID of the configuration it came from ({@link VisorPack#configId}). */
+  public void setConfigId(int configId) {
+    this.configId = configId;
   }
 
   /** Sets the version ID, which {@link #setHeader} makes this client's. */

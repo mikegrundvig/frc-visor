@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::lens::Lens;
+use crate::wire;
 
 /// The port frames go to on the robot.
 pub const DEFAULT_PORT: u16 = 5807;
@@ -64,6 +65,9 @@ pub struct Camera {
     pub tag_size_m: f64,
     /// Its live view, served over HTTP while someone watches.
     pub stream: Stream,
+    /// The ID of the configuration it was read from ([`crate::wire::config_id`]), which each of
+    /// its frames carries, so the robot can tell frames from a configuration it didn't give.
+    pub config_id: u32,
 }
 
 /// A camera's live view: its frames, made smaller, as JPEGs ([`crate::stream`]).
@@ -215,11 +219,12 @@ impl Config {
         if file.cameras.is_empty() {
             return Err(ConfigError("no [[camera]]".into()));
         }
+        let config_id = wire::config_id(text.as_bytes());
         let mut names = HashSet::new();
         let mut indices = HashSet::new();
         let mut cameras = Vec::new();
         for camera in file.cameras {
-            let camera = check_camera(camera, tag_size_m)?;
+            let camera = check_camera(camera, tag_size_m, config_id)?;
             if !names.insert(camera.name.clone()) {
                 return Err(ConfigError(format!(
                     "two cameras are named {:?}",
@@ -266,7 +271,7 @@ fn team_address(team: u32) -> Result<IpAddr, ConfigError> {
     )))
 }
 
-fn check_camera(file: CameraFile, tag_size_m: f64) -> Result<Camera, ConfigError> {
+fn check_camera(file: CameraFile, tag_size_m: f64, config_id: u32) -> Result<Camera, ConfigError> {
     let name = file.name;
     let fail = |why: String| ConfigError(format!("camera {name:?}: {why}"));
     if name.trim().is_empty() {
@@ -355,6 +360,7 @@ fn check_camera(file: CameraFile, tag_size_m: f64) -> Result<Camera, ConfigError
         tag_size_m,
         stream,
         name,
+        config_id,
     })
 }
 
@@ -422,6 +428,22 @@ mod tests {
         assert_eq!(camera.stream, Stream::default());
         assert_eq!(camera.stream.size(1600, 1304), (800, 652));
         assert_eq!((camera.stream.fps, camera.stream.quality), (10, 60));
+    }
+
+    #[test]
+    fn each_camera_carries_the_id_of_the_file_it_was_read_from() {
+        let second = CAMERA
+            .replace("front-left", "front-right")
+            .replace("index = 0", "index = 1")
+            .replace("usb-cam", "usb-other-cam");
+        let text = format!("team = 1234\n{CAMERA}{second}");
+        let config = Config::parse(&text).unwrap();
+        let id = wire::config_id(text.as_bytes());
+        let ids: Vec<u32> = config.cameras.iter().map(|c| c.config_id).collect();
+        assert_eq!(ids, vec![id, id]);
+        // Any change to the file is another configuration, a comment included.
+        let changed = Config::parse(&format!("# tuned\n{text}")).unwrap();
+        assert_ne!(changed.cameras[0].config_id, id);
     }
 
     #[test]

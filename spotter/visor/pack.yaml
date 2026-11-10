@@ -22,7 +22,7 @@ logs:
 actions:
   - id: install
     label: Install Visor
-    description: Puts the release given (its visor-<version>-linux-arm64.tar.gz) in place and restarts Visor
+    description: Puts the release given in place and restarts Visor; its input is a line sha256=<the archive's SHA-256>, then the archive (visor-<version>-linux-arm64.tar.gz), refused unless the two match
     run: [./install]
     input: file
     timeout: 60s

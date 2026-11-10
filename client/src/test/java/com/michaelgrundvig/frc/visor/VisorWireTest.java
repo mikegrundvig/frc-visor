@@ -38,6 +38,8 @@ class VisorWireTest {
     frame.setGain(55);
     frame.setBrightness(41, 187, 0.0042);
     frame.setHealth(3_900, 4_294_967_295L);
+    // Past the top bit, so it's read back as the same four bytes, not as a sign.
+    frame.setConfigId(0xa6738b08);
     return frame;
   }
 
@@ -64,6 +66,10 @@ class VisorWireTest {
     assertThat(frame.clippedShare()).isEqualTo(0.0125);
     assertThat(frame.detectMicros()).isEqualTo(4250);
     assertThat(frame.dropped()).isEqualTo(17);
+    // The one-line configuration's ID, made the way the robot makes it from a board's report.
+    assertThat(frame.configId()).isEqualTo(0x6a5d27df);
+    assertThat(frame.configId())
+        .isEqualTo(VisorPack.configId(VisorPack.configHash("team = 1234\n")));
     assertThat(frame.tagCount()).isEqualTo(2);
 
     assertThat(frame.tagId(0)).isEqualTo(7);
@@ -173,7 +179,7 @@ class VisorWireTest {
     List<Case> cases =
         List.of(
             new Case("empty", new byte[0], VisorWire.Decoded.TOO_SHORT),
-            new Case("header cut", Arrays.copyOf(good, 47), VisorWire.Decoded.TOO_SHORT),
+            new Case("header cut", Arrays.copyOf(good, 51), VisorWire.Decoded.TOO_SHORT),
             new Case("wrong magic", wrongMagic, VisorWire.Decoded.NOT_VISOR),
             new Case("too many tags", tooManyTags, VisorWire.Decoded.TOO_MANY_TAGS),
             new Case(
@@ -242,6 +248,7 @@ class VisorWireTest {
     assertThat(actual.clippedShare()).isEqualTo(expected.clippedShare());
     assertThat(actual.detectMicros()).isEqualTo(expected.detectMicros());
     assertThat(actual.dropped()).isEqualTo(expected.dropped());
+    assertThat(actual.configId()).isEqualTo(expected.configId());
     assertThat(actual.tagCount()).isEqualTo(expected.tagCount());
     for (int tag = 0; tag < expected.tagCount(); tag++) {
       assertThat(actual.tagId(tag)).isEqualTo(expected.tagId(tag));
