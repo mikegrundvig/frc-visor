@@ -1,0 +1,11 @@
+{
+  "frames_port": 5807,
+  "live_view_port": 5809,
+  "streams": [
+    { "camera": "front-left", "path": "/stream/front-left" },
+    { "camera": "Front Left", "path": "/stream/Front%20Left" },
+    { "camera": "a/b?c#d", "path": "/stream/a%2Fb%3Fc%23d" },
+    { "camera": "front \"left\" \\ 1", "path": "/stream/front%20%22left%22%20%5C%201" },
+    { "camera": "caméra", "path": "/stream/cam%C3%A9ra" }
+  ]
+}

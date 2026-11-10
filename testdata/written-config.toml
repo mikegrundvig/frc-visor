@@ -1,5 +1,6 @@
 # Visor's configuration, written by the robot's deploy: edits here are overwritten.
 team = 1234
+port = 5807
 
 [[camera]]
 name = "front \"left\" \\ 1"

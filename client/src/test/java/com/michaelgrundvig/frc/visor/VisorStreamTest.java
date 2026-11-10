@@ -2,6 +2,10 @@ package com.michaelgrundvig.frc.visor;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -26,6 +30,28 @@ class VisorStreamTest {
       assertThat(VisorStream.url(each.host(), each.camera()))
           .as(each.camera())
           .isEqualTo(each.url());
+    }
+  }
+
+  /**
+   * The ports and paths Visor's own tests check too (testdata/addresses.json, tests/addresses.rs):
+   * the port frames go to, the live view's port, and each camera's stream's path.
+   */
+  @Test
+  void thePortsAndPathsAreTheOnesVisorUses() throws IOException {
+    JsonNode shared =
+        new ObjectMapper()
+            .readTree(Path.of(System.getProperty("visor.testdata"), "addresses.json").toFile());
+    assertThat(VisorReceiver.DEFAULT_PORT).isEqualTo(shared.get("frames_port").asInt());
+    assertThat(VisorStream.PORT).isEqualTo(shared.get("live_view_port").asInt());
+    for (JsonNode row : shared.get("streams")) {
+      String camera = row.get("camera").asText();
+      assertThat(VisorStream.url("10.12.34.11", camera))
+          .as(camera)
+          .isEqualTo(
+              "http://10.12.34.11:"
+                  + shared.get("live_view_port").asInt()
+                  + row.get("path").asText());
     }
   }
 }

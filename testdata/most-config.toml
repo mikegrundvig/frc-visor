@@ -1,0 +1,29 @@
+# Visor's configuration, written by the robot's deploy: edits here are overwritten.
+team = 25599
+port = 65535
+
+[[camera]]
+name = "z"
+index = 255
+device = "/dev/video9"
+width = 65535
+height = 65535
+fps = 1000
+min_tag_px = 30000
+time_offset_us = 9223372036854775
+exposure_us = 10000000
+gain = 2147483647
+stream_scale = 1.0
+stream_fps = 1000
+stream_quality = 100
+[camera.controls]
+"brightness" = 9223372036854775807
+"contrast" = -9223372036854775808
+[camera.lens]
+width = 65535
+height = 65535
+fx = 1.0E300
+fy = 1.0E300
+cx = 1.0E300
+cy = 1.0E300
+distortion = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]

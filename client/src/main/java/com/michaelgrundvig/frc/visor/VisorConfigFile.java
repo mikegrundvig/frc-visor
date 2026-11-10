@@ -9,8 +9,10 @@ import org.jspecify.annotations.Nullable;
 
 /**
  * Visor's configuration file (deploy/visor.example.toml), written for one coprocessor: what a
- * robot's deploy puts beside the program. Visor checks it as it reads it ({@code visor check}), so
- * this writes what it's given and leaves the judging to Visor.
+ * robot's deploy puts beside the program. Each setting is refused here as Visor would refuse it
+ * (Visor's src/config.rs), so a robot definition Visor can't run fails as the robot program builds
+ * its configuration, not when the board checks it ({@code visor check}). The file always names the
+ * port the robot receives frames on ({@link VisorReceiver#DEFAULT_PORT} unless {@link #port} says).
  *
  * <pre>{@code
  * VisorConfigFile file = VisorConfigFile.forTeam(1234);
@@ -24,7 +26,14 @@ import org.jspecify.annotations.Nullable;
  * }</pre>
  */
 public final class VisorConfigFile {
+  /** The highest team number Visor takes: its address, 10.TE.AM.2, has room for no more. */
+  static final int MOST_TEAM = 25_599;
+
+  /** A camera's frame rate when its entry gives none: Visor's own. */
+  static final int VISOR_FPS = 60;
+
   private final int team;
+  private int port = VisorReceiver.DEFAULT_PORT;
   private final List<Camera> cameras = new ArrayList<>();
 
   private VisorConfigFile(int team) {
@@ -33,10 +42,15 @@ public final class VisorConfigFile {
 
   /** Frames to the robot controller of this team, at 10.TE.AM.2. */
   public static VisorConfigFile forTeam(int team) {
-    if (team <= 0) {
-      throw new IllegalArgumentException("a team number is positive, not " + team);
-    }
+    within("a team number", team, 1, MOST_TEAM);
     return new VisorConfigFile(team);
+  }
+
+  /** The UDP port the robot receives frames on: {@link VisorReceiver#DEFAULT_PORT} unless set. */
+  public VisorConfigFile port(int port) {
+    within("the robot's UDP port", port, 1, 65_535);
+    this.port = port;
+    return this;
   }
 
   /**
@@ -51,9 +65,31 @@ public final class VisorConfigFile {
    * @param height the frame size it runs at
    */
   public Camera camera(String name, int index, String device, int width, int height) {
+    if (name.isBlank()) {
+      throw new IllegalArgumentException("a camera needs a name");
+    }
+    within("a camera's index", index, 0, 255);
+    within("a frame's width", width, 1, 65_535);
+    within("a frame's height", height, 1, 65_535);
+    for (Camera other : cameras) {
+      if (other.name.equals(name)) {
+        throw new IllegalArgumentException("two cameras are named \"" + name + "\"");
+      }
+      if (other.index == index) {
+        throw new IllegalArgumentException("two cameras have index " + index);
+      }
+    }
     Camera camera = new Camera(name, index, device, width, height);
     cameras.add(camera);
     return camera;
+  }
+
+  /** Refuses {@code value} unless it's from {@code least} to {@code most}, naming {@code what}. */
+  private static void within(String what, long value, long least, long most) {
+    if (value < least || value > most) {
+      throw new IllegalArgumentException(
+          what + " is from " + least + " to " + most + ", not " + value);
+    }
   }
 
   /**
@@ -61,6 +97,9 @@ public final class VisorConfigFile {
    * and gain, the camera's own.
    */
   public static final class Camera {
+    /** The most a time offset can be in microseconds: Visor works in nanoseconds, in 64 bits. */
+    static final long MOST_OFFSET_MICROS = Long.MAX_VALUE / 1000;
+
     private final String name;
     private final int index;
     private final String device;
@@ -85,20 +124,30 @@ public final class VisorConfigFile {
       this.height = height;
     }
 
-    /** Frames a second to ask the camera for. */
+    /** Frames a second to ask the camera for: 1 to 1000, and no fewer than its live view's. */
     public Camera fps(int fps) {
+      within("a camera's frame rate", fps, 1, 1000);
+      if (streamFps > fps) {
+        throw new IllegalArgumentException(
+            "a camera's frame rate is at least its live view's, " + streamFps + ", not " + fps);
+      }
       this.fps = fps;
       return this;
     }
 
-    /** The smallest tag NAPA looks for, in pixels. */
+    /** The smallest tag NAPA looks for, in pixels: 8 to 30000. */
     public Camera minTagPixels(int pixels) {
+      within("the smallest tag", pixels, 8, 30_000);
       this.minTagPixels = pixels;
       return this;
     }
 
-    /** Added to every capture time: the spin test's result. */
+    /**
+     * Added to every capture time: the spin test's result. Visor works in nanoseconds, so at most
+     * about 292 years either way.
+     */
     public Camera timeOffsetMicros(long micros) {
+      within("a time offset in microseconds", micros, -MOST_OFFSET_MICROS, MOST_OFFSET_MICROS);
       this.timeOffsetMicros = micros;
       return this;
     }
@@ -108,9 +157,7 @@ public final class VisorConfigFile {
      * this, every time it opens the camera. Without one, the camera's own automatic exposure.
      */
     public Camera exposureMicros(long micros) {
-      if (micros <= 0) {
-        throw new IllegalArgumentException("an exposure is a positive time, not " + micros);
-      }
+      within("an exposure in microseconds", micros, 1, 10_000_000);
       this.exposureMicros = micros;
       return this;
     }
@@ -120,6 +167,8 @@ public final class VisorConfigFile {
      * Without one, the camera's default.
      */
     public Camera gain(long gain) {
+      // Frames carry the gain as a 32-bit number, as V4L2 sets it.
+      within("a gain", gain, 0, Integer.MAX_VALUE);
       this.gain = gain;
       return this;
     }
@@ -128,22 +177,17 @@ public final class VisorConfigFile {
      * The camera's live view ({@link VisorStream}). Without one, Visor's own: half the camera's
      * size, 10 a second, quality 60.
      *
-     * @param scale its size as a share of the camera's, across and down: 0.5 is half
+     * @param scale its size as a share of the camera's, across and down, 0.05 to 1: 0.5 is half
      * @param fps pictures a second while someone watches, at most the camera's
      * @param quality JPEG quality, 1 to 100
      */
     public Camera stream(double scale, int fps, int quality) {
-      if (!(scale > 0 && scale <= 1)) {
+      if (!(scale >= 0.05 && scale <= 1)) {
         throw new IllegalArgumentException(
-            "a live view's scale is a share of the camera's size, above 0 and at most 1, not "
-                + scale);
+            "a live view's scale is a share of the camera's size, 0.05 to 1, not " + scale);
       }
-      if (fps <= 0) {
-        throw new IllegalArgumentException("a live view's rate is positive, not " + fps);
-      }
-      if (quality < 1 || quality > 100) {
-        throw new IllegalArgumentException("a JPEG quality is 1 to 100, not " + quality);
-      }
+      within("a live view's rate", fps, 1, this.fps > 0 ? this.fps : VISOR_FPS);
+      within("a JPEG quality", quality, 1, 100);
       this.streamScale = scale;
       this.streamFps = fps;
       this.streamQuality = quality;
@@ -155,13 +199,17 @@ public final class VisorConfigFile {
      * exposure and gain, in the order given, which matters where one control depends on another.
      */
     public Camera control(String control, long value) {
-      controls.put(Objects.requireNonNull(control), value);
+      if (control.isBlank()) {
+        throw new IllegalArgumentException("a control needs a name");
+      }
+      controls.put(control, value);
       return this;
     }
 
     /**
-     * The lens calibration ({@code tools/calibrate.py}): the frame size it was made at, focal
-     * lengths and centre in pixels, and OpenCV's distortion coefficients (0, 4, 5 or 8).
+     * The lens calibration ({@code tools/calibrate.py}): the frame size it was made at, which is
+     * the camera's, positive focal lengths and the centre in pixels, and OpenCV's distortion
+     * coefficients (0, 4, 5 or 8).
      */
     public Camera lens(
         int lensWidth,
@@ -183,6 +231,26 @@ public final class VisorConfigFile {
         if (!Double.isFinite(value)) {
           throw new IllegalArgumentException("a lens value is a number, not " + value);
         }
+      }
+      if (lensWidth != width || lensHeight != height) {
+        throw new IllegalArgumentException(
+            "a lens calibrated at "
+                + lensWidth
+                + "x"
+                + lensHeight
+                + " is for another size than the"
+                + " camera's, "
+                + width
+                + "x"
+                + height
+                + ": calibrate at the size it runs");
+      }
+      if (!(fx > 0 && fy > 0)) {
+        throw new IllegalArgumentException("focal lengths are positive, not " + fx + ", " + fy);
+      }
+      if (!List.of(0, 4, 5, 8).contains(distortion.length)) {
+        throw new IllegalArgumentException(
+            "OpenCV's distortion has 0, 4, 5 or 8 coefficients, not " + distortion.length);
       }
       this.lens = values;
       return this;
@@ -245,6 +313,7 @@ public final class VisorConfigFile {
     out.append(
         "# Visor's configuration, written by the robot's deploy: edits here are overwritten.\n");
     out.append("team = ").append(team).append('\n');
+    out.append("port = ").append(port).append('\n');
     for (Camera camera : cameras) {
       camera.write(out);
     }

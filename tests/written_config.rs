@@ -1,7 +1,11 @@
 //! The configuration the robot client writes for a deploy (testdata/written-config.toml, from
 //! VisorConfigFileTest), read as `visor run` reads it: every setting lands where it was meant to.
+//! And the client's files with every setting at the least and the most it lets through
+//! (least-config.toml, most-config.toml): `visor check` passes both, so the client refuses nothing
+//! Visor takes, and takes nothing Visor refuses.
 
 use std::path::Path;
+use std::process::Command;
 
 use visor::config::{Config, Stream};
 
@@ -60,4 +64,21 @@ fn the_clients_file_reads_setting_by_setting() {
     assert_eq!((back.exposure_us, back.gain), (None, None));
     assert_eq!(back.stream, Stream::default());
     assert!(back.controls.is_empty() && back.lens.is_none());
+}
+
+#[test]
+fn visor_check_passes_the_clients_least_and_most() {
+    for golden in ["least-config.toml", "most-config.toml"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata")
+            .join(golden);
+        let output = Command::new(env!("CARGO_BIN_EXE_visor"))
+            .arg("check")
+            .arg("--config")
+            .arg(&path)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{golden}: {stderr}");
+    }
 }

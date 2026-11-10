@@ -1,0 +1,26 @@
+# Visor's configuration, written by the robot's deploy: edits here are overwritten.
+team = 1
+port = 1
+
+[[camera]]
+name = "a"
+index = 0
+device = "/dev/video0"
+width = 1
+height = 1
+fps = 1
+min_tag_px = 8
+time_offset_us = -9223372036854775
+exposure_us = 1
+gain = 0
+stream_scale = 0.05
+stream_fps = 1
+stream_quality = 1
+[camera.lens]
+width = 1
+height = 1
+fx = 4.9E-324
+fy = 4.9E-324
+cx = -1.0E300
+cy = -1.0E300
+distortion = []
