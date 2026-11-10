@@ -125,13 +125,21 @@ fn told_systemd(test: &str, config: &str, watchdog: Duration, listening: Duratio
 fn visor_tells_systemd_it_s_ready_then_alive_while_its_detect_threads_run() {
     let watchdog = Duration::from_millis(400);
     let listening = Duration::from_secs(2);
-    // (the board, its configuration)
-    let rows = [(
-        "a camera absent: its capture thread retries, its detect thread waits",
-        format!("robot = \"127.0.0.1\"\nport = 9\n{CAMERA}"),
-    )];
-    for (board, config) in rows {
-        let heard = told_systemd("notify", &config, watchdog, listening);
+    // (a short name for the row's files, the board, its configuration)
+    let rows = [
+        (
+            "absent",
+            "a camera absent: its capture thread retries, its detect thread waits",
+            format!("robot = \"127.0.0.1\"\nport = 9\n{CAMERA}"),
+        ),
+        (
+            "none",
+            "no camera configured: it sits idle",
+            "robot = \"127.0.0.1\"\nport = 9\n".to_string(),
+        ),
+    ];
+    for (short, board, config) in rows {
+        let heard = told_systemd(short, &config, watchdog, listening);
         assert_eq!(
             heard.first().map(String::as_str),
             Some("READY=1"),

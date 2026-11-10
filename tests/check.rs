@@ -24,6 +24,15 @@ fn broken_file() -> PathBuf {
     path
 }
 
+/// The configuration the robot writes for a board with none of its cameras.
+fn empty_file() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("visor-check-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("visor.toml");
+    std::fs::write(&path, "team = 1234\n").unwrap();
+    path
+}
+
 #[test]
 fn check_passes_a_good_file_and_names_what_is_wrong_with_a_bad_one() {
     let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/visor.example.toml");
@@ -33,6 +42,11 @@ fn check_passes_a_good_file_and_names_what_is_wrong_with_a_bad_one() {
             example,
             true,
             "camera 0 \"front-left\": 1600x1304 at 60 fps",
+        ),
+        (
+            empty_file(),
+            true,
+            "no camera: Visor opens none, and sits idle",
         ),
         (
             broken_file(),
@@ -66,5 +80,7 @@ fn check_passes_a_good_file_and_names_what_is_wrong_with_a_bad_one() {
         );
         assert!(printed.contains(said), "{}: {printed}", path.display());
     }
-    std::fs::remove_dir_all(cases[1].0.parent().unwrap()).unwrap();
+    for (path, _, _) in &cases[1..3] {
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 }

@@ -29,6 +29,7 @@ pub const DEFAULT_STREAM_QUALITY: u8 = 60;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub robot: SocketAddr,
+    /// None on a board that has none of the robot's cameras: Visor then opens none, and sits idle.
     pub cameras: Vec<Camera>,
 }
 
@@ -215,9 +216,6 @@ impl Config {
             return Err(ConfigError(
                 "port is the robot's UDP port, 1 to 65535, not 0".into(),
             ));
-        }
-        if file.cameras.is_empty() {
-            return Err(ConfigError("no [[camera]]".into()));
         }
         let config_id = wire::config_id(text.as_bytes());
         let mut names = HashSet::new();
@@ -447,6 +445,16 @@ mod tests {
     }
 
     #[test]
+    fn a_board_with_none_of_the_robot_s_cameras_takes_a_configuration_with_none() {
+        // As the robot writes it for a board that has none of its cameras plugged in.
+        for text in ["team = 1234\n", "robot = \"10.12.34.2\"\nport = 5807\n"] {
+            let config = Config::parse(text).unwrap();
+            assert_eq!(config.robot, "10.12.34.2:5807".parse().unwrap(), "{text}");
+            assert!(config.cameras.is_empty(), "{text}");
+        }
+    }
+
+    #[test]
     fn a_slow_camera_s_live_view_is_at_most_its_rate() {
         let config = Config::parse(&format!("team = 1234\n{CAMERA}fps = 5\n")).unwrap();
         assert_eq!(config.cameras[0].stream.fps, 5);
@@ -533,7 +541,6 @@ mod tests {
                 "either `robot`",
             ),
             ("team = 0\n".to_string() + CAMERA, "isn't a team number"),
-            ("team = 1234\n".to_string(), "no [[camera]]"),
             (
                 format!("team = 1234\n{CAMERA}{CAMERA}"),
                 "named \"front-left\"",

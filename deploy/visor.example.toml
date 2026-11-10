@@ -7,6 +7,9 @@ team = 1234
 # port = 5807
 # tag_size_m = 0.1651   # the tags' black square: 6.5 in, FRC's since 2024
 
+# Each camera. A board with none of the robot's cameras gets none: Visor opens no camera, and sits
+# idle until the robot configures it again.
+
 [[camera]]
 name = "front-left"     # for logs
 index = 0               # sent in every frame; unique on the robot

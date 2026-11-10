@@ -17,6 +17,9 @@ pub fn check(path: &Path) -> Result<()> {
         wire::VERSION_ID,
         config.robot
     );
+    if config.cameras.is_empty() {
+        println!("  no camera: Visor opens none, and sits idle");
+    }
     for camera in &config.cameras {
         let exposure = match camera.exposure_us {
             Some(us) => format!("exposure {:.1} ms", f64::from(us) / 1000.0),
