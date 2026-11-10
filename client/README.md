@@ -12,8 +12,13 @@ messages with it, so robot code never links GPL code.
   ([docs/live-view.md](../docs/live-view.md)): the browser fetches it from the board directly.
 - `CameraToTag` is a tag's pose from the camera in WPILib's axes (camera-to-tag).
 - `NtpResponder` answers chrony on the coprocessors with the robot's clock (UDP 5806).
-- `VisorConfigFile` writes Visor's configuration for a coprocessor, as a robot's deploy does:
-  `testdata/written-config.toml` is its output, which Visor's own tests read back.
+- `VisorConfigFile` writes Visor's configuration for a coprocessor, as a robot's deploy does,
+  refusing each setting Visor would refuse, and always naming the port the robot receives on:
+  `testdata/written-config.toml` is its output, which Visor's own tests read back, and
+  `least-config.toml` and `most-config.toml` every setting at its least and most, which they run
+  through `visor check`.
+- `NtpResponder` and `VisorReceiver` wait through errors that keep coming, rather than spin, and
+  the responder answers on after the robot's clock throws.
 - `VisorPack` names Visor's Spotter pack ([spotter/visor](../spotter/visor/README.md)) for Spotter's
   manager: its status values, which say what's on disk and what's running, its actions and their
   responses, the parsing of a status report, a configuration's hash as the status gives it and the
