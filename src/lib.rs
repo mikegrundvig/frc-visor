@@ -17,6 +17,7 @@ pub mod napa;
 pub mod pipeline;
 pub mod pose;
 pub mod running;
+pub mod service;
 pub mod settings;
 pub mod stream;
 pub mod wire;
