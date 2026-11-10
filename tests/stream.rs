@@ -557,6 +557,20 @@ fn get_from(from: IpAddr, address: SocketAddr, path: &str, host: &str) -> (u16, 
     answer(&mut connection)
 }
 
+/// The status of a request for the page from `from`, or none if the connection is closed unanswered:
+/// turned away, as a connection past the most is until a place is free.
+fn status_from(from: IpAddr, address: SocketAddr, host: &str) -> Option<u16> {
+    let mut connection = connect_from(from, address);
+    write!(
+        connection,
+        "GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    )
+    .ok()?;
+    let mut status = String::new();
+    BufReader::new(connection).read_line(&mut status).ok()?;
+    status.split_whitespace().nth(1)?.parse().ok()
+}
+
 /// An answer's status, and its body when it says its length: a stream's never ends, so it's left
 /// unread.
 fn answer(connection: &mut TcpStream) -> (u16, String) {
@@ -689,7 +703,7 @@ fn idle_connections_are_closed_and_those_past_the_most_turned_away_but_the_contr
         // Once they're closed for sending nothing, there's room again.
         drop(held);
         wait_until("a connection's place is free", || {
-            get_from(anyone, address, "/", &host).0 == 200
+            status_from(anyone, address, &host) == Some(200)
         });
     });
     assert_detection_kept_up(&received);
