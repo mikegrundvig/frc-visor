@@ -109,7 +109,8 @@ until a team sets one.
 
 Visor finds the controls by V4L2's standard IDs (`auto_exposure`, its manual mode 1;
 `exposure_time_absolute`, in 100 µs; `gain`), whatever the kernel names them. A camera without one,
-or a value outside its range, is a warning in Visor's log, said once, and the camera keeps
+a value outside its range, or a value the camera refuses or keeps otherwise (rounded to its step, or
+an exposure held to its frame time), is a warning in Visor's log, said once, and the camera keeps
 capturing at what it has. Any other control goes under `[camera.controls]` by the name
 `v4l2-ctl --list-ctrls` prints, set after these; a name the camera doesn't have stops it opening.
 

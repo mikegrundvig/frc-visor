@@ -145,9 +145,10 @@ pub struct Applied {
 /// Sets a camera's exposure and gain from its configuration, then its other controls in order, and
 /// reads back what's in effect.
 ///
-/// A camera without one of the exposure or gain controls, or a value outside its range (set to the
-/// nearest end), is a warning. A control under `controls` the camera doesn't have fails the open,
-/// unlike those: it's named by hand, so a misspelling is the likelier cause.
+/// A camera without one of the exposure or gain controls, a value outside its range (set to the
+/// nearest end), or a value the camera refuses or keeps otherwise (rounded to its step, say), is a
+/// warning. A control under `controls` the camera doesn't have fails the open, unlike those: it's
+/// named by hand, so a misspelling is the likelier cause.
 pub fn apply(device: &impl Controls, camera: &Camera) -> io::Result<Applied> {
     let known = match device.list() {
         Ok(known) => known,
@@ -169,7 +170,7 @@ pub fn apply(device: &impl Controls, camera: &Camera) -> io::Result<Applied> {
     match camera.exposure_us {
         Some(us) => {
             match find(AUTO_EXPOSURE) {
-                Some(auto) => written.set(device, auto, MANUAL, &mut warnings),
+                Some(auto) => written.set(device, auto, MANUAL, &mut warnings, plain),
                 None => warnings.push(
                     "the camera has no auto_exposure control, so its automatic exposure can't be \
                      turned off: exposure_us may not hold"
@@ -179,10 +180,8 @@ pub fn apply(device: &impl Controls, camera: &Camera) -> io::Result<Applied> {
             match find(EXPOSURE_TIME) {
                 Some(time) => {
                     let units = (f64::from(us) / f64::from(EXPOSURE_UNIT_US)).round() as i64;
-                    let value = within(time, units, &mut warnings, |v| {
-                        format!("{} µs", v * i64::from(EXPOSURE_UNIT_US))
-                    });
-                    written.set(device, time, value, &mut warnings);
+                    let value = within(time, units, &mut warnings, microseconds);
+                    written.set(device, time, value, &mut warnings, microseconds);
                 }
                 None => warnings.push(
                     "the camera has no exposure_time_absolute control, so its exposure stays its \
@@ -194,20 +193,22 @@ pub fn apply(device: &impl Controls, camera: &Camera) -> io::Result<Applied> {
         // The camera's own: its automatic exposure back on, as the camera starts.
         None => {
             if let Some(auto) = find(AUTO_EXPOSURE) {
-                written.set(device, auto, auto.default, &mut warnings);
+                written.set(device, auto, auto.default, &mut warnings, plain);
             }
         }
     }
 
     match (camera.gain, find(GAIN)) {
         (Some(gain), Some(control)) => {
-            let value = within(control, gain, &mut warnings, |v| v.to_string());
-            written.set(device, control, value, &mut warnings);
+            let value = within(control, gain, &mut warnings, plain);
+            written.set(device, control, value, &mut warnings, plain);
         }
         (Some(_), None) => {
             warnings.push("the camera has no gain control, so its gain stays its own".into())
         }
-        (None, Some(control)) => written.set(device, control, control.default, &mut warnings),
+        (None, Some(control)) => {
+            written.set(device, control, control.default, &mut warnings, plain)
+        }
         (None, None) => {}
     }
 
@@ -237,6 +238,16 @@ pub fn apply(device: &impl Controls, camera: &Camera) -> io::Result<Applied> {
     })
 }
 
+/// A control's value as the configuration has it: the exposure in µs, from V4L2's units.
+fn microseconds(units: i64) -> String {
+    format!("{} µs", units * i64::from(EXPOSURE_UNIT_US))
+}
+
+/// A control's value as it is: the gain's, and the auto exposure menu's.
+fn plain(value: i64) -> String {
+    value.to_string()
+}
+
 /// A value held to a control's range, with a warning when it isn't in it; `shown` writes a value
 /// in the configuration's terms.
 fn within(
@@ -264,16 +275,34 @@ fn within(
 struct Written(Vec<(u32, i64)>);
 
 impl Written {
+    /// Sets a control, and reads it back: a camera may round a value to its step, or hold it
+    /// tighter than its range says (an exposure to the frame time). A value it refuses, or keeps
+    /// otherwise, is a warning; `shown` writes a value in the configuration's terms.
     fn set(
         &mut self,
         device: &impl Controls,
         control: &Control,
         value: i64,
         warnings: &mut Vec<String>,
+        shown: impl Fn(i64) -> String,
     ) {
-        match device.set(control, value) {
-            Ok(()) => self.0.push((control.id, value)),
-            Err(error) => warnings.push(format!("setting {} to {value}: {error}", control.name)),
+        if let Err(error) = device.set(control, value) {
+            warnings.push(format!(
+                "setting {} to {}: {error}",
+                control.name,
+                shown(value)
+            ));
+            return;
+        }
+        self.0.push((control.id, value));
+        match device.get(control) {
+            Ok(kept) if kept != value => warnings.push(format!(
+                "{}: the camera took {}, not {}",
+                control.name,
+                shown(kept),
+                shown(value)
+            )),
+            _ => {}
         }
     }
 
@@ -404,6 +433,11 @@ mod tests {
         unreadable: Option<u32>,
         /// Whether its controls can't be listed.
         unlisted: bool,
+        /// A control the camera refuses to set, as one busy streaming does.
+        refuses: Option<u32>,
+        /// What the camera keeps of a value it's given: the value itself, or one it rounds or
+        /// clamps.
+        keeps: fn(&Control, i64) -> i64,
     }
 
     impl Fake {
@@ -415,6 +449,8 @@ mod tests {
                 writes: RefCell::new(Vec::new()),
                 unreadable: None,
                 unlisted: false,
+                refuses: None,
+                keeps: |_, value| value,
             }
         }
 
@@ -443,7 +479,11 @@ mod tests {
                 "{} {value}",
                 control.name
             );
+            if self.refuses == Some(control.id) {
+                return Err(io::Error::from_raw_os_error(libc::EBUSY));
+            }
             self.writes.borrow_mut().push((control.name.clone(), value));
+            let value = (self.keeps)(control, value);
             let mut values = self.values.borrow_mut();
             values
                 .iter_mut()
@@ -516,11 +556,23 @@ mod tests {
     struct Case {
         name: &'static str,
         controls: Vec<Control>,
+        camera_does: Does,
         exposure_us: Option<u32>,
         gain: Option<i64>,
         writes: Vec<(&'static str, i64)>,
         in_effect: InEffect,
         warnings: Vec<&'static str>,
+    }
+
+    /// What a camera does with a value it's given.
+    enum Does {
+        /// Takes it as given.
+        Takes,
+        /// Refuses this control: busy, as some are while streaming.
+        Refuses(u32),
+        /// Takes it, but keeps another value: rounded to its step, or clamped further than its
+        /// range says.
+        Keeps(fn(&Control, i64) -> i64),
     }
 
     #[test]
@@ -530,6 +582,7 @@ mod tests {
             Case {
                 name: "a camera with every control: auto exposure off, 1 ms, gain 40",
                 controls: all(),
+                camera_does: Does::Takes,
                 exposure_us: Some(1000),
                 gain: Some(40),
                 writes: vec![
@@ -547,6 +600,7 @@ mod tests {
             Case {
                 name: "nothing configured: the camera's own, put back",
                 controls: all(),
+                camera_does: Does::Takes,
                 exposure_us: None,
                 gain: None,
                 writes: vec![("auto_exposure", 3), ("gain", 16)],
@@ -560,6 +614,7 @@ mod tests {
             Case {
                 name: "an exposure alone: the gain is the camera's own",
                 controls: all(),
+                camera_does: Does::Takes,
                 exposure_us: Some(1250),
                 gain: None,
                 writes: vec![
@@ -577,6 +632,7 @@ mod tests {
             Case {
                 name: "a camera with no gain control",
                 controls: vec![auto_exposure(), exposure_time()],
+                camera_does: Does::Takes,
                 exposure_us: Some(1000),
                 gain: Some(40),
                 writes: vec![("auto_exposure", 1), ("exposure_time_absolute", 10)],
@@ -590,6 +646,7 @@ mod tests {
             Case {
                 name: "a camera with no manual exposure: no auto_exposure control",
                 controls: vec![exposure_time(), gain()],
+                camera_does: Does::Takes,
                 exposure_us: Some(1000),
                 gain: Some(40),
                 writes: vec![("exposure_time_absolute", 10), ("gain", 40)],
@@ -603,6 +660,7 @@ mod tests {
             Case {
                 name: "a camera with no exposure time",
                 controls: vec![auto_exposure(), gain()],
+                camera_does: Does::Takes,
                 exposure_us: Some(1000),
                 gain: None,
                 writes: vec![("auto_exposure", 1), ("gain", 16)],
@@ -616,6 +674,7 @@ mod tests {
             Case {
                 name: "values outside the camera's ranges: the nearest end",
                 controls: all(),
+                camera_does: Does::Takes,
                 exposure_us: Some(1_000_000),
                 gain: Some(400),
                 writes: vec![
@@ -637,15 +696,103 @@ mod tests {
             Case {
                 name: "a camera with none of them",
                 controls: vec![brightness()],
+                camera_does: Does::Takes,
                 exposure_us: None,
                 gain: None,
                 writes: vec![],
                 in_effect: InEffect::default(),
                 warnings: vec![],
             },
+            Case {
+                name: "the camera refuses the exposure: it keeps its own, and says so",
+                controls: all(),
+                camera_does: Does::Refuses(EXPOSURE_TIME),
+                exposure_us: Some(1000),
+                gain: Some(40),
+                writes: vec![("auto_exposure", 1), ("gain", 40)],
+                in_effect: InEffect {
+                    exposure_us: Some(15_600),
+                    gain: Some(40),
+                    auto_exposure: Some(false),
+                },
+                warnings: vec![
+                    "setting exposure_time_absolute to 1000 µs: Device or resource busy",
+                ],
+            },
+            Case {
+                name: "the camera refuses the gain: it keeps its own, and says so",
+                controls: all(),
+                camera_does: Does::Refuses(GAIN),
+                exposure_us: Some(1000),
+                gain: Some(40),
+                writes: vec![("auto_exposure", 1), ("exposure_time_absolute", 10)],
+                in_effect: InEffect {
+                    exposure_us: Some(1000),
+                    gain: Some(16),
+                    auto_exposure: Some(false),
+                },
+                warnings: vec!["setting gain to 40: Device or resource busy"],
+            },
+            Case {
+                name: "the camera rounds the exposure to its step: what it took, and a warning",
+                controls: vec![
+                    auto_exposure(),
+                    Control {
+                        step: 4,
+                        ..exposure_time()
+                    },
+                    gain(),
+                ],
+                // As the kernel rounds a value to a control's step: 10 is 9, a step of 4 up from
+                // the minimum of 1.
+                camera_does: Does::Keeps(|control, value| {
+                    let step = control.step as i64;
+                    control.minimum + (value - control.minimum + step / 2) / step * step
+                }),
+                exposure_us: Some(1000),
+                gain: Some(40),
+                writes: vec![
+                    ("auto_exposure", 1),
+                    ("exposure_time_absolute", 10),
+                    ("gain", 40),
+                ],
+                in_effect: InEffect {
+                    exposure_us: Some(900),
+                    gain: Some(40),
+                    auto_exposure: Some(false),
+                },
+                warnings: vec!["exposure_time_absolute: the camera took 900 µs, not 1000 µs"],
+            },
+            Case {
+                name: "the camera clamps the exposure to its frame time, inside its range",
+                controls: all(),
+                // At 60 fps, a frame is 16.6 ms: longer than that is cut to it.
+                camera_does: Does::Keeps(|control, value| match control.id {
+                    EXPOSURE_TIME => value.min(166),
+                    _ => value,
+                }),
+                exposure_us: Some(30_000),
+                gain: Some(40),
+                writes: vec![
+                    ("auto_exposure", 1),
+                    ("exposure_time_absolute", 300),
+                    ("gain", 40),
+                ],
+                in_effect: InEffect {
+                    exposure_us: Some(16_600),
+                    gain: Some(40),
+                    auto_exposure: Some(false),
+                },
+                warnings: vec!["exposure_time_absolute: the camera took 16600 µs, not 30000 µs"],
+            },
         ];
         for case in cases {
-            let device = Fake::new(case.controls);
+            let mut device = Fake::new(case.controls);
+            match case.camera_does {
+                Does::Takes => {}
+                Does::Refuses(id) => device.refuses = Some(id),
+                Does::Keeps(keeps) => device.keeps = keeps,
+            }
             let applied = apply(&device, &camera(case.exposure_us, case.gain)).unwrap();
             let writes: Vec<(String, i64)> = case
                 .writes
