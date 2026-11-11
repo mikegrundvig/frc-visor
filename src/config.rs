@@ -638,6 +638,10 @@ mod tests {
                 "stream_fps is from 1 to the camera's fps (60), not 90",
             ),
             (
+                format!("team = 1234\n{CAMERA}fps = 30\nstream_fps = 31\n"),
+                "stream_fps is from 1 to the camera's fps (30), not 31",
+            ),
+            (
                 format!("team = 1234\n{CAMERA}stream_fps = 0\n"),
                 "stream_fps is from 1",
             ),
