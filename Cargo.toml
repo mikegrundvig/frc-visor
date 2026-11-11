@@ -33,7 +33,7 @@ sha2 = "0.10"
 socket2 = "0.6"
 tokio = { version = "1", features = ["net", "rt", "sync", "time"] }
 tokio-io-timeout = "1"
-toml = { version = "0.9", features = ["preserve_order"] }
+toml = { version = "1.2", features = ["preserve_order"] }
 v4l = "0.14"
 
 [build-dependencies]
