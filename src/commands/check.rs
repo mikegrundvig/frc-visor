@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use visor::config::Config;
-use visor::{stream, wire};
+use visor::{napa, stream, wire};
 
 use super::Result;
 
@@ -31,7 +31,7 @@ pub fn check(path: &Path) -> Result<()> {
         };
         let (width, height) = camera.stream.size(camera.width, camera.height);
         println!(
-            "  camera {} {:?}: {}x{} at {} fps, {}, {exposure}, {gain}, {}; tags {} m; live view \
+            "  camera {} {:?}: {}x{} at {} fps, {}, {exposure}, {gain}, {}; {} tags {} m; live view \
              {width}x{height} at {} fps, quality {}",
             camera.index,
             camera.name,
@@ -44,6 +44,7 @@ pub fn check(path: &Path) -> Result<()> {
             } else {
                 "no lens: corners only"
             },
+            napa::FAMILY.to_string_lossy(),
             camera.tag_size_m,
             camera.stream.fps,
             camera.stream.quality

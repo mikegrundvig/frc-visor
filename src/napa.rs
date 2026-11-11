@@ -7,8 +7,8 @@ use std::ptr::NonNull;
 
 use crate::image::GrayImage;
 
-/// The tag family FRC uses.
-const FAMILY: &CStr = c"tag36h11";
+/// The tag family FRC uses, and the only one Visor detects: no setting chooses another.
+pub const FAMILY: &CStr = c"tag36h11";
 /// Room for more tags than a frame will ever hold.
 const MAX_DETECTIONS: usize = 64;
 

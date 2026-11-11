@@ -39,10 +39,11 @@ fn check_passes_a_good_file_and_names_what_is_wrong_with_a_bad_one() {
     // (the file, whether it passes, part of what's printed: stdout on a pass, stderr on a refusal)
     let cases = [
         (
-            example,
+            example.clone(),
             true,
             "camera 0 \"front-left\": 1600x1304 at 60 fps",
         ),
+        (example, true, "tag36h11 tags 0.1651 m"),
         (
             empty_file(),
             true,
@@ -80,7 +81,7 @@ fn check_passes_a_good_file_and_names_what_is_wrong_with_a_bad_one() {
         );
         assert!(printed.contains(said), "{}: {printed}", path.display());
     }
-    for (path, _, _) in &cases[1..3] {
+    for (path, _, _) in &cases[2..4] {
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

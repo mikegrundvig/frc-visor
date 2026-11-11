@@ -70,10 +70,10 @@ fn the_clients_file_reads_setting_by_setting() {
 }
 
 #[test]
-fn visor_check_passes_the_clients_files_and_says_their_tag_size() {
+fn visor_check_passes_the_clients_files_and_says_their_tags() {
     // (the file, part of what `visor check` prints)
     let rows = [
-        ("written-config.toml", "tags 0.15 m"),
+        ("written-config.toml", "tag36h11 tags 0.15 m"),
         ("least-config.toml", "frames to 10.0.1.2:1"),
         ("most-config.toml", "tags 9.999999999999998 m"),
     ];

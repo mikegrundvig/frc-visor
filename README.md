@@ -27,6 +27,9 @@ field layout, no multi-tag solving. Its one page is each camera's live view, to 
 - **The clock.** chrony keeps the coprocessor's clock on the robot program's, through a small NTP
   responder in the robot program (see [docs/wire.md](docs/wire.md#the-capture-time)). Each frame's
   kernel timestamp becomes robot time, plus a per-camera offset you measure.
+- **Tags.** FRC's family, tag36h11, is the only one Visor detects, and no setting chooses another.
+  `tag_size_m` is their black square (6.5 in unless given), which a robot's deploy writes from its
+  field; `visor check` prints both for each camera.
 - **Poses.** With a camera's lens calibration in the configuration, each tag's two poses are solved
   as OpenCV's IPPE does it (`SOLVEPNP_IPPE_SQUARE`): about 3 µs per tag on a laptop. Visor's
   undistortion runs until it converges, where OpenCV's stops at five steps.
