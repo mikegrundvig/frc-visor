@@ -61,13 +61,17 @@ fn camera() -> Camera {
 
 /// Runs the detect thread on `frames`, one at a time, and returns what the robot received.
 fn send_through(frames: Vec<Captured>, synced: bool) -> Vec<Frame> {
+    send_through_as(&camera(), frames, synced)
+}
+
+/// As [`send_through`], for this camera.
+fn send_through_as(camera: &Camera, frames: Vec<Captured>, synced: bool) -> Vec<Frame> {
     let robot = UdpSocket::bind("127.0.0.1:0").unwrap();
     robot
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
     sender.connect(robot.local_addr().unwrap()).unwrap();
-    let camera = camera();
     let latest = Latest::new();
     let stop = AtomicBool::new(false);
     let count = frames.len();
@@ -77,7 +81,7 @@ fn send_through(frames: Vec<Captured>, synced: bool) -> Vec<Frame> {
             let mut detector = Detector::new(camera.min_tag_px).unwrap();
             let mut send = |bytes: &[u8]| sender.send(bytes).map(|_| ());
             pipeline::run(
-                &camera,
+                camera,
                 &latest,
                 &mut detector,
                 &Clocks1000 { synced },
@@ -277,6 +281,45 @@ fn each_frame_reaches_the_robot_with_its_tags_and_robot_time() {
                 known.id
             );
         }
+    }
+}
+
+#[test]
+fn poses_are_solved_at_the_tag_size_the_configuration_gives() {
+    // The rendered tag is the default's 6.5 in. Told it's another size, the same corners are a tag
+    // that much nearer or farther along the same line, turned the same way.
+    let scene = common::scene("one-tag");
+    let known = &scene.tags[0];
+    // (the file's tag_size_m line, the distance as a share of the true one)
+    let rows = [
+        ("", 1.0),
+        ("tag_size_m = 0.1651\n", 1.0),
+        ("tag_size_m = 0.3302\n", 2.0),
+        ("tag_size_m = 0.08255\n", 0.5),
+    ];
+    for (line, share) in rows {
+        let text = format!(
+            "{line}team = 1234\n[[camera]]\nname = \"test\"\nindex = 5\ndevice = \"/dev/null\"\n\
+             width = 1600\nheight = 1304\n"
+        );
+        let configured = &visor::config::Config::parse(&text).unwrap().cameras[0];
+        let camera = Camera {
+            tag_size_m: configured.tag_size_m,
+            ..camera()
+        };
+        let received = send_through_as(&camera, vec![captured(&scene, 0, false)], true);
+        let [best, _] = received[0].tags[0].poses.expect("poses, with a lens");
+        let (rotation, position) = pose_of(best);
+        let expected = known.pose.translation_m * share;
+        let off = (position - expected).norm();
+        assert!(
+            off < 0.001 * share,
+            "{line:?}: {off:.5} m from {expected:?}"
+        );
+        let degrees_off = (rotation.inverse() * known.pose.rotation)
+            .angle()
+            .to_degrees();
+        assert!(degrees_off < 0.05, "{line:?}: {degrees_off:.3} degrees off");
     }
 }
 

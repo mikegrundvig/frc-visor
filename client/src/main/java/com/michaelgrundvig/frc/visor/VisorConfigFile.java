@@ -34,6 +34,7 @@ public final class VisorConfigFile {
 
   private final int team;
   private int port = VisorReceiver.DEFAULT_PORT;
+  private double tagSizeMeters;
   private final List<Camera> cameras = new ArrayList<>();
 
   private VisorConfigFile(int team) {
@@ -50,6 +51,21 @@ public final class VisorConfigFile {
   public VisorConfigFile port(int port) {
     within("the robot's UDP port", port, 1, 65_535);
     this.port = port;
+    return this;
+  }
+
+  /**
+   * The side of the tags' black square, in metres, more than 0 and less than 10: the field's, so
+   * every camera's poses are solved at the size of the tags it sees. Without one, Visor's own
+   * default, an FRC tag's 6.5 inches, which is there for files written by hand.
+   */
+  public VisorConfigFile tagSizeMeters(double meters) {
+    if (!(meters > 0 && meters < 10)) {
+      throw new IllegalArgumentException(
+          "a tag's size is its black square in metres, more than 0 and less than 10, not "
+              + meters);
+    }
+    this.tagSizeMeters = meters;
     return this;
   }
 
@@ -314,6 +330,9 @@ public final class VisorConfigFile {
         "# Visor's configuration, written by the robot's deploy: edits here are overwritten.\n");
     out.append("team = ").append(team).append('\n');
     out.append("port = ").append(port).append('\n');
+    if (tagSizeMeters > 0) {
+      out.append("tag_size_m = ").append(number(tagSizeMeters)).append('\n');
+    }
     for (Camera camera : cameras) {
       camera.write(out);
     }

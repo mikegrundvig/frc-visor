@@ -31,8 +31,8 @@ pub fn check(path: &Path) -> Result<()> {
         };
         let (width, height) = camera.stream.size(camera.width, camera.height);
         println!(
-            "  camera {} {:?}: {}x{} at {} fps, {}, {exposure}, {gain}, {}; live view {width}x{height} \
-             at {} fps, quality {}",
+            "  camera {} {:?}: {}x{} at {} fps, {}, {exposure}, {gain}, {}; tags {} m; live view \
+             {width}x{height} at {} fps, quality {}",
             camera.index,
             camera.name,
             camera.width,
@@ -44,6 +44,7 @@ pub fn check(path: &Path) -> Result<()> {
             } else {
                 "no lens: corners only"
             },
+            camera.tag_size_m,
             camera.stream.fps,
             camera.stream.quality
         );

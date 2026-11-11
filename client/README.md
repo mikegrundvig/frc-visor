@@ -13,7 +13,8 @@ messages with it, so robot code never links GPL code.
 - `CameraToTag` is a tag's pose from the camera in WPILib's axes (camera-to-tag).
 - `NtpResponder` answers chrony on the coprocessors with the robot's clock (UDP 5806).
 - `VisorConfigFile` writes Visor's configuration for a coprocessor, as a robot's deploy does,
-  refusing each setting Visor would refuse, and always naming the port the robot receives on:
+  refusing each setting Visor would refuse, and always naming the port the robot receives on
+  (and the tags' size, `tagSizeMeters`, when given: the field's):
   `testdata/written-config.toml` is its output, which Visor's own tests read back, and
   `least-config.toml` and `most-config.toml` every setting at its least and most, which they run
   through `visor check`.

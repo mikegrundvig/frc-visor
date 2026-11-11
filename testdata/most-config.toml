@@ -1,6 +1,7 @@
 # Visor's configuration, written by the robot's deploy: edits here are overwritten.
 team = 25599
 port = 65535
+tag_size_m = 9.999999999999998
 
 [[camera]]
 name = "z"

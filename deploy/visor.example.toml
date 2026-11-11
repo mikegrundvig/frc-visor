@@ -5,7 +5,9 @@
 team = 1234
 # robot = "10.12.34.2"
 # port = 5807
-# tag_size_m = 0.1651   # the tags' black square: 6.5 in, FRC's since 2024
+# The tags' black square, in metres: a robot's deploy writes its field's. Without it, 6.5 in, FRC's
+# since 2024.
+# tag_size_m = 0.1651
 
 # Each camera. A board with none of the robot's cameras gets none: Visor opens no camera, and sits
 # idle until the robot configures it again.

@@ -2,7 +2,7 @@
 //! VisorConfigFileTest), read as `visor run` reads it: every setting lands where it was meant to.
 //! And the client's files with every setting at the least and the most it lets through
 //! (least-config.toml, most-config.toml): `visor check` passes both, so the client refuses nothing
-//! Visor takes, and takes nothing Visor refuses.
+//! Visor takes, and takes nothing Visor refuses. Each gives the tags' size, as a robot's does.
 
 use std::path::Path;
 use std::process::Command;
@@ -25,6 +25,8 @@ fn the_clients_file_reads_setting_by_setting() {
     );
     assert_eq!((front.width, front.height, front.fps), (1600, 1304, 60));
     assert_eq!(front.min_tag_px, 18);
+    // The field's tag size, which the file gives for every camera.
+    assert_eq!(front.tag_size_m, 0.15);
     assert_eq!(front.time_offset_nanos, -1_500_000);
     assert_eq!((front.exposure_us, front.gain), (Some(1000), Some(40)));
     assert_eq!(
@@ -64,11 +66,18 @@ fn the_clients_file_reads_setting_by_setting() {
     assert_eq!((back.exposure_us, back.gain), (None, None));
     assert_eq!(back.stream, Stream::default());
     assert!(back.controls.is_empty() && back.lens.is_none());
+    assert_eq!(back.tag_size_m, 0.15);
 }
 
 #[test]
-fn visor_check_passes_the_clients_least_and_most() {
-    for golden in ["least-config.toml", "most-config.toml"] {
+fn visor_check_passes_the_clients_files_and_says_their_tag_size() {
+    // (the file, part of what `visor check` prints)
+    let rows = [
+        ("written-config.toml", "tags 0.15 m"),
+        ("least-config.toml", "frames to 10.0.1.2:1"),
+        ("most-config.toml", "tags 9.999999999999998 m"),
+    ];
+    for (golden, said) in rows {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("testdata")
             .join(golden);
@@ -80,5 +89,7 @@ fn visor_check_passes_the_clients_least_and_most() {
             .unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{golden}: {stderr}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(said), "{golden}: {stdout}");
     }
 }

@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test;
 class VisorConfigFileTest {
   /** Every setting, an awkward name and a value only an exponent writes. */
   static VisorConfigFile written() {
-    VisorConfigFile file = VisorConfigFile.forTeam(1234);
+    VisorConfigFile file = VisorConfigFile.forTeam(1234).tagSizeMeters(0.15);
     file
         .camera("front \"left\" \\ 1", 0, "/dev/v4l/by-id/usb-cam-video-index0", 1600, 1304)
         .fps(60)
@@ -40,7 +40,7 @@ class VisorConfigFileTest {
    * (tests/written_config.rs).
    */
   static VisorConfigFile least() {
-    VisorConfigFile file = VisorConfigFile.forTeam(1).port(1);
+    VisorConfigFile file = VisorConfigFile.forTeam(1).port(1).tagSizeMeters(Double.MIN_VALUE);
     file
         .camera("a", 0, "/dev/video0", 1, 1)
         .fps(1)
@@ -55,7 +55,10 @@ class VisorConfigFileTest {
 
   /** Every setting at the most Visor takes. */
   static VisorConfigFile most() {
-    VisorConfigFile file = VisorConfigFile.forTeam(VisorConfigFile.MOST_TEAM).port(65_535);
+    VisorConfigFile file =
+        VisorConfigFile.forTeam(VisorConfigFile.MOST_TEAM)
+            .port(65_535)
+            .tagSizeMeters(Math.nextDown(10.0));
     file
         .camera("z", 255, "/dev/video9", 65_535, 65_535)
         .fps(1000)
@@ -107,6 +110,9 @@ class VisorConfigFileTest {
             new Case("team 25600", () -> VisorConfigFile.forTeam(25_600), "not 25600"),
             new Case("port 0", () -> file.port(0), "from 1 to 65535, not 0"),
             new Case("port 65536", () -> file.port(65_536), "not 65536"),
+            new Case("a tag size of 0", () -> file.tagSizeMeters(0), "less than 10, not 0.0"),
+            new Case("a tag size of 10", () -> file.tagSizeMeters(10), "not 10.0"),
+            new Case("a tag size NaN", () -> file.tagSizeMeters(Double.NaN), "not NaN"),
             new Case("no name", () -> file.camera(" ", 1, "/dev/video1", 4, 4), "needs a name"),
             new Case("index 256", () -> file.camera("d", 256, "/dev/video1", 4, 4), "not 256"),
             new Case("index -1", () -> file.camera("d", -1, "/dev/video1", 4, 4), "not -1"),
