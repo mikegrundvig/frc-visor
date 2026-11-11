@@ -34,6 +34,20 @@ class NtpResponderTest {
     return request;
   }
 
+  /**
+   * The responder's count of answers, waited for until it reaches {@code expected}. The responder
+   * counts an answer after sending it, so a client can hold the reply before the count shows it:
+   * reading the count straight after the reply fails now and then on a busy computer.
+   */
+  private static long answeredOnceItReaches(long expected, NtpResponder responder)
+      throws InterruptedException {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+    while (responder.answered() < expected && System.nanoTime() < deadline) {
+      Thread.sleep(1);
+    }
+    return responder.answered();
+  }
+
   @Test
   void robotTimeBecomesNtpTime() {
     record Case(long robotNanos, long seconds, long fraction) {}
@@ -76,7 +90,7 @@ class NtpResponderTest {
   }
 
   @Test
-  void itAnswersOverUdp() throws IOException {
+  void itAnswersOverUdp() throws IOException, InterruptedException {
     try (NtpResponder responder = NtpResponder.start(0, () -> 42_000_000_000L);
         DatagramChannel client = DatagramChannel.open()) {
       client.connect(new InetSocketAddress("127.0.0.1", responder.port()));
@@ -87,7 +101,7 @@ class NtpResponderTest {
       assertThat(reply.remaining()).isEqualTo(48);
       assertThat(reply.getLong(24)).isEqualTo(7);
       assertThat(reply.getLong(40)).isEqualTo(NtpResponder.ntpTime(42_000_000_000L));
-      assertThat(responder.answered()).isEqualTo(1);
+      assertThat(answeredOnceItReaches(1, responder)).isEqualTo(1);
     }
   }
 
@@ -96,7 +110,7 @@ class NtpResponderTest {
    * unanswered, and the responder answers the next one.
    */
   @Test
-  void aClockThatThrowsCostsOneAnswerNotTheResponder() throws IOException {
+  void aClockThatThrowsCostsOneAnswerNotTheResponder() throws IOException, InterruptedException {
     AtomicInteger read = new AtomicInteger();
     try (NtpResponder responder =
             NtpResponder.start(
@@ -119,7 +133,7 @@ class NtpResponderTest {
       long theirs = ByteBuffer.wrap(reply.getData(), 0, reply.getLength()).getLong(24);
       assertThat(theirs).as("the second request's answer").isEqualTo(8);
       assertThat(responder.failures()).isEqualTo(1);
-      assertThat(responder.answered()).isEqualTo(1);
+      assertThat(answeredOnceItReaches(1, responder)).isEqualTo(1);
     }
   }
 
