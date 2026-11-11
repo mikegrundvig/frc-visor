@@ -25,6 +25,17 @@ pub const DEFAULT_STREAM_FPS: u32 = 10;
 /// picture of 800 x 652, about 2 Mbit/s at 10 a second.
 pub const DEFAULT_STREAM_QUALITY: u8 = 60;
 
+/// The controls the `exposure_us` and `gain` settings set, by every name V4L2's drivers have given
+/// them, each with its setting: under `controls` too, either would undo the setting, and its live
+/// tuning.
+const SET_BY_EXPOSURE_AND_GAIN: [(&str, &str); 5] = [
+    ("auto_exposure", "exposure_us"),
+    ("exposure_auto", "exposure_us"),
+    ("exposure_time_absolute", "exposure_us"),
+    ("exposure_absolute", "exposure_us"),
+    ("gain", "gain"),
+];
+
 /// The checked configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -318,6 +329,14 @@ fn check_camera(file: CameraFile, tag_size_m: f64, config_id: u32) -> Result<Cam
         check_stream(file.stream_scale, file.stream_fps, file.stream_quality, fps).map_err(fail)?;
     let mut controls = Vec::new();
     for (key, value) in file.controls {
+        if let Some((_, setting)) = SET_BY_EXPOSURE_AND_GAIN
+            .iter()
+            .find(|(name, _)| *name == key)
+        {
+            return Err(fail(format!(
+                "control {key} is set by `{setting}`: give that instead"
+            )));
+        }
         let value = match value {
             toml::Value::Integer(n) => n,
             toml::Value::Boolean(b) => b as i64,
@@ -563,8 +582,28 @@ mod tests {
                 "unknown field",
             ),
             (
-                format!("team = 1234\n{CAMERA}[camera.controls]\ngain = \"high\"\n"),
-                "control gain",
+                format!("team = 1234\n{CAMERA}[camera.controls]\nbrightness = \"high\"\n"),
+                "control brightness is a number or true/false",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}[camera.controls]\nauto_exposure = 1\n"),
+                "control auto_exposure is set by `exposure_us`: give that instead",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}[camera.controls]\nexposure_auto = 1\n"),
+                "control exposure_auto is set by `exposure_us`: give that instead",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}[camera.controls]\nexposure_time_absolute = 10\n"),
+                "control exposure_time_absolute is set by `exposure_us`: give that instead",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}[camera.controls]\nexposure_absolute = 10\n"),
+                "control exposure_absolute is set by `exposure_us`: give that instead",
+            ),
+            (
+                format!("team = 1234\n{CAMERA}[camera.controls]\ngain = 40\n"),
+                "control gain is set by `gain`: give that instead",
             ),
             (
                 format!("team = 1234\n{CAMERA}exposure_us = 0\n"),

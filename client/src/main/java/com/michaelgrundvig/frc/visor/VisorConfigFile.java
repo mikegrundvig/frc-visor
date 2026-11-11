@@ -113,6 +113,19 @@ public final class VisorConfigFile {
    * and gain, the camera's own.
    */
   public static final class Camera {
+    /**
+     * The controls {@link #exposureMicros} and {@link #gain} set, by every name V4L2's drivers have
+     * given them, each with the setting to give instead: as a control too, either would undo the
+     * setting, and its live tuning. Visor refuses them (its src/config.rs).
+     */
+    static final Map<String, String> SET_BY_EXPOSURE_AND_GAIN =
+        Map.of(
+            "auto_exposure", "exposureMicros(..)",
+            "exposure_auto", "exposureMicros(..)",
+            "exposure_time_absolute", "exposureMicros(..)",
+            "exposure_absolute", "exposureMicros(..)",
+            "gain", "gain(..)");
+
     /** The most a time offset can be in microseconds: Visor works in nanoseconds, in 64 bits. */
     static final long MOST_OFFSET_MICROS = Long.MAX_VALUE / 1000;
 
@@ -213,10 +226,17 @@ public final class VisorConfigFile {
     /**
      * A V4L2 control, by the name {@code v4l2-ctl --list-ctrls} prints. Visor sets them after the
      * exposure and gain, in the order given, which matters where one control depends on another.
+     * Not the exposure or gain controls themselves: {@link #exposureMicros} and {@link #gain} set
+     * those.
      */
     public Camera control(String control, long value) {
       if (control.isBlank()) {
         throw new IllegalArgumentException("a control needs a name");
+      }
+      String setting = SET_BY_EXPOSURE_AND_GAIN.get(control);
+      if (setting != null) {
+        throw new IllegalArgumentException(
+            "control " + control + " is set by " + setting + ": give that instead");
       }
       controls.put(control, value);
       return this;

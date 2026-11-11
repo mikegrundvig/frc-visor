@@ -39,6 +39,7 @@ exposure_us = 1000      # a fixed exposure: the camera's automatic exposure off,
 
 # Any other control, by the name `v4l2-ctl --list-ctrls` prints, set in this order after the exposure
 # and gain. A name the camera doesn't have stops it opening, so `visor check` and the log say which.
+# Not the exposure or gain controls themselves: exposure_us and gain set those.
 # [camera.controls]
 # power_line_frequency = 2
 

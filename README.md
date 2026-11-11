@@ -123,6 +123,9 @@ a value outside its range, or a value the camera refuses or keeps otherwise (rou
 an exposure held to its frame time), is a warning in Visor's log, said once, and the camera keeps
 capturing at what it has. Any other control goes under `[camera.controls]` by the name
 `v4l2-ctl --list-ctrls` prints, set after these; a name the camera doesn't have stops it opening.
+The exposure and gain controls themselves, by any name the kernel has given them (`auto_exposure`,
+`exposure_auto`, `exposure_time_absolute`, `exposure_absolute`, `gain`), are refused there: they
+would undo `exposure_us` and `gain`, which `visor check` names instead.
 
 `visor cameras` lists each camera's controls, with their ranges, defaults and values now: on a new
 camera, that's the check of its names and its gain's range, without `v4l2-ctl`.

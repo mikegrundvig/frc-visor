@@ -143,6 +143,26 @@ class VisorConfigFileTest {
             new Case("quality 0", () -> camera.stream(0.5, 10, 0), "from 1 to 100, not 0"),
             new Case("quality 101", () -> camera.stream(0.5, 10, 101), "not 101"),
             new Case("a control with no name", () -> camera.control("", 1), "needs a name"),
+            new Case(
+                "the exposure as a control",
+                () -> camera.control("auto_exposure", 1),
+                "control auto_exposure is set by exposureMicros(..): give that instead"),
+            new Case(
+                "the exposure by an older name",
+                () -> camera.control("exposure_auto", 1),
+                "control exposure_auto is set by exposureMicros(..)"),
+            new Case(
+                "the exposure time as a control",
+                () -> camera.control("exposure_time_absolute", 10),
+                "control exposure_time_absolute is set by exposureMicros(..)"),
+            new Case(
+                "the exposure time by an older name",
+                () -> camera.control("exposure_absolute", 10),
+                "control exposure_absolute is set by exposureMicros(..)"),
+            new Case(
+                "the gain as a control",
+                () -> camera.control("gain", 40),
+                "control gain is set by gain(..): give that instead"),
             new Case("a lens value NaN", () -> camera.lens(4, 4, 1, 1, 2, 2, Double.NaN), "NaN"),
             new Case("a lens at another size", () -> camera.lens(8, 4, 1, 1, 2, 2), "8x4"),
             new Case("a focal length of 0", () -> camera.lens(4, 4, 0, 1, 2, 2), "positive"),
