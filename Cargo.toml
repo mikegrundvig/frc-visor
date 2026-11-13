@@ -24,16 +24,16 @@ hyper-util = { version = "0.1", features = ["tokio", "service"] }
 jpeg-encoder = "0.7"
 libc = "0.2"
 log = "0.4"
-nalgebra = { version = "0.34", default-features = false, features = ["std"] }
+nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 percent-encoding = "2"
 # Tells systemd Visor is ready and alive (src/watchdog.rs).
 sd-notify = "0.5"
 serde = { version = "1", features = ["derive"] }
-sha2 = "0.10"
+sha2 = "0.11"
 socket2 = "0.6"
 tokio = { version = "1", features = ["net", "rt", "sync", "time"] }
 tokio-io-timeout = "1"
-toml = { version = "0.9", features = ["preserve_order"] }
+toml = { version = "1", features = ["preserve_order"] }
 v4l = "0.14"
 
 [build-dependencies]

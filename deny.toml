@@ -5,13 +5,6 @@
 # The coprocessors' architecture and the machines CI builds on.
 targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
 
-[advisories]
-ignore = [
-    # paste is unmaintained, and has no fix: a proc macro nalgebra and simba use while compiling,
-    # with no code of its own in the program. Dropped once nalgebra drops it.
-    { id = "RUSTSEC-2024-0436", reason = "build-time proc macro via nalgebra; nothing newer exists" },
-]
-
 [licenses]
 # Visor's own, GPL-3.0-only, and every licence of a crate it's built from, each compatible with it.
 allow = [
@@ -29,7 +22,7 @@ allow = [
 confidence-threshold = 0.9
 
 [bans]
-# Old and new versions of a few build-time crates side by side (bitflags, shlex, syn, winnow):
+# Old and new versions of a few build-time crates side by side (bitflags, shlex, syn):
 # said, and allowed.
 multiple-versions = "warn"
 wildcards = "deny"
