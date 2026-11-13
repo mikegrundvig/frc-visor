@@ -2,22 +2,23 @@
 # the tests'. Its own version is Visor's, read from ../Cargo.toml (gradle/publishing.gradle).
 
 [versions]
-jspecify = "1.0.0"
-spotless = "8.10.4"
+jspecify = "1.0.1"
+spotless = "8.11.0"
 # The formatters Spotless runs (gradle/quality.gradle), pinned rather than left to Spotless's
 # defaults, so a newer Spotless can't reformat the code on its own.
-google-java-format = "1.36.1"
+google-java-format = "2.0.0"
 greclipse = "4.35"
-errorprone-plugin = "5.1.1"
-errorprone = "2.50.0"
-nullaway = "0.14.2"
-jacoco = "0.8.15"
+errorprone-plugin = "5.2.0"
+errorprone = "2.52.0"
+nullaway = "0.14.3"
+jacoco = "0.8.16"
 junit = "6.1.3"
 assertj = "3.27.7"
 # Reads the JSON test files Visor's own tests share with these.
-jackson = "2.20.1"
-# Spotter, whose agent runs Visor's pack (../spotter/visor) in its test, driven by its manager.
-spotter = "0.4.0"
+jackson = "2.23.0"
+# Spotter, whose agent runs Visor's pack (../spotter/visor) in its test, driven by its manager (the
+# agent's program from Spotter's release: build.gradle).
+spotter = "0.5.1"
 
 [libraries]
 jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
@@ -27,7 +28,6 @@ junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 spotter-manager = { module = "com.michaelgrundvig.frc:spotter-manager", version.ref = "spotter" }
-spotter-agent = { module = "com.michaelgrundvig.frc:spotter-agent", version.ref = "spotter" }
 
 [plugins]
 spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }

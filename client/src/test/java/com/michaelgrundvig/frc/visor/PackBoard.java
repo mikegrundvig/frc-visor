@@ -72,15 +72,15 @@ final class PackBoard {
   /** Visor's program, as the pack sees it: its version, and a check refusing what says "bad". */
   static String program(String version) {
     return """
-        #!/bin/sh
-        case "$1" in
-          version) echo "visor %s (version ID 1)" ;;
-          check)
-            if grep -q bad "$3"; then echo "$3: no, this is bad" >&2; exit 1; fi
-            echo "$3: 1 camera" ;;
-          cameras) echo usb-Thrifty_Cam_0001-video-index0 ;;
-        esac
-        """
+    #!/bin/sh
+    case "$1" in
+      version) echo "visor %s (version ID 1)" ;;
+      check)
+        if grep -q bad "$3"; then echo "$3: no, this is bad" >&2; exit 1; fi
+        echo "$3: 1 camera" ;;
+      cameras) echo usb-Thrifty_Cam_0001-video-index0 ;;
+    esac
+    """
         .formatted(version);
   }
 

@@ -34,6 +34,8 @@ import java.util.stream.Stream;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
@@ -460,6 +462,7 @@ class VisorPackTest {
   }
 
   @Test
+  @EnabledOnOs(value = OS.LINUX, disabledReason = "Spotter's agent is a Linux program")
   void onSpottersAgentABoardIsBroughtUpToDate() throws Exception {
     PackBoard board = board("agent");
     Path packs = Files.createDirectories(work.resolve("packs/visor"));
@@ -583,9 +586,7 @@ class VisorPackTest {
                 "-c",
                 // With the umask its systemd unit gives it (UMask=0077): what a pack writes is its
                 // own unless the pack says otherwise.
-                "umask 077; exec \"$0\" -Xmx128m -jar \"$1\" --root=\"$2\" --controller=127.0.0.1"
-                    + " --port=\"$3\"",
-                ProcessHandle.current().info().command().orElse("java"),
+                "umask 077; exec \"$0\" --root=\"$1\" --controller=127.0.0.1 --port=\"$2\"",
                 System.getProperty("visor.spotterAgent"),
                 root.toString(),
                 Integer.toString(port))

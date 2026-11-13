@@ -322,9 +322,8 @@ public final class VisorConfigFile {
       }
       if (!controls.isEmpty()) {
         out.append("[camera.controls]\n");
-        controls.forEach(
-            (control, value) ->
-                out.append(quoted(control)).append(" = ").append(value).append('\n'));
+        controls.forEach((control, value) ->
+            out.append(quoted(control)).append(" = ").append(value).append('\n'));
       }
       if (lens.length > 0) {
         out.append("[camera.lens]\n");

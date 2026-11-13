@@ -27,12 +27,31 @@ repositories {
         }
         filter {
             includeModule "com.michaelgrundvig.frc", "spotter-manager"
-            includeModule "com.michaelgrundvig.frc", "spotter-agent"
+        }
+    }
+    // Spotter's agent is a Linux program, which Spotter publishes with its GitHub release and
+    // nowhere else (frc-spotter-<version>-linux-<amd64 or arm64>.tar.gz). So it's read from there,
+    // as mikegrundvig:frc-spotter, which only that release serves.
+    exclusiveContent {
+        forRepository {
+            ivy {
+                name = "spotterReleases"
+                url = "https://github.com"
+                patternLayout {
+                    artifact "[organisation]/[module]/releases/download/v[revision]/[module]-[revision]-[classifier].[ext]"
+                }
+                metadataSources { artifact() }
+            }
+        }
+        filter {
+            includeModule "mikegrundvig", "frc-spotter"
         }
     }
 }
 
-// The agent, as a coprocessor runs it (java -jar), for the pack's test.
+// The agent's release, for the pack's test, on Linux alone (the program runs nowhere else).
+def agentArchitecture = [amd64: "amd64", x86_64: "amd64", aarch64: "arm64"][System.getProperty("os.arch")]
+def agentRuns = System.getProperty("os.name").toLowerCase().contains("linux") && agentArchitecture != null
 configurations {
     spotterAgent {
         canBeConsumed = false
@@ -53,7 +72,25 @@ dependencies {
     testImplementation libs.assertj.core
     testImplementation libs.jackson.databind
     testImplementation libs.spotter.manager
-    spotterAgent libs.spotter.agent
+    if (agentRuns) {
+        spotterAgent "mikegrundvig:frc-spotter:${libs.versions.spotter.get()}:linux-${agentArchitecture}@tar.gz"
+    }
+}
+
+// The agent's program out of its release, for VisorPackTest to run.
+def spotterAgentProgram = tasks.register("spotterAgentProgram", Sync) {
+    description = "Unpacks Spotter's agent from its release, for VisorPackTest to run."
+    onlyIf { agentRuns }
+    from({
+        configurations.spotterAgent.collect {
+            tarTree(resources.gzip(it))
+        }
+    }) {
+        include "*/usr/lib/frc-spotter/bin/frc-spotter"
+        eachFile { path = name }
+        includeEmptyDirs = false
+    }
+    into layout.buildDirectory.dir("spotter-agent")
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -100,13 +137,15 @@ tasks.named("test") {
     // Visor's Spotter pack, and the agent that runs it, for VisorPackTest.
     systemProperty "visor.pack", file("../spotter/visor").absolutePath
     inputs.dir("../spotter/visor").withPropertyName("pack").withPathSensitivity(PathSensitivity.RELATIVE)
-    def agent = configurations.spotterAgent
-    inputs.files(agent).withPropertyName("spotterAgent").withNormalizer(ClasspathNormalizer)
-    jvmArgumentProviders.add({
-        [
-            "-Dvisor.spotterAgent=${agent.singleFile.absolutePath}".toString()
-        ]
-    } as CommandLineArgumentProvider)
+    if (agentRuns) {
+        def program = spotterAgentProgram.map { new File(it.destinationDir, "frc-spotter") }
+        inputs.file(program).withPropertyName("spotterAgent").withPathSensitivity(PathSensitivity.NAME_ONLY)
+        jvmArgumentProviders.add({
+            [
+                "-Dvisor.spotterAgent=${program.get().absolutePath}".toString()
+            ]
+        } as CommandLineArgumentProvider)
+    }
     // chrony, where a developer has it, for the responder's test against the real thing.
     def chronyd = System.getenv("VISOR_CHRONYD")
     if (chronyd != null) {
