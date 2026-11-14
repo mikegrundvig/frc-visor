@@ -1,7 +1,7 @@
 [package]
 name = "visor"
 # The version is a date, and the version ID every frame carries is made from it: 2026.11.2 is 20261102.
-version = "2026.11.9"
+version = "2026.11.14"
 edition = "2024"
 # The compiler it's built and tested with (rust-toolchain.toml); older ones aren't tried.
 rust-version = "1.99"
