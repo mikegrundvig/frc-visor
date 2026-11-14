@@ -1,6 +1,6 @@
 //! A live view's picture: the camera's frame made smaller, each tag outlined with its ID, and a line
-//! along the top with the detection's frame rate, the exposure and gain, and the brightness, as a
-//! JPEG. Resizing is fast_image_resize's, drawing embedded-graphics', and the JPEG jpeg-encoder's.
+//! along the top with the detection's frame rate, the exposure and gain, the brightness and the
+//! focus, as a JPEG. Resizing is fast_image_resize's, drawing embedded-graphics', and the JPEG jpeg-encoder's.
 
 use std::convert::Infallible;
 
@@ -16,6 +16,7 @@ use jpeg_encoder::{ColorType, Encoder};
 
 use crate::brightness::Brightness;
 use crate::config::Stream;
+use crate::image::GrayImage;
 use crate::settings::InEffect;
 use crate::stream::feed::Detected;
 
@@ -38,8 +39,14 @@ impl Painter {
         }
     }
 
-    /// A frame's picture, as a JPEG, with its line saying `fps` (none while it's being measured).
-    pub fn paint(&mut self, frame: &Detected, fps: Option<f64>) -> Result<Vec<u8>, String> {
+    /// A frame's picture, as a JPEG, with its line saying `fps` (none while it's being measured)
+    /// and the frame's `focus` ([`focus`]).
+    pub fn paint(
+        &mut self,
+        frame: &Detected,
+        fps: Option<f64>,
+        focus: f64,
+    ) -> Result<Vec<u8>, String> {
         let image = &frame.image;
         let (width, height) = self.stream.size(image.width, image.height);
         self.small.resize(width as usize * height as usize, 0);
@@ -63,7 +70,7 @@ impl Painter {
         for tag in &frame.tags {
             outline(&mut canvas, &tag.corners, scale, tag.id, large);
         }
-        let line = caption(fps, frame.settings, frame.brightness);
+        let line = caption(fps, frame.settings, frame.brightness, focus);
         let font = if large { &FONT_7X13 } else { &FONT_6X10 };
         Text::with_baseline(&line, Point::new(2, 2), lettering(font), Baseline::Top)
             .draw(&mut canvas)
@@ -77,8 +84,32 @@ impl Painter {
     }
 }
 
-/// The line along the top: `59.8 fps  exposure 1.0 ms  gain 40  brightness 37 / 201`.
-pub fn caption(fps: Option<f64>, settings: InEffect, brightness: Brightness) -> String {
+/// How sharp a frame is: the mean square of the step from a pixel to the next one across and the
+/// next one down, taken at every fourth pixel of every fourth row. An edge in focus is a steep step,
+/// so the number peaks as a lens comes into focus: turn the lens and stop at the peak. Noise is
+/// steps too, and so is what's in view, so it compares two frames of one scene at one exposure and
+/// gain, and nothing else.
+pub fn focus(image: &GrayImage) -> f64 {
+    let (width, height) = (image.width as usize, image.height as usize);
+    let (mut sum, mut steps) = (0u64, 0u64);
+    for y in (0..height.saturating_sub(1)).step_by(4) {
+        let row = &image.pixels[y * width..];
+        for x in (0..width.saturating_sub(1)).step_by(4) {
+            let here = i32::from(row[x]);
+            let across = i32::from(row[x + 1]) - here;
+            let down = i32::from(row[x + width]) - here;
+            sum += (across * across + down * down) as u64;
+            steps += 2;
+        }
+    }
+    if steps == 0 {
+        return 0.0;
+    }
+    sum as f64 / steps as f64
+}
+
+/// The line along the top: `59.8 fps  exposure 1.0 ms  gain 40  brightness 37 / 201  focus 12.3`.
+pub fn caption(fps: Option<f64>, settings: InEffect, brightness: Brightness, focus: f64) -> String {
     let rate = match fps {
         Some(fps) => format!("{fps:.1} fps"),
         None => "-- fps".to_string(),
@@ -93,7 +124,7 @@ pub fn caption(fps: Option<f64>, settings: InEffect, brightness: Brightness) -> 
         None => "no gain".to_string(),
     };
     format!(
-        "{rate}  {exposure}  {gain}  brightness {} / {}",
+        "{rate}  {exposure}  {gain}  brightness {} / {}  focus {focus:.1}",
         brightness.median, brightness.high
     )
 }
@@ -174,7 +205,6 @@ impl DrawTarget for Canvas<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image::GrayImage;
     use crate::wire::Tag;
 
     fn frame(tags: Vec<Tag>) -> Detected {
@@ -214,12 +244,12 @@ mod tests {
             (
                 Some(59.84),
                 fixed,
-                "59.8 fps  exposure 1.0 ms  gain 40  brightness 37 / 201",
+                "59.8 fps  exposure 1.0 ms  gain 40  brightness 37 / 201  focus 12.3",
             ),
             (
                 None,
                 fixed,
-                "-- fps  exposure 1.0 ms  gain 40  brightness 37 / 201",
+                "-- fps  exposure 1.0 ms  gain 40  brightness 37 / 201  focus 12.3",
             ),
             (
                 Some(30.0),
@@ -228,16 +258,16 @@ mod tests {
                     gain: None,
                     auto_exposure: Some(true),
                 },
-                "30.0 fps  auto exposure  no gain  brightness 37 / 201",
+                "30.0 fps  auto exposure  no gain  brightness 37 / 201  focus 12.3",
             ),
             (
                 Some(30.0),
                 InEffect::default(),
-                "30.0 fps  exposure unknown  no gain  brightness 37 / 201",
+                "30.0 fps  exposure unknown  no gain  brightness 37 / 201  focus 12.3",
             ),
         ];
         for (fps, settings, line) in cases {
-            assert_eq!(caption(fps, settings, lit), line);
+            assert_eq!(caption(fps, settings, lit, 12.34), line);
         }
     }
 
@@ -251,7 +281,7 @@ mod tests {
             poses: None,
         };
         let mut painter = Painter::new(Stream::default());
-        let jpeg = painter.paint(&frame(vec![tag]), Some(60.0)).unwrap();
+        let jpeg = painter.paint(&frame(vec![tag]), Some(60.0), 0.0).unwrap();
         assert_eq!(&jpeg[..2], [0xff, 0xd8], "a JPEG's start");
         let small = &painter.small;
         assert_eq!(small.len(), 800 * 652);
@@ -283,8 +313,36 @@ mod tests {
             fps: 10,
             quality: 50,
         });
-        let jpeg = painter.paint(&frame(vec![tag]), None).unwrap();
+        let jpeg = painter.paint(&frame(vec![tag]), None, 0.0).unwrap();
         assert!(jpeg.len() > 100);
         assert_eq!(painter.small.len(), 400 * 326);
+    }
+
+    #[test]
+    fn focus_is_higher_for_sharp_edges_than_soft_ones_and_nothing_for_a_flat_frame() {
+        // Stripes five pixels wide, which the every-fourth-pixel sampling doesn't fall in step
+        // with: sharp, each edge one step of 200; soft, the same rise spread over the five.
+        let striped = |soft: bool| {
+            let mut image = GrayImage::new(64, 32);
+            for (i, pixel) in image.pixels.iter_mut().enumerate() {
+                let x = (i % 64 % 10) as u8;
+                *pixel = match (soft, x < 5) {
+                    (false, true) => 220,
+                    (false, false) => 20,
+                    (true, true) => 20 + 40 * x,
+                    (true, false) => 220 - 40 * (x - 5),
+                };
+            }
+            image
+        };
+        let (sharp, soft) = (focus(&striped(false)), focus(&striped(true)));
+        assert!(sharp > 2.0 * soft, "sharp {sharp}, soft {soft}");
+        assert!(soft > 0.0);
+        let mut flat = GrayImage::new(64, 32);
+        flat.pixels.fill(90);
+        assert_eq!(focus(&flat), 0.0);
+        // Too small to have a neighbour: nothing, not a panic.
+        assert_eq!(focus(&GrayImage::new(1, 1)), 0.0);
+        assert_eq!(focus(&GrayImage::new(0, 0)), 0.0);
     }
 }

@@ -40,6 +40,10 @@ const SET_BY_EXPOSURE_AND_GAIN: [(&str, &str); 5] = [
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub robot: SocketAddr,
+    /// Whether the live view may be asked to try an exposure and gain on a running camera
+    /// (`try_settings`). Off unless the file says so: a robot's deploy never does, so on a robot
+    /// what a camera does is the configuration's alone. On for a bench.
+    pub try_settings: bool,
     /// None on a board that has none of the robot's cameras: Visor then opens none, and sits idle.
     pub cameras: Vec<Camera>,
 }
@@ -150,6 +154,7 @@ struct File {
     team: Option<u32>,
     port: Option<u16>,
     tag_size_m: Option<f64>,
+    try_settings: Option<bool>,
     #[serde(default, rename = "camera")]
     cameras: Vec<CameraFile>,
 }
@@ -250,6 +255,7 @@ impl Config {
         }
         Ok(Config {
             robot: SocketAddr::new(address, port),
+            try_settings: file.try_settings.unwrap_or(false),
             cameras,
         })
     }
@@ -426,6 +432,16 @@ mod tests {
         width = 1600
         height = 1304
     "#;
+
+    #[test]
+    fn settings_can_be_tried_only_where_the_file_says_so() {
+        let unsaid = Config::parse(&format!("team = 1234\n{CAMERA}")).unwrap();
+        assert!(!unsaid.try_settings, "a robot's file never says it");
+        let bench = Config::parse(&format!("team = 1234\ntry_settings = true\n{CAMERA}")).unwrap();
+        assert!(bench.try_settings);
+        let off = Config::parse(&format!("team = 1234\ntry_settings = false\n{CAMERA}")).unwrap();
+        assert!(!off.try_settings);
+    }
 
     #[test]
     fn a_minimal_file_gets_the_defaults() {

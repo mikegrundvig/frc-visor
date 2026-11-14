@@ -89,8 +89,9 @@ pub fn run<S: Source + Send>(
             } = wired;
             let (camera, latest, socket) = (*camera, &*latest, &*socket);
             watched.push((camera.name.as_str(), latest));
+            let trial = &shown.trial;
             scope.spawn(move || {
-                capture::run_from(source, camera, latest, clocks, stop, capture::RETRY)
+                capture::run_from(source, camera, latest, clocks, trial, stop, capture::RETRY)
             });
             scope.spawn(move || {
                 panic_if_a_test_asks(&camera.name);

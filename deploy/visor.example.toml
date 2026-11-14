@@ -8,6 +8,9 @@ team = 1234
 # The tags' black square, in metres: a robot's deploy writes its field's. Without it, 6.5 in, FRC's
 # since 2024.
 # tag_size_m = 0.1651
+# For a bench only: lets the live view be asked to try an exposure and gain on a running camera
+# (docs/live-view.md). A robot's deploy never writes it.
+# try_settings = true
 
 # Each camera. A board with none of the robot's cameras gets none: Visor opens no camera, and sits
 # idle until the robot configures it again.

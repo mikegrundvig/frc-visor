@@ -23,7 +23,7 @@ use v4l::{Device, Format, FourCC};
 use crate::clock::Clocks;
 use crate::config::{Camera, PixelFormat};
 use crate::latest::{Captured, Latest};
-use crate::settings::{self, Control, Controls, InEffect, Said};
+use crate::settings::{self, Control, Controls, InEffect, Said, Trial};
 
 /// How long a camera that failed waits before it's opened again.
 pub const RETRY: Duration = Duration::from_millis(300);
@@ -59,15 +59,20 @@ pub trait Opened: Controls {
 
 /// Captures from a V4L2 device until `stop` is set, reconnecting as needed.
 pub fn run(camera: &Camera, latest: &Latest, clocks: &impl Clocks, stop: &AtomicBool) {
-    run_from(&mut V4l2, camera, latest, clocks, stop, RETRY);
+    // Nothing asks this camera to try settings: `visor record`'s.
+    let untried = Trial::default();
+    run_from(&mut V4l2, camera, latest, clocks, &untried, stop, RETRY);
 }
 
 /// Captures from `source` until `stop` is set, opening the camera again `retry` after it fails.
+/// An exposure or gain asked for through `trial` is set before the next frame, and lasts until the
+/// camera is opened again.
 pub fn run_from(
     source: &mut impl Source,
     camera: &Camera,
     latest: &Latest,
     clocks: &impl Clocks,
+    trial: &Trial,
     stop: &AtomicBool,
     retry: Duration,
 ) {
@@ -80,6 +85,7 @@ pub fn run_from(
             camera,
             latest,
             clocks,
+            trial,
             stop,
             &mut last_error,
             &mut said,
@@ -102,11 +108,13 @@ pub fn run_from(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture(
     source: &mut impl Source,
     camera: &Camera,
     latest: &Latest,
     clocks: &impl Clocks,
+    trial: &Trial,
     stop: &AtomicBool,
     last_error: &mut Option<String>,
     said: &mut Said,
@@ -122,8 +130,10 @@ fn capture(
             warn!("{}: {warning}", camera.name);
         }
     }
-    let in_effect = applied.in_effect;
+    let mut in_effect = applied.in_effect;
     info!("{}: {}", camera.name, described(in_effect));
+    // The camera as tried: the configuration's, with each exposure and gain asked for since.
+    let mut tried: Option<Camera> = None;
     opened.start()?;
     info!(
         "{}: streaming {}x{} {} at {} s per frame",
@@ -133,6 +143,26 @@ fn capture(
 
     let mut said_time_source = false;
     while !stop.load(Ordering::Relaxed) {
+        if let Some(asked) = trial.take() {
+            let with = tried.get_or_insert_with(|| camera.clone());
+            with.exposure_us = asked.exposure_us.or(with.exposure_us);
+            with.gain = asked.gain.or(with.gain);
+            // A trial that can't be set is said, and the camera keeps what it had.
+            match settings::apply(&opened, with) {
+                Ok(applied) => {
+                    for warning in &applied.warnings {
+                        warn!("{}: trying settings: {warning}", camera.name);
+                    }
+                    in_effect = applied.in_effect;
+                    info!(
+                        "{}: trying {} until it's opened again",
+                        camera.name,
+                        described(in_effect)
+                    );
+                }
+                Err(error) => warn!("{}: trying settings: {error}", camera.name),
+            }
+        }
         let (data, meta) = opened.next()?;
         if meta.flags.contains(Flags::ERROR) {
             latest.broken();
@@ -386,6 +416,8 @@ mod tests {
         given: u32,
         /// The number of each frame that reached the slot, taken as the detect thread would.
         taken: Vec<i64>,
+        /// The exposure each of those frames says it was taken at.
+        exposures: Vec<Option<u32>>,
     }
 
     impl Fake<'_> {
@@ -393,6 +425,7 @@ mod tests {
         fn take(&mut self) {
             while let Some(frame) = self.latest.take(Duration::ZERO) {
                 self.taken.push(frame.monotonic_nanos / 1000);
+                self.exposures.push(frame.settings.exposure_us);
                 self.latest.recycle(frame.image);
             }
         }
@@ -790,9 +823,18 @@ mod tests {
                 exposures_set: Cell::new(0),
                 given: 0,
                 taken: Vec::new(),
+                exposures: Vec::new(),
             };
             let retry = Duration::from_millis(1);
-            run_from(&mut fake, &camera, &latest, &Unread, &stop, retry);
+            run_from(
+                &mut fake,
+                &camera,
+                &latest,
+                &Unread,
+                &Trial::default(),
+                &stop,
+                retry,
+            );
             fake.take();
             assert_eq!(fake.taken, case.taken, "{}", case.name);
             assert_eq!(latest.take_short().count, case.short, "{}", case.name);
@@ -810,6 +852,43 @@ mod tests {
                 assert!(warning.contains(part), "{}: {warning}", case.name);
             }
         }
+    }
+
+    #[test]
+    fn an_exposure_tried_is_set_before_the_next_frame_and_gone_when_the_camera_is_opened_again() {
+        use Event::*;
+        let camera = camera("tried", None);
+        let latest = Latest::new();
+        let stop = AtomicBool::new(false);
+        let mut fake = Fake {
+            // A frame, a stall, and the camera opened again for one more.
+            plugs: vec![
+                Plug::Streams(vec![Frame, Stall]),
+                Plug::Streams(vec![Frame]),
+            ]
+            .into(),
+            latest: &latest,
+            stop: &stop,
+            opened: 0,
+            exposures_set: Cell::new(0),
+            given: 0,
+            taken: Vec::new(),
+            exposures: Vec::new(),
+        };
+        let trial = Trial::default();
+        trial.ask(settings::Tried {
+            exposure_us: Some(2000),
+            gain: None,
+        });
+        let retry = Duration::from_millis(1);
+        run_from(&mut fake, &camera, &latest, &Unread, &trial, &stop, retry);
+        fake.take();
+        // The first frame is at the exposure tried; the camera opened again is at the
+        // configuration's, and nothing is tried twice.
+        assert_eq!(fake.exposures, [Some(2000), Some(1000)]);
+        assert_eq!(fake.opened, 2);
+        assert_eq!(fake.exposures_set.get(), 3, "each opening, and the trial");
+        assert_eq!(trial.take(), None);
     }
 
     /// What the camera offers, what's configured, and the choice or part of the refusal.

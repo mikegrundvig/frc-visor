@@ -51,8 +51,14 @@ pub fn check(path: &Path) -> Result<()> {
         );
     }
     println!(
-        "  live view on port {}: /stream/<camera>, and / lists them",
+        "  live view on port {}: /stream/<camera>, /frame/<camera> at full size, and / lists them",
         stream::PORT
     );
+    if config.try_settings {
+        println!(
+            "  try_settings: an exposure and gain can be tried from the live view \
+             (POST /settings/<camera>), for a bench, not a robot"
+        );
+    }
     Ok(())
 }

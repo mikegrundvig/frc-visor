@@ -12,6 +12,8 @@
 
 use std::collections::HashSet;
 use std::io;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use v4l::control::{self, Control as V4l2Control, Value};
 
@@ -132,6 +134,48 @@ pub struct InEffect {
     pub gain: Option<i32>,
     /// Whether the camera's own automatic exposure is on; none where it has no such control.
     pub auto_exposure: Option<bool>,
+}
+
+/// An exposure and gain to try on a camera as it runs, asked for from the live view
+/// (`try_settings` in the configuration) and applied by the camera's capture thread before its next
+/// frame. A trial lasts until the camera is opened again (Visor restarted, the camera replugged),
+/// which sets what the configuration says: the configuration is still what a camera does.
+#[derive(Debug, Default)]
+pub struct Trial {
+    /// Checked once a frame by the capture thread, so an untried camera costs it one load.
+    asked: AtomicBool,
+    wanted: Mutex<Option<Tried>>,
+}
+
+/// What a trial changes: each of the two that's given, the other left as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Tried {
+    pub exposure_us: Option<u32>,
+    pub gain: Option<i64>,
+}
+
+impl Trial {
+    /// For the live view: asks the capture thread to set these. A later ask before it has replaces
+    /// an earlier one's values where it gives them.
+    pub fn ask(&self, tried: Tried) {
+        let mut wanted = self.wanted.lock().unwrap();
+        let before = wanted.unwrap_or_default();
+        *wanted = Some(Tried {
+            exposure_us: tried.exposure_us.or(before.exposure_us),
+            gain: tried.gain.or(before.gain),
+        });
+        self.asked.store(true, Ordering::Release);
+    }
+
+    /// For the capture thread: what's been asked since it last looked, if anything.
+    pub fn take(&self) -> Option<Tried> {
+        if !self.asked.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut wanted = self.wanted.lock().unwrap();
+        self.asked.store(false, Ordering::Release);
+        wanted.take()
+    }
 }
 
 /// What setting a camera's controls did.
@@ -943,5 +987,27 @@ mod tests {
         for (name, key) in cases {
             assert_eq!(control_key(name), key);
         }
+    }
+
+    #[test]
+    fn a_trial_is_taken_once_and_a_later_ask_keeps_what_it_doesn_t_change() {
+        let trial = Trial::default();
+        assert_eq!(trial.take(), None);
+        trial.ask(Tried {
+            exposure_us: Some(1500),
+            gain: None,
+        });
+        trial.ask(Tried {
+            exposure_us: None,
+            gain: Some(2),
+        });
+        assert_eq!(
+            trial.take(),
+            Some(Tried {
+                exposure_us: Some(1500),
+                gain: Some(2),
+            })
+        );
+        assert_eq!(trial.take(), None, "taken once");
     }
 }

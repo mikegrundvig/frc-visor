@@ -63,6 +63,9 @@ fn camera() -> Camera {
 
 const STREAM: &str = "/stream/front%20left";
 
+/// The same camera's frame at full size.
+const FRAME: &str = "/frame/front%20left";
+
 /// The robot controller's address, as the rig's server keeps places for it: another loopback
 /// address than the watchers', which connect from 127.0.0.1.
 const CONTROLLER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2));
@@ -411,6 +414,174 @@ fn a_watcher_sees_the_tags_outlined_at_the_views_size_and_rate() {
         }
         drop(reader);
         wait_until("the watcher's gone", || rig.view.watchers() == 0);
+    });
+    assert_detection_kept_up(&received);
+}
+
+#[test]
+fn a_frame_at_full_size_is_what_detection_read_with_the_tags_it_found() {
+    let _one = one_at_a_time();
+    let scene = common::scene("one-tag");
+    let received = with_camera(Options::default(), &RealTime, |rig| {
+        let agent = agent();
+        let mut page = agent
+            .get(format!("http://{}/", rig.address))
+            .call()
+            .unwrap();
+        let page = page.body_mut().read_to_string().unwrap();
+        assert!(page.contains(&format!("<a href=\"{FRAME}\">")), "{page}");
+
+        let asked = Instant::now();
+        let mut response = agent
+            .get(format!("http://{}{FRAME}", rig.address))
+            .call()
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.headers()["content-type"],
+            "image/x-portable-graymap"
+        );
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let about = response.headers()["x-visor-frame"].to_str().unwrap();
+        let about: serde_json::Value = serde_json::from_str(about).unwrap();
+        let pgm = response
+            .body_mut()
+            .with_config()
+            .limit(4 << 20)
+            .read_to_vec()
+            .unwrap();
+
+        // The pixels detection read: the scene's, exactly, at the camera's size.
+        let head = b"P5\n1600 1304\n255\n";
+        assert_eq!(&pgm[..head.len()], head);
+        assert_eq!(pgm.len(), head.len() + 1600 * 1304);
+        assert!(pgm[head.len()..] == scene.image.pixels[..]);
+
+        // And what Visor found in that frame, as the robot was sent it.
+        assert_eq!(about["camera"], "front left");
+        assert_eq!(
+            (&about["width"], &about["height"]),
+            (&1600.into(), &1304.into())
+        );
+        assert_eq!(about["exposure_us"], 1000);
+        assert_eq!(about["gain"], 40);
+        assert!(about["focus"].as_f64().unwrap() > 0.0, "{about}");
+        let tags = about["tags"].as_array().unwrap();
+        assert_eq!(tags.len(), 1, "{about}");
+        let expected = &scene.tags[0];
+        assert_eq!(tags[0]["id"], expected.id);
+        for (i, corner) in tags[0]["corners"].as_array().unwrap().iter().enumerate() {
+            let (found, truth) = (corner.as_f64().unwrap(), expected.corners[i]);
+            assert!(
+                (found - truth).abs() < 1.0,
+                "corner {i}: {found} for {truth}"
+            );
+        }
+        assert!(
+            tags[0]["distance_m"].as_f64().unwrap() > 0.0,
+            "a lens, so a pose"
+        );
+
+        // One frame was made for the one ask, and no picture: nobody watches the stream.
+        assert_eq!(rig.view.stills_made(), 1);
+        assert_eq!(rig.view.made(), 0);
+
+        // A second straight after waits out the half second between a camera's frames.
+        let mut again = agent
+            .get(format!("http://{}{FRAME}", rig.address))
+            .call()
+            .unwrap();
+        assert_eq!(again.status(), 200);
+        let later: serde_json::Value =
+            serde_json::from_str(again.headers()["x-visor-frame"].to_str().unwrap()).unwrap();
+        again
+            .body_mut()
+            .with_config()
+            .limit(4 << 20)
+            .read_to_vec()
+            .unwrap();
+        assert!(
+            asked.elapsed() >= Duration::from_millis(500),
+            "{:?}",
+            asked.elapsed()
+        );
+        assert!(later["sequence"].as_u64() > about["sequence"].as_u64());
+        assert_eq!(rig.view.stills_made(), 2);
+
+        // A camera Visor hasn't got is said, with the ones it has.
+        let missing = agent
+            .get(format!("http://{}/frame/back", rig.address))
+            .call()
+            .unwrap();
+        assert_eq!(missing.status(), 404);
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(rig.view.stills_made(), 2, "nothing more unasked");
+    });
+    assert_detection_kept_up(&received);
+}
+
+/// A POST's status and answer, with an `Origin` when a page sends it.
+fn post_from(address: SocketAddr, path: &str, origin: Option<&str>) -> (u16, String) {
+    let mut connection = TcpStream::connect(address).unwrap();
+    let origin = origin.map_or(String::new(), |o| format!("Origin: {o}\r\n"));
+    write!(
+        connection,
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\n{origin}Content-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    answer(&mut connection)
+}
+
+#[test]
+fn settings_are_tried_from_the_view_only_where_the_configuration_allows_it() {
+    use visor::settings::Tried;
+    let _one = one_at_a_time();
+    const SETTINGS: &str = "/settings/front%20left";
+
+    // As on a robot: the configuration doesn't say so, and nothing is asked of the camera.
+    let received = with_camera(Options::default(), &RealTime, |rig| {
+        let (status, why) = post_from(rig.address, &format!("{SETTINGS}?gain=2"), None);
+        assert_eq!(status, 403, "{why}");
+        assert!(why.contains("try_settings = true"), "{why}");
+        assert_eq!(rig.view.trial.take(), None);
+        let page = get_from(CONTROLLER, rig.address, "/", "localhost").1;
+        assert!(!page.contains("trySettings"), "no form: {page}");
+    });
+    assert_detection_kept_up(&received);
+
+    // On a bench: asked of the camera's capture thread, which the rig hasn't, so it's still there.
+    let bench = Options {
+        try_settings: true,
+        ..Options::default()
+    };
+    let received = with_camera(bench, &RealTime, |rig| {
+        let here = format!("http://{}", rig.address);
+        let query = format!("{SETTINGS}?exposure_us=1500&gain=2");
+        let (status, said) = post_from(rig.address, &query, Some(&here));
+        assert_eq!(status, 202, "{said}");
+        assert!(said.contains("exposure_us 1500 and gain 2"), "{said}");
+        assert_eq!(
+            rig.view.trial.take(),
+            Some(Tried {
+                exposure_us: Some(1500),
+                gain: Some(2),
+            })
+        );
+        // Not from another site's page, not something else, not another camera, not by GET.
+        let (status, why) = post_from(rig.address, &query, Some("http://evil.example"));
+        assert_eq!(status, 403, "{why}");
+        let (status, why) = post_from(rig.address, &format!("{SETTINGS}?brightness=9"), None);
+        assert_eq!(status, 400, "{why}");
+        let (status, _) = post_from(rig.address, "/settings/back?gain=2", None);
+        assert_eq!(status, 404);
+        let (status, _) = get_from(CONTROLLER, rig.address, &query, "localhost");
+        assert_eq!(status, 405);
+        assert_eq!(rig.view.trial.take(), None, "none of those asked anything");
+        let page = get_from(CONTROLLER, rig.address, "/", "localhost").1;
+        assert!(
+            page.contains("trySettings(this, '/settings/front%20left')"),
+            "{page}"
+        );
     });
     assert_detection_kept_up(&received);
 }

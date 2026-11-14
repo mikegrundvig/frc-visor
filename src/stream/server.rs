@@ -1,7 +1,8 @@
-//! The live views over HTTP, on hyper and axum: `/` lists the cameras, each with its view, and
+//! The live views over HTTP, on hyper and axum: `/` lists the cameras, each with its view,
 //! `/stream/<camera>` is one camera's view as an MJPEG stream (`multipart/x-mixed-replace`), which
-//! a browser's `<img>` shows as it comes. It runs on a thread of its own, on a single-threaded
-//! tokio runtime, at a lower priority than detection.
+//! a browser's `<img>` shows as it comes, and `/frame/<camera>` is its next frame at full size, as
+//! detection read it ([`frame`]). It runs on a thread of its own, on a single-threaded tokio
+//! runtime, at a lower priority than detection.
 //!
 //! A watcher is sent the newest picture whenever its connection is ready for one, so a slow
 //! connection skips pictures rather than queueing them, and a stalled one is closed once a write
@@ -27,7 +28,7 @@ use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Extension, Router};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
@@ -37,10 +38,21 @@ use socket2::SockRef;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_io_timeout::TimeoutStream;
 
+use crate::settings::Tried;
 use crate::stream::view::View;
 
 /// The boundary between pictures in a stream.
 const BOUNDARY: &str = "frame";
+
+/// The least time between one camera's frames at full size. A ThriftyCam's is two megabytes, so
+/// asked for as fast as they're answered they could take the robot's whole network.
+const STILL_EVERY: Duration = Duration::from_millis(500);
+
+/// How long a request for a frame waits for the camera's next one before saying there's none.
+const STILL_WAIT: Duration = Duration::from_secs(2);
+
+/// The header a frame's facts come in: what it was taken at and the tags Visor found in it.
+pub const ABOUT_HEADER: &str = "x-visor-frame";
 
 /// A camera's name as one part of an address: everything but letters, digits and `-_.~` escaped.
 const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
@@ -71,6 +83,8 @@ pub struct Options {
     /// The socket's send buffer for each watcher, in bytes: a few pictures, so a stalled watcher
     /// fills it, and is found, in seconds.
     pub send_buffer: usize,
+    /// Whether an exposure and gain may be tried from here (`try_settings` in the configuration).
+    pub try_settings: bool,
 }
 
 impl Default for Options {
@@ -82,6 +96,7 @@ impl Default for Options {
             most_watchers: 8,
             kept_for_controller: 2,
             send_buffer: 256 * 1024,
+            try_settings: false,
         }
     }
 }
@@ -134,10 +149,15 @@ async fn serve(
     listener.set_nonblocking(true)?;
     let listener = TcpListener::from_std(listener)?;
     info!(
-        "live view on http://{}/ (/stream/<camera>)",
+        "live view on http://{}/ (/stream/<camera>, /frame/<camera>)",
         listener.local_addr()?
     );
     let shared = Arc::new(Shared {
+        stills: views
+            .iter()
+            .map(|_| tokio::sync::Mutex::new(None))
+            .collect(),
+        try_settings: options.try_settings,
         views,
         watchers: Places::new(
             options.most_watchers,
@@ -149,6 +169,8 @@ async fn serve(
     let app = Router::new()
         .route("/", get(index))
         .route("/stream/{camera}", get(stream))
+        .route("/frame/{camera}", get(frame))
+        .route("/settings/{camera}", post(settings))
         .with_state(shared)
         .layer(middleware::from_fn_with_state(names, only_addressed_here));
     let connections = Places::new(
@@ -255,6 +277,9 @@ async fn only_addressed_here(
 struct Shared {
     views: Arc<Vec<View>>,
     watchers: Arc<Places>,
+    /// For each view, when its last frame at full size was made: one request at a time holds it.
+    stills: Vec<tokio::sync::Mutex<Option<tokio::time::Instant>>>,
+    try_settings: bool,
 }
 
 /// The page at `/`: each camera's view, by name.
@@ -265,13 +290,28 @@ async fn index(State(shared): State<Arc<Shared>>) -> Html<String> {
          <style>body{font-family:sans-serif;background:#111;color:#eee;margin:1em}\
          img{max-width:100%;background:#000}</style></head><body>\n<h1>Visor's cameras</h1>\n",
     );
+    if shared.try_settings {
+        page.push_str(TRY_SCRIPT);
+    }
     for view in shared.views.iter() {
         let href = stream_path(&view.name);
+        let full = frame_path(&view.name);
         let name = escaped(&view.name);
         let _ = write!(
             page,
-            "<h2><a href=\"{href}\">{name}</a></h2>\n<img src=\"{href}\" alt=\"{name}'s live view\">\n"
+            "<h2><a href=\"{href}\">{name}</a></h2>\n<img src=\"{href}\" alt=\"{name}'s live view\">\n\
+             <p><a href=\"{full}\">one frame at full size, as detection read it (PGM)</a></p>\n"
         );
+        if shared.try_settings {
+            let to = settings_path(&view.name);
+            let _ = writeln!(
+                page,
+                "<form onsubmit=\"return trySettings(this, '{to}')\">exposure, microseconds \
+                 <input name=\"exposure\" size=\"7\" inputmode=\"numeric\"> gain \
+                 <input name=\"gain\" size=\"4\" inputmode=\"numeric\"> <button>try</button> \
+                 <output name=\"said\"></output></form>"
+            );
+        }
     }
     page.push_str("</body></html>\n");
     Html(page)
@@ -280,6 +320,28 @@ async fn index(State(shared): State<Arc<Shared>>) -> Html<String> {
 /// A camera's stream's address on this server: `/stream/front-left`.
 pub fn stream_path(camera: &str) -> String {
     format!("/stream/{}", utf8_percent_encode(camera, SEGMENT))
+}
+
+/// The page's script where settings can be tried: posts what a camera's form holds, and shows the
+/// answer beside it.
+const TRY_SCRIPT: &str = "<script>function trySettings(form, to) {\n\
+  const asked = [];\n\
+  if (form.exposure.value) asked.push('exposure_us=' + encodeURIComponent(form.exposure.value));\n\
+  if (form.gain.value) asked.push('gain=' + encodeURIComponent(form.gain.value));\n\
+  fetch(to + '?' + asked.join('&'), {method: 'POST'})\n\
+    .then(answer => answer.text()).then(text => { form.said.value = text; })\n\
+    .catch(error => { form.said.value = String(error); });\n\
+  return false;\n\
+}</script>\n";
+
+/// Where a camera's settings are tried on this server: `/settings/front-left`.
+pub fn settings_path(camera: &str) -> String {
+    format!("/settings/{}", utf8_percent_encode(camera, SEGMENT))
+}
+
+/// A camera's full-size frame's address on this server: `/frame/front-left`.
+pub fn frame_path(camera: &str) -> String {
+    format!("/frame/{}", utf8_percent_encode(camera, SEGMENT))
 }
 
 /// Text safe in HTML, in an element or an attribute.
@@ -305,16 +367,10 @@ async fn stream(
     Path(camera): Path<String>,
 ) -> Response {
     let Some(view) = shared.views.iter().find(|view| view.name == camera) else {
-        let names: Vec<&str> = shared.views.iter().map(|v| v.name.as_str()).collect();
-        let why = format!("no camera {camera:?}: Visor has {}\n", names.join(", "));
-        return (StatusCode::NOT_FOUND, why).into_response();
+        return no_such_camera(&shared, &camera);
     };
     let Some(seat) = shared.watchers.take(from.ip()) else {
-        let why = format!(
-            "{} watchers already, the most Visor serves: close another view\n",
-            shared.watchers.most
-        );
-        return (StatusCode::SERVICE_UNAVAILABLE, why).into_response();
+        return no_seat(&shared);
     };
     let pictures = view.watch();
     let parts = futures_util::stream::unfold((pictures, seat), |(mut pictures, seat)| async move {
@@ -335,6 +391,164 @@ async fn stream(
         .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from_stream(parts))
         .expect("a fixed set of valid headers")
+}
+
+/// A camera's next frame at full size: the pixels detection read, as a binary PGM, with what it
+/// was taken at and the tags found in it as JSON in the [`ABOUT_HEADER`] header. Made on the view's
+/// thread from the frame detection hands over after sending it, as a picture is, so asking never
+/// holds detection up. One request at a time for each camera, [`STILL_EVERY`] apart, and each takes
+/// a watcher's place while it waits.
+async fn frame(
+    State(shared): State<Arc<Shared>>,
+    ConnectInfo(from): ConnectInfo<SocketAddr>,
+    Path(camera): Path<String>,
+) -> Response {
+    let Some(at) = shared.views.iter().position(|view| view.name == camera) else {
+        return no_such_camera(&shared, &camera);
+    };
+    let Some(_seat) = shared.watchers.take(from.ip()) else {
+        return no_seat(&shared);
+    };
+    let view = &shared.views[at];
+    let mut last = shared.stills[at].lock().await;
+    if let Some(last) = *last {
+        tokio::time::sleep_until(last + STILL_EVERY).await;
+    }
+    let mut stills = view.ask_still();
+    let made = tokio::time::timeout(STILL_WAIT, stills.changed()).await;
+    *last = Some(tokio::time::Instant::now());
+    let still = match made {
+        Ok(Ok(())) => stills.borrow_and_update().clone(),
+        // No frame in time, or Visor is stopping.
+        _ => None,
+    };
+    view.forget_still();
+    let Some(still) = still else {
+        let why = format!(
+            "no frame from {camera:?} in {} s: the camera is sending none\n",
+            STILL_WAIT.as_secs()
+        );
+        return (StatusCode::SERVICE_UNAVAILABLE, why).into_response();
+    };
+    let mut response = Response::builder()
+        .header(header::CONTENT_TYPE, "image/x-portable-graymap")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(still.pgm.clone()))
+        .expect("a fixed set of valid headers");
+    // ASCII by its making; were it ever not, the frame goes without it.
+    if let Ok(about) = HeaderValue::from_str(&still.about) {
+        response.headers_mut().insert(ABOUT_HEADER, about);
+    }
+    response
+}
+
+/// Tries an exposure and gain on a running camera: `POST /settings/<camera>?exposure_us=1500&gain=2`,
+/// either or both. Only where the configuration says `try_settings = true`, which a bench's does and
+/// a robot's never does. The camera's capture thread sets them before its next frame, held to the
+/// camera's own range, and every frame after says what's in effect: the view's line, a full-size
+/// frame's facts, the frames sent to the robot. They last until the camera is opened again; what
+/// lasts is the configuration. A page from another site can't ask ([`same_origin`]).
+async fn settings(
+    State(shared): State<Arc<Shared>>,
+    Path(camera): Path<String>,
+    request: Request,
+) -> Response {
+    let Some(view) = shared.views.iter().find(|view| view.name == camera) else {
+        return no_such_camera(&shared, &camera);
+    };
+    if !shared.try_settings {
+        let why = "settings can't be tried here: this Visor's configuration doesn't say \
+                   try_settings = true. On a robot, a camera's settings are the robot program's\n";
+        return (StatusCode::FORBIDDEN, why).into_response();
+    }
+    if !same_origin(request.headers()) {
+        let why = "settings are tried from Visor's own page, not another site's\n";
+        return (StatusCode::FORBIDDEN, why).into_response();
+    }
+    let tried = match tried(request.uri().query().unwrap_or("")) {
+        Ok(tried) => tried,
+        Err(why) => return (StatusCode::BAD_REQUEST, format!("{why}\n")).into_response(),
+    };
+    view.trial.ask(tried);
+    let said = |name: &str, value: Option<String>| value.map(|v| format!("{name} {v}"));
+    let asked: Vec<String> = [
+        said("exposure_us", tried.exposure_us.map(|us| us.to_string())),
+        said("gain", tried.gain.map(|gain| gain.to_string())),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let answer = format!(
+        "{camera}: trying {}, until the camera is opened again. The view's line says what's in effect\n",
+        asked.join(" and ")
+    );
+    (StatusCode::ACCEPTED, answer).into_response()
+}
+
+/// What a request's query asks to try: `exposure_us` (1 to 10,000,000, as the configuration's) and
+/// `gain` (the camera's own units), either or both, and nothing else.
+pub fn tried(query: &str) -> Result<Tried, String> {
+    let mut tried = Tried::default();
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        match name {
+            "exposure_us" => match value.parse::<u32>() {
+                Ok(us) if (1..=10_000_000).contains(&us) => tried.exposure_us = Some(us),
+                _ => {
+                    return Err(format!(
+                        "exposure_us is microseconds, 1 to 10000000, not {value:?}"
+                    ));
+                }
+            },
+            "gain" => match value.parse::<i64>() {
+                Ok(gain) => tried.gain = Some(gain),
+                Err(_) => return Err(format!("gain is a whole number, not {value:?}")),
+            },
+            other => {
+                return Err(format!(
+                    "{other:?} can't be tried: exposure_us and gain can"
+                ));
+            }
+        }
+    }
+    if tried == Tried::default() {
+        return Err("give exposure_us, gain, or both: ?exposure_us=1500&gain=2".to_string());
+    }
+    Ok(tried)
+}
+
+/// Whether a request comes from Visor's own page, or from no page at all (a command line): its
+/// `Origin`, when it has one, names the host it was sent to. A page from another site that posts
+/// here has its own.
+pub fn same_origin(headers: &axum::http::HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return true;
+    };
+    let (Ok(origin), Some(Ok(host))) = (
+        origin.to_str(),
+        headers.get(header::HOST).map(HeaderValue::to_str),
+    ) else {
+        return false;
+    };
+    origin
+        .split_once("://")
+        .is_some_and(|(_, from)| from.eq_ignore_ascii_case(host))
+}
+
+/// The answer to a request for a camera Visor hasn't got: the ones it has.
+fn no_such_camera(shared: &Shared, camera: &str) -> Response {
+    let names: Vec<&str> = shared.views.iter().map(|v| v.name.as_str()).collect();
+    let why = format!("no camera {camera:?}: Visor has {}\n", names.join(", "));
+    (StatusCode::NOT_FOUND, why).into_response()
+}
+
+/// The answer when every watcher's place is taken.
+fn no_seat(shared: &Shared) -> Response {
+    let why = format!(
+        "{} watchers already, the most Visor serves: close another view\n",
+        shared.watchers.most
+    );
+    (StatusCode::SERVICE_UNAVAILABLE, why).into_response()
 }
 
 /// One picture as a part of the stream.
@@ -411,6 +625,7 @@ mod tests {
         ];
         for (name, path) in cases {
             assert_eq!(stream_path(name), path);
+            assert_eq!(frame_path(name), path.replacen("/stream/", "/frame/", 1));
         }
         assert_eq!(
             escaped("<b>\"Tom's\" & co</b>"),
@@ -449,5 +664,64 @@ mod tests {
             &part[..],
             b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 4\r\n\r\nJPEG\r\n"
         );
+    }
+
+    #[test]
+    fn a_trial_asks_for_an_exposure_a_gain_or_both_and_nothing_else() {
+        let both = Tried {
+            exposure_us: Some(1500),
+            gain: Some(2),
+        };
+        assert_eq!(tried("exposure_us=1500&gain=2"), Ok(both));
+        assert_eq!(tried("gain=2&exposure_us=1500"), Ok(both));
+        assert_eq!(tried("gain=-3").unwrap().gain, Some(-3));
+        assert_eq!(tried("exposure_us=10000000").unwrap().gain, None);
+        // (the query, part of why it's refused)
+        let refused = [
+            ("", "give exposure_us, gain, or both"),
+            ("exposure_us=0", "1 to 10000000"),
+            ("exposure_us=10000001", "1 to 10000000"),
+            ("exposure_us=fast", "1 to 10000000"),
+            ("gain=", "whole number"),
+            ("gain=1.5", "whole number"),
+            ("brightness=3", "\"brightness\" can't be tried"),
+            ("exposure_us=1500&reset", "\"reset\" can't be tried"),
+        ];
+        for (query, why) in refused {
+            let error = tried(query).unwrap_err();
+            assert!(error.contains(why), "{query:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_request_from_another_site_s_page_is_not_from_here() {
+        // (the request's Origin, its Host, whether it's from here)
+        let rows = [
+            (None, Some("10.12.34.11:5809"), true),
+            (
+                Some("http://10.12.34.11:5809"),
+                Some("10.12.34.11:5809"),
+                true,
+            ),
+            (
+                Some("http://VISOR-1.local:5809"),
+                Some("visor-1.local:5809"),
+                true,
+            ),
+            (Some("http://evil.example"), Some("10.12.34.11:5809"), false),
+            (Some("http://10.12.34.11"), Some("10.12.34.11:5809"), false),
+            (Some("null"), Some("10.12.34.11:5809"), false),
+            (Some("http://10.12.34.11:5809"), None, false),
+        ];
+        for (origin, host, here) in rows {
+            let mut headers = axum::http::HeaderMap::new();
+            if let Some(origin) = origin {
+                headers.insert(header::ORIGIN, HeaderValue::from_static(origin));
+            }
+            if let Some(host) = host {
+                headers.insert(header::HOST, HeaderValue::from_static(host));
+            }
+            assert_eq!(same_origin(&headers), here, "{origin:?} to {host:?}");
+        }
     }
 }

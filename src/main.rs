@@ -223,7 +223,10 @@ fn run(path: &Path) -> Result<()> {
         cameras,
         config.robot,
         listener,
-        server::Options::default(),
+        server::Options {
+            try_settings: config.try_settings,
+            ..server::Options::default()
+        },
         watchdog::interval(),
         &SystemClocks,
         &stop,
