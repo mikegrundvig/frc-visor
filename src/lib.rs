@@ -22,5 +22,6 @@ pub mod running;
 pub mod service;
 pub mod settings;
 pub mod stream;
+mod v4l2_controls;
 pub mod watchdog;
 pub mod wire;

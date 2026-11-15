@@ -15,7 +15,7 @@ use std::io;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use v4l::control::{self, Control as V4l2Control, Value};
+use v4l::control::{Control as V4l2Control, Value};
 
 use crate::config::Camera;
 
@@ -53,8 +53,9 @@ pub enum Kind {
     Integer,
     Boolean,
     Menu,
-    /// One Visor neither sets nor lists the range of (a button, a string).
-    Other,
+    /// One Visor doesn't read or list the range of (a button, a string, a type newer than Visor
+    /// knows), with V4L2's number for its type.
+    Other(u32),
 }
 
 /// A camera's controls: a V4L2 device's, or a test's.
@@ -68,47 +69,24 @@ pub trait Controls {
 
 impl Controls for v4l::Device {
     fn list(&self) -> io::Result<Vec<Control>> {
-        let described = match self.query_controls() {
-            Ok(described) => described,
-            // What a device with no controls at all answers the first query with.
-            Err(error) if error.kind() == io::ErrorKind::InvalidInput => Vec::new(),
-            Err(error) => return Err(error),
-        };
-        Ok(described
-            .into_iter()
-            .filter(|c| c.typ != control::Type::CtrlClass)
-            .map(|c| Control {
-                id: c.id,
-                name: control_key(&c.name),
-                kind: match c.typ {
-                    control::Type::Integer | control::Type::Integer64 => Kind::Integer,
-                    control::Type::Boolean => Kind::Boolean,
-                    control::Type::Menu | control::Type::IntegerMenu => Kind::Menu,
-                    _ => Kind::Other,
-                },
-                minimum: c.minimum,
-                maximum: c.maximum,
-                step: c.step,
-                default: c.default,
-                menu: c
-                    .items
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(value, item)| (i64::from(value), item.to_string()))
-                    .collect(),
-                inactive: c.flags.contains(control::Flags::INACTIVE),
-            })
-            .collect())
+        crate::v4l2_controls::list(self)
     }
 
     fn get(&self, control: &Control) -> io::Result<i64> {
+        let not_a_number = || {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("{} isn't a number", control.name),
+            )
+        };
+        // Not asked of the crate, which panics on a control of a type it doesn't know.
+        if let Kind::Other(_) = control.kind {
+            return Err(not_a_number());
+        }
         match self.control(control.id)?.value {
             Value::Integer(value) => Ok(value),
             Value::Boolean(on) => Ok(i64::from(on)),
-            _ => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("{} isn't a number", control.name),
-            )),
+            _ => Err(not_a_number()),
         }
     }
 
@@ -406,10 +384,6 @@ impl Said {
 pub fn describe(device: &impl Controls) -> io::Result<Vec<String>> {
     let mut lines = Vec::new();
     for control in device.list()? {
-        let now = match device.get(&control) {
-            Ok(value) => shown(&control, value),
-            Err(_) => "unreadable".into(),
-        };
         let what = match control.kind {
             Kind::Integer => format!(
                 "{} to {}{}",
@@ -430,7 +404,17 @@ pub fn describe(device: &impl Controls) -> io::Result<Vec<String>> {
                     .collect();
                 format!("one of {}", items.join(", "))
             }
-            Kind::Other => "not a setting".into(),
+            Kind::Other(type_number) => {
+                lines.push(format!(
+                    "{}: V4L2 control type {type_number:#x}, which Visor doesn't read",
+                    control.name
+                ));
+                continue;
+            }
+        };
+        let now = match device.get(&control) {
+            Ok(value) => shown(&control, value),
+            Err(_) => "unreadable".into(),
         };
         let mut line = format!(
             "{}: {what}; default {}, now {now}",
@@ -511,6 +495,12 @@ mod tests {
             Ok(self.controls.clone())
         }
         fn get(&self, control: &Control) -> io::Result<i64> {
+            // Reading one through the `v4l` crate is what ends the program.
+            assert!(
+                !matches!(control.kind, Kind::Other(_)),
+                "{} was read",
+                control.name
+            );
             if self.unreadable == Some(control.id) {
                 return Err(io::Error::other("unreadable"));
             }
@@ -969,6 +959,50 @@ mod tests {
                 "gain: 0 to 100; default 16, now 16 [Visor's gain]",
                 "white_balance_automatic: on or off; default on, now on",
             ]
+        );
+    }
+
+    /// A control of a V4L2 type newer than the `v4l` crate knows, as a newer kernel gives a UVC
+    /// camera (`V4L2_CTRL_TYPE_RECT`).
+    fn region_of_interest() -> Control {
+        Control {
+            kind: Kind::Other(0x107),
+            ..integer(0x0098_1ae1, "region_of_interest_rectangle", 0, 0, 0)
+        }
+    }
+
+    #[test]
+    fn a_control_of_a_type_visor_doesn_t_know_is_listed_by_its_type_and_never_read() {
+        let device = Fake::new(vec![brightness(), region_of_interest(), gain()]);
+        assert_eq!(
+            describe(&device).unwrap(),
+            [
+                "brightness: -64 to 64; default 0, now 0",
+                "region_of_interest_rectangle: V4L2 control type 0x107, which Visor doesn't read",
+                "gain: 0 to 100; default 16, now 16 [Visor's gain]",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_camera_with_such_a_control_gets_its_exposure_and_gain_all_the_same() {
+        let device = Fake::new(vec![
+            region_of_interest(),
+            auto_exposure(),
+            exposure_time(),
+            gain(),
+        ]);
+        let applied = apply(&device, &camera(Some(1000), Some(40))).unwrap();
+        assert_eq!(
+            applied,
+            Applied {
+                in_effect: InEffect {
+                    exposure_us: Some(1000),
+                    gain: Some(40),
+                    auto_exposure: Some(false),
+                },
+                warnings: Vec::new(),
+            }
         );
     }
 
