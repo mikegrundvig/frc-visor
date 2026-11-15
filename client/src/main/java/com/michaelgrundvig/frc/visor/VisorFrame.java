@@ -74,7 +74,10 @@ public final class VisorFrame {
     return versionId;
   }
 
-  /** Counts this camera's frames from Visor's start; a gap is a dropped frame. */
+  /**
+   * Counts the frames Visor has sent for this camera, from its start; a gap is a datagram that
+   * didn't arrive. The frames Visor never sent are {@link #dropped()}.
+   */
   public long sequence() {
     return sequence;
   }

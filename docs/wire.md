@@ -14,7 +14,7 @@ tag. Eight tags is 820 bytes; 14, the most a frame carries, is 1,396, inside one
 |---|---|---|---|
 | 0 | Magic | u32 | `0x52534956`, the bytes `V I S R`; anything else isn't a Visor frame |
 | 4 | Version ID | u32 | Visor's version as a number: 2026.11.2 is 20261102 |
-| 8 | Sequence | u32 | Counts this camera's frames from Visor's start; a gap is a dropped frame |
+| 8 | Sequence | u32 | Counts the frames Visor has sent for this camera, from its start; a gap is a datagram that didn't arrive |
 | 12 | Width | u16 | The image's, in pixels |
 | 14 | Height | u16 | |
 | 16 | Capture time | i64 | Nanoseconds on the robot's clock (below) |

@@ -42,7 +42,8 @@ const TAG_FLAG_POSES: u8 = 1 << 0;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frame {
     pub version_id: u32,
-    /// Counts this camera's frames from program start; a gap is a dropped frame.
+    /// Counts the frames sent for this camera, from program start; a gap is a datagram that didn't
+    /// arrive. The frames Visor never sent are `dropped`.
     pub sequence: u32,
     pub width: u16,
     pub height: u16,
