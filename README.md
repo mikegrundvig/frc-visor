@@ -39,9 +39,9 @@ field layout, no multi-tag solving. Its one page is each camera's live view, to 
   driver before Visor got them), so the robot logs each camera's frame rate, drops and load
   ([docs/wire.md](docs/wire.md#the-cameras-health)). Every 10 s Visor's journal says the same, one
   line per camera: `front: 59.8 fps, 0 dropped, detect 4.2 ms mean, 9.8 ms worst, ...`. A camera
-  that sends 60 frames a second and shows fewer, with the rest dropped and a warning of frames the
-  driver never gave, is sending some of them incomplete: no program gets those from the driver, and
-  a smaller size is what brings the rate back.
+  that sends 60 frames a second and shows fewer, with the rest as `70 dropped (70 the driver never
+  gave)`, is sending some of them incomplete: no program gets those from the driver, the frames
+  that do come are whole, and a smaller size is what brings the rate back.
 
 - **Live view.** Each camera's frames, made smaller, with its tags outlined and a line of its
   numbers, over HTTP on port 5809 while anyone watches: nothing is made while no one does, and
