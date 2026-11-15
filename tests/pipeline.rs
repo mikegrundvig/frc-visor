@@ -334,12 +334,13 @@ fn frames_replaced_before_detection_got_to_them_are_counted_in_the_next() {
     let camera = camera();
     let latest = Latest::new();
     let scene = common::scene("empty");
-    // Three frames wait before the detect thread starts: the newest replaced two, and a broken one
-    // came after it.
+    // Three frames wait before the detect thread starts: the newest replaced two, a broken one
+    // came after it, and the driver never gave the two after that.
     for at in 0..3 {
         latest.put(captured(&scene, at, false));
     }
     latest.broken();
+    latest.withheld(2);
     let stop = AtomicBool::new(false);
     let mut buffer = [0u8; 2048];
     let received = thread::scope(|scope| {
@@ -361,7 +362,7 @@ fn frames_replaced_before_detection_got_to_them_are_counted_in_the_next() {
         Frame::decode(&buffer[..n]).expect("a frame")
     });
     assert_eq!(received.sequence, 0, "the first frame sent");
-    assert_eq!(received.dropped, 3);
+    assert_eq!(received.dropped, 5);
 }
 
 #[test]

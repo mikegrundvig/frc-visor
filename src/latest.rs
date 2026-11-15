@@ -1,8 +1,9 @@
 //! The hand-off between a camera's capture thread and its detect thread: one slot holding the
 //! newest frame. The capture thread replaces whatever is waiting, so a slow detection drops frames
 //! rather than falling behind. Images are recycled, so frames don't allocate. The slot counts the
-//! frames that never went on: replaced before they were taken, or broken; and the times the detect
-//! thread asked for one, which say it's running ([`crate::watchdog`]).
+//! frames that never went on: replaced before they were taken, broken, or never given by the
+//! driver; and the times the detect thread asked for one, which say it's running
+//! ([`crate::watchdog`]).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -40,6 +41,8 @@ struct State {
     dropped: u64,
     /// Since the detect thread last asked.
     short: ShortFrames,
+    /// Since the detect thread last asked.
+    withheld: u32,
 }
 
 /// The frames the camera gave too short to use, since the detect thread last asked: counted and
@@ -112,6 +115,21 @@ impl Latest {
         std::mem::take(&mut self.state.lock().unwrap().short)
     }
 
+    /// Counts `frames` the driver numbered and never gave, as dropped, and keeps how many for the
+    /// report. The driver numbers every frame the camera starts and gives only the whole ones: one
+    /// the camera sent incomplete or flagged bad it throws away, as it does one it has no buffer
+    /// for.
+    pub fn withheld(&self, frames: u32) {
+        let mut state = self.state.lock().unwrap();
+        state.dropped += u64::from(frames);
+        state.withheld = state.withheld.saturating_add(frames);
+    }
+
+    /// The frames the driver never gave since the last call, which starts the count again.
+    pub fn take_withheld(&self) -> u32 {
+        std::mem::take(&mut self.state.lock().unwrap().withheld)
+    }
+
     /// Gives back a taken frame's image for reuse.
     pub fn recycle(&self, image: GrayImage) {
         let mut state = self.state.lock().unwrap();
@@ -123,7 +141,7 @@ impl Latest {
     }
 
     /// How many frames were dropped since the program started: replaced before they were taken,
-    /// or broken.
+    /// broken, or never given by the driver.
     pub fn dropped(&self) -> u64 {
         self.state.lock().unwrap().dropped
     }
@@ -172,6 +190,13 @@ mod tests {
         );
         assert_eq!(latest.take_short(), ShortFrames::default());
         assert_eq!(latest.dropped(), 5);
+        // So do frames the driver never gave, kept for the report the same way.
+        latest.withheld(2);
+        latest.withheld(1);
+        assert_eq!(latest.dropped(), 8);
+        assert_eq!(latest.take_withheld(), 3);
+        assert_eq!(latest.take_withheld(), 0);
+        assert_eq!(latest.dropped(), 8);
     }
 
     #[test]

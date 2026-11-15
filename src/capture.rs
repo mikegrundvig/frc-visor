@@ -3,6 +3,12 @@
 //! in effect. On any error it closes the camera and tries again every 300 ms, so an unplugged
 //! camera comes back by itself, its settings set again.
 //!
+//! Not every frame the camera sends is given to Visor. Linux's USB camera driver throws away an
+//! uncompressed frame that came incomplete or that the camera flagged bad, and tells no one; only
+//! the number it gives each frame shows it, by skipping. Those are counted as dropped
+//! ([`Latest::withheld`]), so a camera sending 60 frames a second of which 53 are whole shows as
+//! 53 and 7 dropped, not as 53 and none.
+//!
 //! The camera is a [`Source`]: a V4L2 device ([`V4l2`]), memory-mapped, or a test's.
 
 use std::io;
@@ -142,6 +148,8 @@ fn capture(
     *last_error = None;
 
     let mut said_time_source = false;
+    // The driver's number of the last frame it gave, since the camera was opened.
+    let mut numbered: Option<u32> = None;
     while !stop.load(Ordering::Relaxed) {
         if let Some(asked) = trial.take() {
             let with = tried.get_or_insert_with(|| camera.clone());
@@ -164,6 +172,11 @@ fn capture(
             }
         }
         let (data, meta) = opened.next()?;
+        let missing = withheld(numbered, meta.sequence);
+        if missing > 0 {
+            latest.withheld(missing);
+        }
+        numbered = Some(meta.sequence);
         if meta.flags.contains(Flags::ERROR) {
             latest.broken();
             continue;
@@ -332,6 +345,16 @@ pub fn choose_format(
         })
 }
 
+/// How many frames the driver numbered after `last`, the one it gave before, and never gave: the
+/// numbers skipped on the way to `now`. None before a stream's first frame, and none from a driver
+/// that doesn't number its frames, or whose numbers go back.
+fn withheld(last: Option<u32>, now: u32) -> u32 {
+    match last {
+        Some(last) if now > last => now - last - 1,
+        _ => 0,
+    }
+}
+
 /// The exposure and gain in effect, as the log says it once the camera is open.
 fn described(in_effect: InEffect) -> String {
     let exposure = match (in_effect.auto_exposure, in_effect.exposure_us) {
@@ -397,6 +420,9 @@ mod tests {
         Short,
         /// A frame the driver marked bad.
         Errored,
+        /// A frame the driver numbered and threw away: the camera sent it incomplete. Nothing is
+        /// given for it; the next frame's number shows it.
+        Withheld,
         /// No frame for a second: the stream's wait runs out.
         Stall,
         /// Nothing: the camera was unplugged mid-stream.
@@ -442,6 +468,8 @@ mod tests {
         values: RefCell<Vec<(u32, i64)>>,
         frame: Vec<u8>,
         meta: Metadata,
+        /// The driver's number for its next frame: from 0 each time it's opened, as V4L2's is.
+        sequence: u32,
     }
 
     impl<'a> Source for Fake<'a> {
@@ -481,6 +509,7 @@ mod tests {
                 ]),
                 frame: vec![0; (WIDTH * HEIGHT) as usize],
                 meta: Metadata::default(),
+                sequence: 0,
             })
         }
     }
@@ -562,17 +591,29 @@ mod tests {
 
         fn next(&mut self) -> io::Result<(&[u8], &Metadata)> {
             self.fake.take();
-            let event = self.events.pop_front().expect("a stream ends in an error");
+            let mut event = self.events.pop_front().expect("a stream ends in an error");
+            // A frame the driver threw away takes its number, and the camera's, and isn't given.
+            while matches!(event, Event::Withheld) {
+                self.fake.given += 1;
+                self.sequence += 1;
+                event = self
+                    .events
+                    .pop_front()
+                    .expect("a frame after those withheld");
+            }
             if self.events.is_empty() && self.fake.plugs.is_empty() {
                 self.fake.stop.store(true, Ordering::Relaxed);
             }
             self.fake.given += 1;
+            let sequence = self.sequence;
+            self.sequence += 1;
             let whole = WIDTH * HEIGHT;
             let stamped = Flags::TIMESTAMP_MONOTONIC;
             let (bytesused, flags) = match event {
                 Event::Frame => (whole, stamped),
                 Event::Short => (whole / 2, stamped),
                 Event::Errored => (whole, stamped | Flags::ERROR),
+                Event::Withheld => unreachable!("never given"),
                 Event::Stall => {
                     return Err(io::Error::new(io::ErrorKind::TimedOut, "no frame for 1 s"));
                 }
@@ -586,6 +627,7 @@ mod tests {
                     sec: 0,
                     usec: self.fake.given as libc::time_t,
                 },
+                sequence,
                 ..Metadata::default()
             };
             Ok((&self.frame, &self.meta))
@@ -658,8 +700,8 @@ mod tests {
 
     /// What the camera does each time it's opened, the configured gain (it has no gain control)
     /// and named controls; then the frames that reached the slot by number, the short frames, the frames
-    /// dropped (short or broken), how many times it was opened, how many times it was set up to
-    /// stream, and part of each warning, in order.
+    /// dropped (short, broken, or never given by the driver), how many times it was opened, how
+    /// many times it was set up to stream, and part of each warning, in order.
     struct Case {
         name: &'static str,
         plugs: Vec<Plug>,
@@ -702,6 +744,49 @@ mod tests {
                 opened: 1,
                 set_up: 1,
                 warnings: vec![],
+            },
+            Case {
+                name: "frames the driver numbers and never gives are counted as dropped, and the \
+                       camera streams on",
+                plugs: vec![Plug::Streams(vec![
+                    Frame, Withheld, Frame, Frame, Withheld, Withheld, Frame,
+                ])],
+                gain: None,
+                named: vec![],
+                taken: vec![1, 3, 4, 7],
+                short: 0,
+                dropped: 3,
+                opened: 1,
+                set_up: 1,
+                warnings: vec![],
+            },
+            Case {
+                name: "a frame withheld before a broken one: each is counted once",
+                plugs: vec![Plug::Streams(vec![Frame, Withheld, Errored, Frame])],
+                gain: None,
+                named: vec![],
+                taken: vec![1, 4],
+                short: 0,
+                dropped: 2,
+                opened: 1,
+                set_up: 1,
+                warnings: vec![],
+            },
+            Case {
+                name: "frames withheld before a stream's first: nothing came before to count from, \
+                       so none; and the numbers start again when the camera is opened again",
+                plugs: vec![
+                    Plug::Streams(vec![Withheld, Frame, Frame, Frame, Stall]),
+                    Plug::Streams(vec![Withheld, Withheld, Frame]),
+                ],
+                gain: None,
+                named: vec![],
+                taken: vec![2, 3, 4, 8],
+                short: 0,
+                dropped: 0,
+                opened: 2,
+                set_up: 2,
+                warnings: vec!["no frame for 1 s; trying again every 1 ms"],
             },
             Case {
                 name: "a stall: the camera is opened again, and set up again",
@@ -889,6 +974,23 @@ mod tests {
         assert_eq!(fake.opened, 2);
         assert_eq!(fake.exposures_set.get(), 3, "each opening, and the trial");
         assert_eq!(trial.take(), None);
+    }
+
+    #[test]
+    fn the_frames_the_driver_never_gave_are_the_numbers_it_skipped() {
+        // (the number of the frame before, this frame's, the frames between that never came)
+        let cases: [(&str, Option<u32>, u32, u32); 7] = [
+            ("a stream's first frame", None, 0, 0),
+            ("a stream's first frame, numbered late", None, 5, 0),
+            ("the next frame", Some(5), 6, 0),
+            ("one skipped", Some(5), 7, 1),
+            ("a second's worth skipped", Some(5), 66, 60),
+            ("a driver that numbers every frame 0", Some(0), 0, 0),
+            ("numbers that go back", Some(9), 2, 0),
+        ];
+        for (name, last, now, expected) in cases {
+            assert_eq!(withheld(last, now), expected, "{name}");
+        }
     }
 
     /// What the camera offers, what's configured, and the choice or part of the refusal.

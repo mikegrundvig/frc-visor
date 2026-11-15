@@ -28,7 +28,7 @@ tag. Eight tags is 820 bytes; 14, the most a frame carries, is 1,396, inside one
 | 37 | High brightness | u8 | Its 99th percentile, about a tag's white where one is in view |
 | 38 | Clipped | u16 | The share of those pixels at 250 or brighter, in hundredths of a percent: 0 to 10,000 |
 | 40 | Detect time | u32 | How long finding this frame's tags and solving their poses took, in microseconds |
-| 44 | Dropped | u32 | The camera's frames Visor never sent, from its start: replaced by a newer one before detection got to them, or broken (marked bad by the driver, or short). Wraps, as the sequence does |
+| 44 | Dropped | u32 | The camera's frames Visor never sent, from its start: replaced by a newer one before detection got to them, broken (marked bad by the driver, or short), or never given by the driver (below). Wraps, as the sequence does |
 | 48 | Configuration ID | u32 | The configuration Visor runs: the first four bytes of its file's SHA-256, read big-endian (below) |
 
 ## Each tag
@@ -94,7 +94,10 @@ robot works the rest out over any window it likes.
 - **Frame rate:** the frames that arrive in a window, over its length.
 - **Dropped at Visor:** the dropped count's rise across the window. Above 0, detection didn't keep
   up (each frame's detect time says whether it ran past the camera's frame period), or the camera
-  sent broken frames (a USB link short of bandwidth).
+  sent broken frames (more than it or its USB link carries at that size and rate). Most broken
+  frames never reach Visor: Linux's USB camera driver throws away an uncompressed frame that came
+  incomplete or that the camera flagged bad. It still numbers each one, so Visor counts the numbers
+  it skips, and the frame rate and these drops together are the rate the camera sends at.
 - **Lost on the way:** the sequence's rise, less the frames that arrived: datagrams the network
   lost.
 - **Detect time, mean and worst:** over the frames that arrived.

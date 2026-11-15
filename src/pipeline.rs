@@ -43,7 +43,13 @@ pub fn run(
         if numbers.started.elapsed() >= REPORT_EVERY {
             let dropped = latest.dropped();
             let short = latest.take_short();
-            numbers.report(&camera.name, dropped - numbers.dropped_before, &short);
+            let withheld = latest.take_withheld();
+            numbers.report(
+                &camera.name,
+                dropped - numbers.dropped_before,
+                &short,
+                withheld,
+            );
             numbers = Numbers::new(dropped);
         }
         let Some(captured) = latest.take(Duration::from_millis(100)) else {
@@ -244,8 +250,8 @@ impl Numbers {
     }
 
     /// What went wrong with frames since the last report, each a warning: frames not sent, sent
-    /// unsynced, NAPA failing, and the camera's `short` frames.
-    fn problems(&self, camera: &str, short: &ShortFrames) -> Vec<String> {
+    /// unsynced, NAPA failing, the camera's `short` frames, and those the driver `withheld`.
+    fn problems(&self, camera: &str, short: &ShortFrames, withheld: u32) -> Vec<String> {
         let mut warnings = Vec::new();
         if self.send_failures > 0 {
             warnings.push(format!(
@@ -271,17 +277,23 @@ impl Numbers {
                 short.count
             ));
         }
+        if withheld > 0 {
+            warnings.push(format!(
+                "{camera}: {withheld} frames the driver never gave Visor: it throws away a frame \
+                 the camera sent incomplete or flagged bad, and one it has no free buffer for"
+            ));
+        }
         warnings
     }
 
-    fn report(&self, camera: &str, dropped: u64, short: &ShortFrames) {
+    fn report(&self, camera: &str, dropped: u64, short: &ShortFrames, withheld: u32) {
         if self.frames == 0 {
             let seconds = self.started.elapsed().as_secs_f64();
             warn!("{camera}: no frames for {seconds:.0} s");
         } else {
             self.report_frames(camera, dropped);
         }
-        for warning in self.problems(camera, short) {
+        for warning in self.problems(camera, short, withheld) {
             warn!("{warning}");
         }
     }
@@ -424,19 +436,22 @@ mod tests {
 
     #[test]
     fn what_went_wrong_is_counted_for_the_report() {
-        // (what happened since the last report, the camera's short frames, each warning's start)
+        // (what happened since the last report, the camera's short frames, the frames its driver
+        // never gave, each warning's start)
         type Case = (
             &'static str,
             fn(&mut Numbers),
             ShortFrames,
+            u32,
             Vec<&'static str>,
         );
         let none = ShortFrames::default();
-        let cases: [Case; 5] = [
+        let cases: [Case; 6] = [
             (
                 "every frame fine",
                 |n| n.add(Duration::ZERO, 0, true, true),
                 none.clone(),
+                0,
                 vec![],
             ),
             (
@@ -446,6 +461,7 @@ mod tests {
                     n.add(Duration::ZERO, 0, false, true);
                 },
                 none.clone(),
+                0,
                 vec![
                     "front-left: 2 frames not sent",
                     "front-left: 1 frames with the clock not synced",
@@ -460,6 +476,7 @@ mod tests {
                     }
                 },
                 none.clone(),
+                0,
                 vec![
                     "front-left: 60 frames sent without tags, as NAPA failed on them (the last: \
                      NAPA ran out of memory)",
@@ -472,17 +489,32 @@ mod tests {
                     count: 600,
                     last: Some("a 10 byte frame is too small".into()),
                 },
+                0,
                 vec![
                     "front-left: 600 frames skipped as too short (the last: a 10 byte frame is \
                      too small)",
                 ],
             ),
-            ("nothing at all", |_| {}, none.clone(), vec![]),
+            (
+                "frames the driver never gave, among frames that came",
+                |n| {
+                    for _ in 0..530 {
+                        n.add(Duration::ZERO, 0, true, true);
+                    }
+                },
+                none.clone(),
+                72,
+                vec![
+                    "front-left: 72 frames the driver never gave Visor: it throws away a frame the \
+                     camera sent incomplete or flagged bad, and one it has no free buffer for",
+                ],
+            ),
+            ("nothing at all", |_| {}, none.clone(), 0, vec![]),
         ];
-        for (name, happened, short, expected) in cases {
+        for (name, happened, short, withheld, expected) in cases {
             let mut numbers = Numbers::new(0);
             happened(&mut numbers);
-            let warnings = numbers.problems("front-left", &short);
+            let warnings = numbers.problems("front-left", &short, withheld);
             assert_eq!(warnings.len(), expected.len(), "{name}: {warnings:?}");
             for (warning, start) in warnings.iter().zip(&expected) {
                 assert!(warning.starts_with(start), "{name}: {warning}");

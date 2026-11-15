@@ -35,10 +35,13 @@ field layout, no multi-tag solving. Its one page is each camera's live view, to 
   undistortion runs until it converges, where OpenCV's stops at five steps.
 - **The wire.** One UDP datagram per frame, every frame: [docs/wire.md](docs/wire.md).
 - **Health.** Each frame says how long its detection took and how many of the camera's frames
-  Visor has dropped (replaced before detection got to them, or broken), so the robot logs each
-  camera's frame rate, drops and load ([docs/wire.md](docs/wire.md#the-cameras-health)). Every
-  10 s Visor's journal says the same, one line per camera: `front: 59.8 fps, 0 dropped, detect 4.2
-  ms mean, 9.8 ms worst, ...`.
+  Visor has dropped (replaced before detection got to them, broken, or thrown away by the camera's
+  driver before Visor got them), so the robot logs each camera's frame rate, drops and load
+  ([docs/wire.md](docs/wire.md#the-cameras-health)). Every 10 s Visor's journal says the same, one
+  line per camera: `front: 59.8 fps, 0 dropped, detect 4.2 ms mean, 9.8 ms worst, ...`. A camera
+  that sends 60 frames a second and shows fewer, with the rest dropped and a warning of frames the
+  driver never gave, is sending some of them incomplete: no program gets those from the driver, and
+  a smaller size is what brings the rate back.
 
 - **Live view.** Each camera's frames, made smaller, with its tags outlined and a line of its
   numbers, over HTTP on port 5809 while anyone watches: nothing is made while no one does, and
