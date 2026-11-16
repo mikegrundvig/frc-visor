@@ -25,8 +25,8 @@ field layout, no multi-tag solving. Its one page is each camera's live view, to 
 - **USB recovery.** On any capture error the camera is closed and reopened every 300 ms, and its
   settings reapplied: its exposure and gain included ([below](#exposure-and-gain)). A USB 3
   camera that has fallen to USB 2, or one that has stopped answering, gets one USB reset or one
-  power cycle of its port as it's opened, never while it streams
-  ([below](#formats-and-usb-links)).
+  power cycle of its port as it's opened, never while it streams, and only on a port whose power
+  Visor can switch ([below](#formats-and-usb-links)).
 - **The clock.** chrony keeps the coprocessor's clock on the robot program's, through a small NTP
   responder in the robot program (see [docs/wire.md](docs/wire.md#the-capture-time)). Each frame's
   kernel timestamp becomes robot time, plus a per-camera offset you measure.
@@ -171,8 +171,9 @@ a true 60. So Visor runs it `MJPG` at 60 rather than not at all. A camera grante
 time to send: it's taken as stalled after no frame for 15 frame times, or 1 s, whichever is longer
 (3 s at 5 fps; 1 s at 15 fps and up, as before).
 
-Visor also tries, once, to bring it back, as it opens the camera (at start, and when it opens again
-a camera that went away anyway), never while it streams:
+Where it can switch the power of the camera's port, Visor also tries, once, to bring it back, as it
+opens the camera (at start, and when it opens again a camera that went away anyway), never while it
+streams:
 
 - **A USB reset**, for a camera linked below SuperSpeed that reports USB 2.10 or later (every USB 3
   camera does; a USB 2.1 camera does too, and costs one wasted half-second reset). With its wiring
@@ -195,13 +196,21 @@ a camera that went away anyway), never while it streams:
   otherwise its port's power can't be switched, which Visor says once and is normal (a Type-A port
   fed from an always-on supply).
 
+On a port whose power it can't switch, Visor sends a working camera nothing: it runs on USB 2 as it
+is, `MJPG` at its full rate, until someone reseats its plug, and the log says so once. A reset isn't
+free of risk: on a bench it left a camera not answering at all twice in about forty (the kernel
+saying `device not accepting address` until its power was cut), and where Visor can't cut the power
+that would trade a camera that works for one that doesn't. The power cycle is what makes the reset
+safe to try.
+
 A camera can also land at USB 1's full speed, 12 Mb/s, where it has no video at all: on a port with
 a USB 1 controller beside its USB 2 one, a USB 3 camera whose USB 3 side dropped came up there in
 2 of about 15 drops on a board. It's on USB, but its driver finds nothing it can stream, so there's
 no video device and no `/dev/v4l` name to find it by. A camera Visor has seen in this run is then
 looked for among every USB device by the vendor, product and serial it reported (only when it
 reported a serial, and only when exactly one device has it), and one found below SuperSpeed gets
-the same reset at once, without the 5 s wait, then the power cycle if its port can be switched.
+the same reset at once, without the 5 s wait and whatever its port (it has no video to lose), then
+the power cycle if its port can be switched.
 If it still has no video device, Visor says once that it's on USB where it offers no video, so it
 can't run until its plug is reseated, and tries nothing more. A camera with no serial can't be told
 from another of its model this way, so Visor leaves it.

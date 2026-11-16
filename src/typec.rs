@@ -57,11 +57,21 @@ pub fn power_port(typec: &Path, roles: &Path, controller: Option<&str>) -> io::R
     let now = fs::read_to_string(port.join("port_type"))?;
     match current(&now) {
         Some(OFF) => fixed("its Type-C port is set to take power, not give it"),
-        Some(_) => Ok(PowerPort::Switchable(port.clone())),
+        Some(_) if may_write(&port.join("port_type"))? => Ok(PowerPort::Switchable(port.clone())),
+        Some(_) => Ok(PowerPort::Refused(port.clone())),
         None => Ok(PowerPort::Fixed(format!(
             "its Type-C port's port_type reads {:?}",
             now.trim()
         ))),
+    }
+}
+
+/// Whether Visor may write `file`: opened for writing and closed, with nothing written.
+fn may_write(file: &Path) -> io::Result<bool> {
+    match fs::OpenOptions::new().write(true).open(file) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -229,6 +239,19 @@ mod tests {
             power_port(&gone, &roles, Some("fc000000.usb")).unwrap(),
             PowerPort::Fixed(_)
         ));
+        // A port whose `port_type` Visor may not write is refused, and the file isn't touched.
+        // Root writes a read-only file, so there it can't be staged.
+        if unsafe { libc::geteuid() } != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            let (typec, roles) = sysfs(&root, &dual, &switch);
+            let file = typec.join("port0/port_type");
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+            assert_eq!(
+                power_port(&typec, &roles, Some("fc000000.usb")).unwrap(),
+                PowerPort::Refused(typec.join("port0"))
+            );
+            assert_eq!(fs::read_to_string(&file).unwrap().trim(), dual[0].1);
+        }
         fs::remove_dir_all(&root).unwrap();
     }
 

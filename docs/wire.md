@@ -104,10 +104,12 @@ robot works the rest out over any window it likes.
 - **Visor restarted:** the sequence went back. Each count starts again from 0.
 - **The link** (offset 27), what the robot should conclude from it:
   - SuperSpeed (or faster), any format: as it should be.
-  - High speed with bit 5 set, bit 6 clear: a USB 3 camera on USB 2 that Visor couldn't try to
-    recover: it may not (the board's image lacks Visor's udev rule; its journal says so once).
-    Visor tries before it opens a camera, never while it streams, so this isn't a recovery still
-    to come. The frame rate and format say what the link costs: `MJPG` at the full rate, or `GREY`
+  - High speed with bit 5 set, bit 6 clear: a USB 3 camera on USB 2 that Visor didn't try to
+    recover, and won't: it's on a port whose power Visor can't switch (a Type-A port, the
+    ordinary case: Visor resets a working camera only where it could cut the power if the reset
+    left it not answering), or Visor may not (the board's image lacks Visor's udev rule). Its
+    journal says which, once. Visor tries before it opens a camera, never while it streams, so
+    this isn't a recovery still to come: reseat the plug at the next chance. The frame rate and format say what the link costs: `MJPG` at the full rate, or `GREY`
     at a few frames a second where the camera offers nothing faster raw.
   - High speed with bits 5 and 6 set: Visor reset the camera, or powered its port off and on, and
     it came back on USB 2 again. Its USB 3 contacts are almost certainly not touching: reseat the

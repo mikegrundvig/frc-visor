@@ -69,3 +69,13 @@ pub(super) fn without_video(name: &str, on: &Link, by: Option<Tried>) -> String 
          it's replugged or Visor restarts"
     )
 }
+
+/// A camera below SuperSpeed that works, on a port whose power Visor can't switch, as the log
+/// says it once.
+pub(super) fn left_as_it_is(name: &str, on: &Link) -> String {
+    format!(
+        "{name}: on {on}, below the USB 3 it can do, and Visor can't switch its port's power, so \
+         it sends no USB reset: one that left the camera not answering couldn't be undone from \
+         here. Visor runs it as it is; reseat its plug to bring it back to USB 3"
+    )
+}

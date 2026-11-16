@@ -73,7 +73,10 @@ struct Fake<'a> {
     exposures: Vec<Option<u32>>,
     /// The link state each of those frames says.
     links: Vec<LinkState>,
-    /// The USB link it's on, which a reset changes to the next of `resets`.
+    /// Whether its port's power can be switched.
+    port: Port,
+    /// The USB link it's on, which a reset, and then a power cycle, changes to the next of
+    /// `resets`.
     link: Option<Link>,
     resets: VecDeque<Link>,
     /// The stall time each stream started with.
@@ -96,6 +99,7 @@ impl<'a> Fake<'a> {
             exposures: Vec::new(),
             links: Vec::new(),
             link: None,
+            port: Port::default(),
             resets: VecDeque::new(),
             stalls: Vec::new(),
             jpeg: crate::image::fixtures::jpeg(WIDTH as u16, HEIGHT as u16, |_, _| 128),
@@ -228,7 +232,16 @@ impl Controls for FakeCamera<'_, '_> {
     }
 }
 
-/// The camera's USB side: its link, and a reset that moves it to the next scripted link.
+/// Whether the power of the port the test's camera is on can be switched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Port {
+    #[default]
+    Fixed,
+    Switchable,
+}
+
+/// The camera's USB side: its link, and a reset, then a power cycle where its port can be
+/// switched, that each move it to the next scripted link.
 impl Usb for Fake<'_> {
     fn link(&mut self, _device: &Path) -> io::Result<Option<Link>> {
         Ok(self.link.clone())
@@ -244,11 +257,20 @@ impl Usb for Fake<'_> {
     }
 
     fn power_port(&mut self, _link: &Link) -> io::Result<crate::usb::PowerPort> {
-        Ok(crate::usb::PowerPort::Fixed("a test's".into()))
+        Ok(match self.port {
+            Port::Switchable => crate::usb::PowerPort::Switchable("a test's".into()),
+            Port::Fixed => crate::usb::PowerPort::Fixed("a test's".into()),
+        })
     }
 
     fn power_cycle(&mut self, _device: &Path, _port: &Path) -> io::Result<crate::usb::Back> {
-        unreachable!("no port of the test's can be switched")
+        assert_eq!(self.port, Port::Switchable, "a port that can't be switched");
+        self.link = Some(
+            self.resets
+                .pop_front()
+                .expect("a power cycle the row expects"),
+        );
+        Ok(crate::usb::Back::Returned)
     }
 
     fn now(&mut self) -> Duration {
@@ -700,12 +722,14 @@ const ON_USB_2: &[Offer] = &[(*b"MJPG", 60.0), (*b"GREY", 5.0)];
 const ON_USB_3: &[Offer] = &[(*b"MJPG", 60.0), (*b"GREY", 60.0), (*b"YUYV", 60.0)];
 const RAW_SLOWLY: &[Offer] = &[(*b"GREY", 5.0)];
 
-/// A camera on a link, what its resets do, what it does each time it's opened; then the frames
+/// A camera on a link and a port, what its reset and then its power cycle do, what it does each
+/// time it's opened; then the frames
 /// that reached the slot by number, those that didn't decode, the link state they carry, each
 /// stream's stall time, and part of each warning, in order.
 struct LinkCase {
     name: &'static str,
     link: Option<Link>,
+    port: Port,
     resets: Vec<Link>,
     plugs: Vec<Plug>,
     taken: Vec<i64>,
@@ -725,13 +749,35 @@ fn the_format_follows_the_link_mjpeg_is_decoded_and_a_slow_camera_waits_longer()
     let second = Duration::from_secs(1);
     let cases = [
         LinkCase {
-            name: "stuck at USB 2, still there after its reset: MJPG at the full rate, decoded, \
-                   a frame that won't decode counted, and what happened said once",
+            name: "stuck at USB 2 on a port whose power can't be switched: never reset, MJPG at \
+                   the full rate, decoded, a frame that won't decode counted, and why said once",
             link: Some(on(480, 3, 10, 2)),
-            resets: vec![on(480, 3, 10, 3)],
+            port: Port::Fixed,
+            resets: vec![],
             plugs: vec![Plug::StreamsFrom(ON_USB_2, vec![Frame, Garbled, Frame])],
             taken: vec![1, 3],
             undecoded: 1,
+            state: LinkState {
+                speed: Speed::High,
+                format: Some(PixelFormat::Mjpg),
+                headroom: Headroom::MayDoBetter,
+                recovered: Recovered::NotTried,
+            },
+            stalls: vec![second],
+            warnings: vec![
+                "on USB 480 Mb/s (a USB 3.10 device, 7-1), below the USB 3 it can do, and Visor \
+                 can't switch its port's power, so it sends no USB reset",
+            ],
+        },
+        LinkCase {
+            name: "stuck at USB 2 on a switchable port, still there after its reset and its \
+                   power cycle: MJPG at the full rate, and what happened said once",
+            link: Some(on(480, 3, 10, 2)),
+            port: Port::Switchable,
+            resets: vec![on(480, 3, 10, 3), on(480, 3, 10, 4)],
+            plugs: vec![Plug::StreamsFrom(ON_USB_2, vec![Frame, Frame])],
+            taken: vec![1, 2],
+            undecoded: 0,
             state: LinkState {
                 speed: Speed::High,
                 format: Some(PixelFormat::Mjpg),
@@ -740,14 +786,15 @@ fn the_format_follows_the_link_mjpeg_is_decoded_and_a_slow_camera_waits_longer()
             },
             stalls: vec![second],
             warnings: vec![
-                "still on USB 480 Mb/s (a USB 3.10 device, 7-1) after a USB reset, so its USB 3 \
-                 contacts are probably not connecting: reseat its plug or change its cable. Visor \
-                 runs it as it is, 8x4 MJPG at 1/60 s per frame,",
+                "still on USB 480 Mb/s (a USB 3.10 device, 7-1) after a USB reset and a power \
+                 cycle of its port, so its USB 3 contacts are probably not connecting: reseat its \
+                 plug or change its cable. Visor runs it as it is, 8x4 MJPG at 1/60 s per frame,",
             ],
         },
         LinkCase {
             name: "stuck at USB 2, at SuperSpeed after its reset: GREY, and nothing to warn of",
             link: Some(on(480, 3, 10, 2)),
+            port: Port::Switchable,
             resets: vec![on(5000, 3, 10, 3)],
             plugs: vec![Plug::StreamsFrom(ON_USB_3, vec![Frame, Frame])],
             taken: vec![1, 2],
@@ -764,6 +811,7 @@ fn the_format_follows_the_link_mjpeg_is_decoded_and_a_slow_camera_waits_longer()
         LinkCase {
             name: "a USB 2 camera at its best: never reset",
             link: Some(on(480, 2, 0, 2)),
+            port: Port::Fixed,
             resets: vec![],
             plugs: vec![Plug::StreamsFrom(ON_USB_2, vec![Frame])],
             taken: vec![1],
@@ -781,6 +829,7 @@ fn the_format_follows_the_link_mjpeg_is_decoded_and_a_slow_camera_waits_longer()
             name: "its size only raw at 5 fps: GREY, the fastest, said once; it waits 15 frame \
                    times, 3 s, before a stall",
             link: None,
+            port: Port::Fixed,
             resets: vec![],
             plugs: vec![
                 Plug::StreamsFrom(RAW_SLOWLY, vec![Frame, Stall]),
@@ -806,6 +855,7 @@ fn the_format_follows_the_link_mjpeg_is_decoded_and_a_slow_camera_waits_longer()
         let stop = AtomicBool::new(false);
         let mut fake = Fake::new(case.plugs, &latest, &stop);
         fake.link = case.link;
+        fake.port = case.port;
         fake.resets = case.resets.into();
         let retry = Duration::from_millis(1);
         run_from(
@@ -821,7 +871,7 @@ fn the_format_follows_the_link_mjpeg_is_decoded_and_a_slow_camera_waits_longer()
         assert_eq!(fake.taken, case.taken, "{}", case.name);
         assert_eq!(latest.take_undecoded(), case.undecoded, "{}", case.name);
         assert_eq!(latest.dropped(), u64::from(case.undecoded), "{}", case.name);
-        assert!(fake.resets.is_empty(), "{}: every reset", case.name);
+        assert!(fake.resets.is_empty(), "{}: every recovery", case.name);
         assert!(
             fake.links.iter().all(|state| *state == case.state),
             "{}: {:?}",

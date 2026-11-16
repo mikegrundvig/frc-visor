@@ -287,6 +287,8 @@ pub enum PowerPort {
     Switchable(PathBuf),
     /// It can't, and why, as the log says it.
     Fixed(String),
+    /// It could be, but Visor may not write this port's `port_type`.
+    Refused(PathBuf),
 }
 
 /// Whether a reset camera came back within the wait.

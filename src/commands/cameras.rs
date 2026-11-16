@@ -83,7 +83,7 @@ fn link_line(sysfs: &Path, device: &Path) -> String {
             Outlook::MayDoBetter => format!(
                 "on {link}: below SuperSpeed though it reports USB {}, likely a USB 3 camera \
                  whose USB 3 contacts aren't connecting; Visor tries once to bring it to USB 3 \
-                 as it opens it",
+                 as it opens it, where it can switch its port's power",
                 link.version
             ),
             Outlook::Fast | Outlook::AtItsBest => format!("on {link}"),

@@ -452,46 +452,54 @@ fn a_camera_is_reset_then_power_cycled_once_and_never_while_it_cant_be() {
             ],
         ),
         (
-            "on a Type-A port: the reset alone, quietly",
+            "slow with its video on a Type-A port, whose power can't be switched: nothing sent, \
+             opened as it is, however often",
             Ports::One,
             vec![
-                recovers(
-                    0,
-                    On::At(slow_on_a(2)),
-                    Some(Does::To(slow_on_a(3))),
-                    None,
-                    slow_by(slow_on_a(3), Reset),
-                    TriedStillSlow,
-                ),
-                quiet(1, On::Kept, TriedStillSlow),
+                quiet(0, On::At(slow_on_a(2)), NotTried),
+                quiet(1, On::Kept, NotTried),
+                quiet(60, On::Kept, NotTried),
+                quiet(1, On::At(slow_on_a(5)), NotTried),
             ],
         ),
         (
-            "two Type-C ports: which feeds it can't be told, so the reset alone",
+            "two Type-C ports: which feeds it can't be told, so nothing sent",
             Ports::Two,
+            vec![
+                quiet(0, On::At(slow(2)), NotTried),
+                quiet(1, On::Kept, NotTried),
+            ],
+        ),
+        (
+            "its port's power not Visor's to switch: no reset either, the camera opened as it is",
+            Ports::ReadOnly,
+            vec![
+                quiet(0, On::At(slow(2)), NotTried),
+                quiet(1, On::Kept, NotTried),
+                quiet(1, On::At(slow(5)), NotTried),
+            ],
+        ),
+        (
+            "the reset not Visor's to send, its port switchable: asked once, then the power \
+             cycle alone",
+            Ports::One,
             vec![recovers(
                 0,
                 On::At(slow(2)),
-                Some(Does::To(slow(3))),
-                None,
-                slow_by(slow(3), Reset),
-                TriedStillSlow,
+                Some(Does::Refused),
+                Some(Does::To(fast(4))),
+                fast_by(fast(4), PowerCycle),
+                NotTried,
             )],
         ),
         (
-            "neither Visor's to send: asked once, never again, the camera opened as it is",
-            Ports::ReadOnly,
+            "fallen to USB 2 on a Type-A port while Visor runs: opened there as it is",
+            Ports::One,
             vec![
-                recovers(
-                    0,
-                    On::At(slow(2)),
-                    Some(Does::Refused),
-                    None,
-                    None,
-                    NotTried,
-                ),
+                quiet(0, On::At(link(5000, 4, 2, TYPE_A)), NotTried),
+                quiet(1, On::Gone, NotTried),
+                quiet(1, On::At(slow_on_a(3)), NotTried),
                 quiet(1, On::Kept, NotTried),
-                quiet(1, On::At(slow(5)), NotTried),
             ],
         ),
         (
@@ -606,23 +614,7 @@ fn a_camera_is_reset_then_power_cycled_once_and_never_while_it_cant_be() {
             ],
         ),
         (
-            "reset in place on a fixed port, still slow: still on USB 2 after the reset at once, \
-             never a wait and never \"not back\"",
-            Ports::One,
-            vec![
-                recovers(
-                    0,
-                    On::At(slow_on_a(2)),
-                    Some(Does::InPlace),
-                    None,
-                    slow_by(slow_on_a(2), Reset),
-                    TriedStillSlow,
-                ),
-                quiet(1, On::Kept, TriedStillSlow),
-            ],
-        ),
-        (
-            "reset in place on a switchable port, still slow: then one power cycle",
+            "reset in place, still slow: then one power cycle",
             Ports::One,
             vec![recovers(
                 0,
@@ -632,6 +624,22 @@ fn a_camera_is_reset_then_power_cycled_once_and_never_while_it_cant_be() {
                 fast_by(fast(4), ResetAndPowerCycle),
                 NotTried,
             )],
+        ),
+        (
+            "reset in place and power-cycled, still slow: said at once, never a wait and never \
+             \"not back\"",
+            Ports::One,
+            vec![
+                recovers(
+                    0,
+                    On::At(slow(2)),
+                    Some(Does::InPlace),
+                    Some(Does::To(slow(4))),
+                    slow_by(slow(4), ResetAndPowerCycle),
+                    TriedStillSlow,
+                ),
+                quiet(1, On::Kept, TriedStillSlow),
+            ],
         ),
         (
             "seen, then on USB at 12 Mb/s with no video device: reset at once, back at \

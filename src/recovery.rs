@@ -2,11 +2,15 @@
 //! at USB 1 speed, or one that stopped answering. Two means, each sent at most once
 //! ([`crate::usb`] and [`crate::typec`] say why each works):
 //!
-//! - A camera linked below SuperSpeed that looks able to do better gets one USB reset. If it's
-//!   still not at SuperSpeed after (still slow, or not back within the wait) and its port's power
-//!   can be switched, one power cycle of that port.
+//! - A camera linked below SuperSpeed that looks able to do better, on a port whose power Visor
+//!   can switch, gets one USB reset. If it's still not at SuperSpeed after (still slow, or not
+//!   back within the wait), one power cycle of that port. On any other port it's left as it is,
+//!   running on the link it has: a reset left a camera not answering twice in about forty on a
+//!   bench, and only cutting its power brought it back, so Visor doesn't risk a camera that
+//!   works where it couldn't undo that.
 //! - A camera seen in this run that is on USB below SuperSpeed with no video device (at USB 1's
-//!   full speed, where uvcvideo finds nothing it can stream) gets the same, at once: it's found by
+//!   full speed, where uvcvideo finds nothing it can stream) gets the reset at once, whatever its
+//!   port (it has no video to lose), then the power cycle where that can be sent: it's found by
 //!   its vendor, product and serial ([`crate::usb::find_devices`]), only when it has a serial and
 //!   exactly one device has it.
 //! - A camera seen in this run that has been gone for [`GONE_FOR`] gets one power cycle of the port
@@ -20,7 +24,7 @@
 
 mod outcome;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use log::{info, warn};
@@ -259,7 +263,16 @@ impl Recovery {
 
     /// A reset, then, if it isn't at SuperSpeed with its video device after, a power cycle: each
     /// as allowed; then where that leaves it. `start` is where it is now, below SuperSpeed.
+    ///
+    /// A camera with its video device is left as it is unless Visor can cut its port's power: a
+    /// reset can leave a camera not answering, and then only its power going off brings it back.
     fn recover(&mut self, usb: &mut impl Usb, name: &str, device: &Path, start: Where) -> Opening {
+        if let Where::Video(link) = &start
+            && self.port(usb, name, link).is_none()
+        {
+            self.warn_once(&outcome::left_as_it_is(name, link));
+            return Opening::on(Some(link.clone()));
+        }
         let mut tried = None;
         let mut found = start;
         if let Some(back) = self.reset(usb, name, device, &found) {
@@ -332,21 +345,7 @@ impl Recovery {
             (Where::Nowhere, Some(last)) => last,
             (Where::Nowhere, None) => return None,
         };
-        let port = match usb.power_port(link) {
-            Ok(PowerPort::Switchable(port)) => port,
-            Ok(PowerPort::Fixed(fixed)) => {
-                self.info_once(&format!(
-                    "{name}: its port's power can't be switched: {fixed}"
-                ));
-                return None;
-            }
-            Err(error) => {
-                self.warn_once(&format!(
-                    "{name}: whether its port's power can be switched can't be read: {error}"
-                ));
-                return None;
-            }
-        };
+        let port = self.port(usb, name, link)?;
         info!(
             "{name}: {why}: powering its USB port off for {} s and on again, once ({})",
             crate::typec::OFF_FOR.as_secs(),
@@ -365,6 +364,38 @@ impl Recovery {
             Err(why) => {
                 warn!("{name}: the power cycle of its port failed: {why}");
                 Some(Back::NotYet)
+            }
+        }
+    }
+
+    /// The port Visor can power off and on that feeds the camera on `link`. When there's none,
+    /// why is said once.
+    fn port(&mut self, usb: &mut impl Usb, name: &str, link: &Link) -> Option<PathBuf> {
+        if self.power == Allowed::Refused {
+            return None;
+        }
+        match usb.power_port(link) {
+            Ok(PowerPort::Switchable(port)) => Some(port),
+            Ok(PowerPort::Fixed(fixed)) => {
+                self.info_once(&format!(
+                    "{name}: its port's power can't be switched: {fixed}"
+                ));
+                None
+            }
+            Ok(PowerPort::Refused(port)) => {
+                self.power = Allowed::Refused;
+                self.warn_once(&format!(
+                    "{name}: Visor may not switch its port's power ({} isn't its to write: the \
+                     release's udev rule gives the video group that), so it doesn't try",
+                    port.join("port_type").display()
+                ));
+                None
+            }
+            Err(error) => {
+                self.warn_once(&format!(
+                    "{name}: whether its port's power can be switched can't be read: {error}"
+                ));
+                None
             }
         }
     }
