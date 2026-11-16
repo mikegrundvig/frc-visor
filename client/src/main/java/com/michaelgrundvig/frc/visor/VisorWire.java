@@ -79,6 +79,7 @@ public final class VisorWire {
     into.exposureKnown = (flags & FLAG_EXPOSURE) != 0;
     into.gainKnown = (flags & FLAG_GAIN) != 0;
     into.autoExposure = (flags & FLAG_AUTO_EXPOSURE) != 0;
+    into.link = Byte.toUnsignedInt(datagram.get(start + 27));
     into.exposureMicros = Integer.toUnsignedLong(i32(datagram, start + 28));
     into.gain = i32(datagram, start + 32);
     into.medianBrightness = Byte.toUnsignedInt(datagram.get(start + 36));
@@ -141,7 +142,7 @@ public final class VisorWire {
     }
     out.put(start + 25, (byte) flags);
     out.put(start + 26, (byte) frame.tagCount);
-    out.put(start + 27, (byte) 0);
+    out.put(start + 27, (byte) frame.link);
     // Without its flag, a value's bytes are zero.
     putI32(out, start + 28, frame.exposureKnown ? (int) frame.exposureMicros : 0);
     putI32(out, start + 32, frame.gainKnown ? frame.gain : 0);

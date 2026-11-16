@@ -23,7 +23,10 @@ field layout, no multi-tag solving. Its one page is each camera's live view, to 
 - **Per camera, two threads.** One captures (V4L2, memory-mapped), the other detects. They share
   one slot holding the newest frame, so a slow detection drops frames rather than falling behind.
 - **USB recovery.** On any capture error the camera is closed and reopened every 300 ms, and its
-  settings reapplied: its exposure and gain included ([below](#exposure-and-gain)).
+  settings reapplied: its exposure and gain included ([below](#exposure-and-gain)). A USB 3
+  camera that has fallen to USB 2, or one that has stopped answering, gets one USB reset or one
+  power cycle of its port as it's opened, never while it streams
+  ([below](#formats-and-usb-links)).
 - **The clock.** chrony keeps the coprocessor's clock on the robot program's, through a small NTP
   responder in the robot program (see [docs/wire.md](docs/wire.md#the-capture-time)). Each frame's
   kernel timestamp becomes robot time, plus a per-camera offset you measure.
@@ -35,13 +38,15 @@ field layout, no multi-tag solving. Its one page is each camera's live view, to 
   undistortion runs until it converges, where OpenCV's stops at five steps.
 - **The wire.** One UDP datagram per frame, every frame: [docs/wire.md](docs/wire.md).
 - **Health.** Each frame says how long its detection took and how many of the camera's frames
-  Visor has dropped (replaced before detection got to them, broken, or thrown away by the camera's
-  driver before Visor got them), so the robot logs each camera's frame rate, drops and load
+  Visor has dropped (replaced before detection got to them, broken, compressed and not decodable,
+  or thrown away by the camera's driver before Visor got them), and the camera's USB link and
+  pixel format, so the robot logs each camera's frame rate, drops and load
   ([docs/wire.md](docs/wire.md#the-cameras-health)). Every 10 s Visor's journal says the same, one
   line per camera: `front: 59.8 fps, 0 dropped, detect 4.2 ms mean, 9.8 ms worst, ...`. A camera
   that sends 60 frames a second and shows fewer, with the rest as `70 dropped (70 the driver never
   gave)`, is sending some of them incomplete: no program gets those from the driver, the frames
-  that do come are whole, and a smaller size is what brings the rate back.
+  that do come are whole, and a smaller size is what brings the rate back. `(3 that didn't
+  decode)` counts `MJPG` frames whose JPEG was broken.
 
 - **Live view.** Each camera's frames, made smaller, with its tags outlined and a line of its
   numbers, over HTTP on port 5809 while anyone watches: nothing is made while no one does, and
@@ -88,7 +93,8 @@ visor version
   refuses frames from one it didn't give the board.
 - **Service:** [deploy/visor.service](deploy/visor.service), which runs as a `visor` user in the
   `video` group. Each release carries it under `os/` with the rest of what a board's image installs
-  for Visor: the account, `/opt/visor`, and what Spotter's agent needs for Visor's pack
+  for Visor: the account, `/opt/visor`, the udev rule that lets it recover a camera's USB link
+  ([below](#formats-and-usb-links)), and what Spotter's agent needs for Visor's pack
   ([spotter/visor](spotter/visor/README.md#what-the-boards-image-gives-it)). Visor tells systemd
   it's alive each 1.5 s while every camera's detect thread runs, a camera that's unplugged too;
   one that hangs for 3 s gets Visor restarted ([src/watchdog.rs](src/watchdog.rs)).
@@ -142,6 +148,62 @@ is: the median and 99th percentile of a sample of its pixels, and the share at f
 too dark to read tags far (the brightest 1% under 64 of 255) or had their whites clipping (over 1%
 of the frame at 250 or more), Visor's log says so, with the exposure and gain, and what to change:
 the exposure, the gain, or the light.
+
+### Formats and USB links
+
+Without a `format` in its configuration, a camera runs the first of `GREY`, `YUYV` and `MJPG`, in
+that order, that the camera offers at the configured size and frame rate (to within 1%, as the
+camera lists its rates); if none does, the one with the highest rate at that size, which Visor's
+log says once. A configured `format` wins whatever its rate. `GREY` is the luma itself. `YUYV`
+carries it in twice the bytes, and from the ThriftyCam in video range (17 to 235), so `GREY` comes
+first. `MJPG` is decoded to its luma on the camera's capture thread, never detection's: about
+8.5 ms a 1600 x 1304 frame on an Orange Pi 5's fast core, measured with the decoder Visor uses, so
+detection's frame time is untouched. On tags 78 to 105 px across it found the same tags at the same
+decision margins as raw frames, corners within 0.05 px; its luma matched raw `GREY` at the same
+exposure and gain (mean 128.7 against 129.2, 99th percentile 249 both), so the exposure and gain
+need no change between them. A frame that doesn't decode is counted as dropped, in the 10 s
+line's `that didn't decode`.
+
+This is what keeps a USB 3 camera running on USB 2. A loose plug or a jostled board can drop it to
+USB 2, where it stays: it never tries USB 3 again by itself. There a ThriftyCam offers its full
+1600 x 1304 raw only at 5 frames a second (2.5 delivered, the first after 1.8 s), and as `MJPG` at
+a true 60. So Visor runs it `MJPG` at 60 rather than not at all. A camera granted a slow rate gets
+time to send: it's taken as stalled after no frame for 15 frame times, or 1 s, whichever is longer
+(3 s at 5 fps; 1 s at 15 fps and up, as before).
+
+Visor also tries, once, to bring it back, as it opens the camera (at start, and when it opens again
+a camera that went away anyway), never while it streams:
+
+- **A USB reset**, for a camera linked below SuperSpeed that reports USB 2.10 or later (every USB 3
+  camera does; a USB 2.1 camera does too, and costs one wasted half-second reset). With its wiring
+  whole, the camera comes back at SuperSpeed in about 0.2 s, on another bus, as a new video device
+  behind the same name; with its USB 3 contacts apart, at USB 2 again. Nothing the host can read
+  tells the two apart beforehand: only the attempt does.
+- **A power cycle of its port**, if it's still not at SuperSpeed after the reset (or not back
+  within 3 s), and for a camera seen in this run that has been gone for 5 s, which is longer than
+  a fall to USB 2, a reset or a replug by hand takes: the camera that stopped answering. The port
+  is a USB Type-C port: Visor sets its `port_type` to `sink` for 3 s, so it stops supplying 5 V,
+  then back, and waits up to 5 s for the camera. It's the software equivalent of pulling the plug.
+  Linux 6.1 can't say which Type-C port feeds which USB controller, so the rule is: the camera's
+  USB controller (the `<address>.usb` in its sysfs path) has a role switch
+  (`/sys/class/usb_role/<address>.usb-role-switch`) and the system has exactly one Type-C port;
+  otherwise its port's power can't be switched, which Visor says once and is normal (a Type-A port
+  fed from an always-on supply).
+
+After a recovery that left the camera below SuperSpeed or gone, nothing more is tried until it
+comes back by itself (a new enumeration Visor didn't cause) or Visor restarts. The log says each
+step, and then plainly what came of it with what it runs, like `front: still on USB 480 Mb/s (a
+USB 3.10 device, 7-1) after a USB reset and a power cycle of its port, so its USB 3 contacts are
+probably not connecting: reseat its plug or change its cable. Visor runs it as it is, 1600x1304
+MJPG at 1/60 s per frame, ...`. Each frame carries the link, the format and whether a recovery left
+it slow ([docs/wire.md](docs/wire.md#the-cameras-health)), so the robot can raise it too.
+
+Both need write access that's root's by default, which the release's udev rule,
+[deploy/70-visor-usb-cameras.rules](deploy/70-visor-usb-cameras.rules), gives the `video` group:
+the usbfs nodes (`/dev/bus/usb/BBB/DDD`) of USB devices with a video interface, and each Type-C
+port's `port_type`, nothing wider. Without it, Visor says once that it may not, and runs the camera
+as it is. The streaming line in the log names the link: `front: streaming 1600x1304 GREY at 1/60 s
+per frame on USB 5000 Mb/s (a USB 3.10 device, 8-1)`, and `visor cameras` lists each camera's.
 
 ### The live view
 
@@ -208,8 +270,9 @@ sides, at several places in the frame, at two distances, and 40 to 60 views. Cor
 middle of the frame leave the lens a guess out at its edges, where the distortion is largest.
 
 1. Print `board.png` at 100% scale and fix it flat to something rigid.
-2. On the coprocessor, `visor cameras` lists each camera plugged in: the device to give Visor, and
-   the formats and sizes it offers. Each camera is listed once, by the video device it captures on:
+2. On the coprocessor, `visor cameras` lists each camera plugged in: the device to give Visor, its
+   USB link (its speed, and whether it's a USB 3 camera on USB 2), and the formats and sizes it
+   offers. Each camera is listed once, by the video device it captures on:
    the kernel's first for its USB device, the one udev's names end `-video-index0`. Its others (a
    UVC camera's second, for metadata) are left out, told from the kernel's description of each
    rather than by opening it. `visor cameras --names` prints only the names, one a line, and opens

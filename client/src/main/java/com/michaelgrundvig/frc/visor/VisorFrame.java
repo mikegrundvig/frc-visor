@@ -43,6 +43,10 @@ public final class VisorFrame {
   boolean gainKnown;
   int gain;
   boolean autoExposure;
+
+  /** The camera's link state as sent ({@link VisorLink}). */
+  int link;
+
   int medianBrightness;
   int highBrightness;
 
@@ -143,6 +147,28 @@ public final class VisorFrame {
   /** Whether the camera's own automatic exposure was on, so it chose the exposure. */
   public boolean autoExposure() {
     return autoExposure;
+  }
+
+  /** The camera's USB link speed; {@link VisorLink.Speed#UNKNOWN} from an older Visor. */
+  public VisorLink.Speed linkSpeed() {
+    return VisorLink.speed(link);
+  }
+
+  /**
+   * The pixel format Visor runs the camera in; {@link VisorLink.Format#UNKNOWN} from an older one.
+   */
+  public VisorLink.Format pixelFormat() {
+    return VisorLink.format(link);
+  }
+
+  /** Whether the camera looks able to do better than its USB link: a USB 3 camera on USB 2. */
+  public VisorLink.Headroom linkHeadroom() {
+    return VisorLink.headroom(link);
+  }
+
+  /** Whether Visor tried to bring the camera back to SuperSpeed, and it stayed slow. */
+  public VisorLink.Recovery linkRecovery() {
+    return VisorLink.recovery(link);
   }
 
   /** The image's median brightness, 0 (black) to 255 (white), from a sample of its pixels. */
@@ -281,6 +307,7 @@ public final class VisorFrame {
     gainKnown = other.gainKnown;
     gain = other.gain;
     autoExposure = other.autoExposure;
+    link = other.link;
     medianBrightness = other.medianBrightness;
     highBrightness = other.highBrightness;
     clipped = other.clipped;
@@ -299,8 +326,8 @@ public final class VisorFrame {
   }
 
   /**
-   * Sets everything but the tags, which it clears, the camera's settings and the image's
-   * brightness, which it leaves unknown and black, and the detect time, dropped count and
+   * Sets everything but the tags, which it clears, the camera's settings, link state and the
+   * image's brightness, which it leaves unknown and black, and the detect time, dropped count and
    * configuration ID, which it leaves 0: for a simulation or a test building a frame to send. The
    * version ID is this client's.
    */
@@ -325,6 +352,7 @@ public final class VisorFrame {
     this.gainKnown = false;
     this.gain = 0;
     this.autoExposure = false;
+    this.link = 0;
     this.medianBrightness = 0;
     this.highBrightness = 0;
     this.clipped = 0;
@@ -367,6 +395,15 @@ public final class VisorFrame {
     exposureKnown = false;
     exposureMicros = 0;
     autoExposure = true;
+  }
+
+  /** Sets the camera's link state: its USB link's speed, its pixel format, and what Visor tried. */
+  public void setLink(
+      VisorLink.Speed speed,
+      VisorLink.Format format,
+      VisorLink.Headroom headroom,
+      VisorLink.Recovery recovery) {
+    link = VisorLink.of(speed, format, headroom, recovery);
   }
 
   /** Sets the camera's gain control as read back. */

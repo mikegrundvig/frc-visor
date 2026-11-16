@@ -11,10 +11,12 @@ use std::time::Duration;
 
 use visor::brightness::Brightness;
 use visor::clock::{Clocks, EPOCH_NANOS};
-use visor::config::Camera;
+use visor::config::{Camera, PixelFormat};
 use visor::latest::{Captured, Latest};
+use visor::link_state::{Headroom, LinkState, Speed};
 use visor::napa::Detector;
 use visor::pipeline;
+use visor::recovery::Recovered;
 use visor::settings::InEffect;
 use visor::stream::feed::Feed;
 use visor::wire::{Frame, VERSION_ID};
@@ -109,8 +111,17 @@ fn captured(scene: &common::Scene, at: i64, dequeue_time: bool) -> Captured {
         monotonic_nanos: at,
         dequeue_time,
         settings: AT_1_MS,
+        link: STUCK_AT_USB_2,
     }
 }
+
+/// The capture thread's link state: a USB 3 camera on USB 2 after a recovery, running MJPG.
+const STUCK_AT_USB_2: LinkState = LinkState {
+    speed: Speed::High,
+    format: Some(PixelFormat::Mjpg),
+    headroom: Headroom::MayDoBetter,
+    recovered: Recovered::TriedStillSlow,
+};
 
 /// The capture thread's settings, as read back: 1 ms and gain 40, the camera's automatic exposure
 /// off.
@@ -242,6 +253,8 @@ fn each_frame_reaches_the_robot_with_its_tags_and_robot_time() {
             (frame.exposure_us, frame.gain, frame.auto_exposure),
             (Some(1000), Some(40), false)
         );
+        // And the camera's link state, as the capture thread gave it.
+        assert_eq!(frame.link, STUCK_AT_USB_2);
         assert_eq!(
             frame.brightness,
             Brightness::of(&scene.image),

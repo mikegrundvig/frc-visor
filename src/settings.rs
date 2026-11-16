@@ -369,7 +369,7 @@ pub fn control_key(name: &str) -> String {
 }
 
 /// Warnings already said, so a camera that reopens after a replug says each one once.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Said(HashSet<String>);
 
 impl Said {

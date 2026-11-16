@@ -21,14 +21,14 @@ tag. Eight tags is 820 bytes; 14, the most a frame carries, is 1,396, inside one
 | 24 | Camera | u8 | The camera's index from Visor's configuration, unique on the robot |
 | 25 | Flags | u8 | Bit 0: the clock is synced to the robot. Bit 1: the capture time is when Visor got the frame, because the driver gave no timestamp. Bit 2: the exposure below is known. Bit 3: the gain below is known. Bit 4: the camera's own automatic exposure is on. Other bits are 0 |
 | 26 | Tag count | u8 | 0 to 14; with more in view, the 14 with the highest decision margins |
-| 27 | Reserved | u8 | 0 |
+| 27 | Link | u8 | The camera's link state, 0 meaning not known throughout (an older Visor sent 0 here). Bits 0 to 2, its USB link's speed: 0 unknown (not on USB, or unreadable), 1 low or full speed (12 Mb/s or less), 2 high speed (480 Mb/s, USB 2), 3 SuperSpeed (5000 Mb/s, USB 3), 4 faster; 5 to 7 are read as unknown. Bits 3 and 4, the pixel format Visor runs it in: 0 unknown, 1 `GREY`, 2 `YUYV`, 3 `MJPG`. Bit 5: it looks able to do better than its link (below SuperSpeed while it reports USB 2.10 or later: a USB 3 camera on USB 2). Bit 6: since the camera last appeared, Visor tried to bring it to SuperSpeed (a USB reset, or a power cycle of its port) and it stayed below. Bit 7 is 0 |
 | 28 | Exposure | u32 | Microseconds, as read back from the camera once its settings were set; 0 without bit 2 (its automatic exposure on, so the camera chooses it, or no exposure control) |
 | 32 | Gain | i32 | The camera's `gain` control, in its own units, as read back; 0 without bit 3 (no gain control) |
 | 36 | Median brightness | u8 | The image's middle pixel, 0 (black) to 255 (white), from every fourth pixel of every fourth row |
 | 37 | High brightness | u8 | Its 99th percentile, about a tag's white where one is in view |
 | 38 | Clipped | u16 | The share of those pixels at 250 or brighter, in hundredths of a percent: 0 to 10,000 |
 | 40 | Detect time | u32 | How long finding this frame's tags and solving their poses took, in microseconds |
-| 44 | Dropped | u32 | The camera's frames Visor never sent, from its start: replaced by a newer one before detection got to them, broken (marked bad by the driver, or short), or never given by the driver (below). Wraps, as the sequence does |
+| 44 | Dropped | u32 | The camera's frames Visor never sent, from its start: replaced by a newer one before detection got to them, broken (marked bad by the driver, short, or compressed and not decodable), or never given by the driver (below). Wraps, as the sequence does |
 | 48 | Configuration ID | u32 | The configuration Visor runs: the first four bytes of its file's SHA-256, read big-endian (below) |
 
 ## Each tag
@@ -102,6 +102,24 @@ robot works the rest out over any window it likes.
   lost.
 - **Detect time, mean and worst:** over the frames that arrived.
 - **Visor restarted:** the sequence went back. Each count starts again from 0.
+- **The link** (offset 27), what the robot should conclude from it:
+  - SuperSpeed (or faster), any format: as it should be.
+  - High speed with bit 5 set, bit 6 clear: a USB 3 camera on USB 2 that Visor couldn't try to
+    recover: it may not (the board's image lacks Visor's udev rule; its journal says so once).
+    Visor tries before it opens a camera, never while it streams, so this isn't a recovery still
+    to come. The frame rate and format say what the link costs: `MJPG` at the full rate, or `GREY`
+    at a few frames a second where the camera offers nothing faster raw.
+  - High speed with bits 5 and 6 set: Visor reset the camera, or powered its port off and on, and
+    it came back on USB 2 again. Its USB 3 contacts are almost certainly not touching: reseat the
+    plug or change the cable, at the next chance. Visor tries nothing more until the camera is
+    replugged or Visor restarts, and runs it as it is meanwhile.
+  - Low or full speed: the camera is on a link far too slow for its full size; expect few or no
+    frames, and treat it as a wiring fault.
+  - High speed with bit 5 clear: a USB 2 camera, at its best.
+  - Unknown speed with a known format: a camera Visor can't find a USB link for; unknown format
+    too: an older Visor.
+  - A change of format between frames, `GREY` to `MJPG` say, is the camera reopened on another
+    link: a fall to USB 2 and back shows here.
 
 Visor's own journal says the same of each camera every 10 s (its README).
 
@@ -122,7 +140,8 @@ values):
 
 - version ID 20261102, sequence 4,000,000,001, 1600 × 1304, capture time 1,234,567,890,123 ns,
   camera 3, clock synced, driver timestamp, exposure 1,000 µs and gain 40 known, the camera's
-  automatic exposure off, median brightness 37, high 201, clipped 125 (1.25%), detect time 4,250
+  automatic exposure off, link `0x7a` (high speed, `MJPG`, able to do better, a recovery tried
+  and the camera still slow), median brightness 37, high 201, clipped 125 (1.25%), detect time 4,250
   µs, 17 dropped, configuration ID `0x6a5d27df` (that of the one-line configuration `team = 1234`
   and its newline, whose SHA-256 starts `6a5d27df`);
 - tag 7, hamming 0, margin 61.25, corners (100.5, 200.25) (180, 201) (179.75, 280.5) (99, 279),

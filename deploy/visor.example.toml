@@ -24,7 +24,8 @@ device = "/dev/v4l/by-path/platform-xhci-hcd.0-usb-0:1:1.0-video-index0"
 width = 1600
 height = 1304
 fps = 60
-# format = "GREY"       # GREY or YUYV; without it, GREY if the camera offers it, else YUYV
+# format = "GREY"       # GREY, YUYV or MJPG; without it, the first of those, in that order, that
+                        # gives this size at this fps, else the fastest at this size
 min_tag_px = 16
 time_offset_us = 0      # from the spin test
 

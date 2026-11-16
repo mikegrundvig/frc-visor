@@ -6,6 +6,7 @@ use std::fmt;
 use sha2::{Digest, Sha256};
 
 use crate::brightness::Brightness;
+use crate::link_state::LinkState;
 
 /// "VISR" in byte order, so a stray packet on the port is dropped, not misread.
 pub const MAGIC: u32 = 0x5253_4956;
@@ -62,6 +63,8 @@ pub struct Frame {
     pub gain: Option<i32>,
     /// Whether the camera's own automatic exposure was on.
     pub auto_exposure: bool,
+    /// The camera's USB link and pixel format ([`LinkState`]).
+    pub link: LinkState,
     /// How bright the image is.
     pub brightness: Brightness,
     /// How long finding this frame's tags and solving their poses took, in microseconds.
@@ -144,7 +147,7 @@ impl Frame {
         out.push(self.camera);
         out.push(self.flags());
         out.push(self.tags.len() as u8);
-        out.push(0);
+        out.push(self.link.byte());
         out.extend_from_slice(&self.exposure_us.unwrap_or(0).to_le_bytes());
         out.extend_from_slice(&self.gain.unwrap_or(0).to_le_bytes());
         out.push(self.brightness.median);
@@ -197,7 +200,7 @@ impl Frame {
         let camera = read.u8();
         let flags = read.u8();
         let tag_count = read.u8() as usize;
-        read.u8();
+        let link = LinkState::from_byte(read.u8());
         let exposure_us = read.u32();
         let gain = read.i32();
         let brightness = Brightness {
@@ -254,6 +257,7 @@ impl Frame {
             exposure_us: (flags & FLAG_EXPOSURE != 0).then_some(exposure_us),
             gain: (flags & FLAG_GAIN != 0).then_some(gain),
             auto_exposure: flags & FLAG_AUTO_EXPOSURE != 0,
+            link,
             brightness,
             detect_us,
             dropped,
@@ -331,6 +335,9 @@ const fn parse_version_id(text: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PixelFormat;
+    use crate::link_state::{Headroom, Speed};
+    use crate::recovery::Recovered;
 
     /// The frame testdata/golden-frame.bin holds. The robot client's tests decode the same file.
     fn golden() -> Frame {
@@ -346,6 +353,13 @@ mod tests {
             exposure_us: Some(1000),
             gain: Some(40),
             auto_exposure: false,
+            // A USB 3 camera stuck at USB 2 after a recovery, running MJPG: 0x7a.
+            link: LinkState {
+                speed: Speed::High,
+                format: Some(PixelFormat::Mjpg),
+                headroom: Headroom::MayDoBetter,
+                recovered: Recovered::TriedStillSlow,
+            },
             brightness: Brightness {
                 median: 37,
                 high: 201,
@@ -426,6 +440,10 @@ mod tests {
             clipped: 10_000,
         };
         cases.push(automatic);
+        // An older Visor's frame: its link state unknown.
+        let mut unknown_link = golden();
+        unknown_link.link = LinkState::default();
+        cases.push(unknown_link);
         let mut full = golden();
         full.tags = vec![golden().tags[0]; MAX_TAGS];
         cases.push(full);

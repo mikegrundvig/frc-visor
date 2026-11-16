@@ -1,5 +1,5 @@
 //! tools/package.sh makes the release archive a board's image installs Visor from: the program, its
-//! notices (NAPA's, and the crates it's built from with their licences), and under `os/` everything the image needs for Visor (its account, its folder, its unit, and what
+//! notices (NAPA's, and the crates it's built from with their licences), and under `os/` everything the image needs for Visor (its account, its folder, its unit, the udev rule for recovering a camera's USB link, and what
 //! Spotter's agent needs to run Visor's pack), so no image keeps a copy of its own.
 //!
 //! The case packs a stand-in program and checks every member of the archive, by type, mode and
@@ -47,6 +47,13 @@ const MEMBERS: &[(&str, &str, Option<&str>)] = &[
         "-rw-r--r--",
         "./os/usr/lib/tmpfiles.d/visor.conf",
         Some("deploy/visor.tmpfiles"),
+    ),
+    ("drwxr-xr-x", "./os/usr/lib/udev/", None),
+    ("drwxr-xr-x", "./os/usr/lib/udev/rules.d/", None),
+    (
+        "-rw-r--r--",
+        "./os/usr/lib/udev/rules.d/70-visor-usb-cameras.rules",
+        Some("deploy/70-visor-usb-cameras.rules"),
     ),
     ("drwxr-xr-x", "./os/usr/share/", None),
     ("drwxr-xr-x", "./os/usr/share/polkit-1/", None),

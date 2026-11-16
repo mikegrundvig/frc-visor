@@ -1,0 +1,13 @@
+# What Visor needs to bring a camera back to its best USB link (src/recovery.rs), given to the video
+# group, which Visor's account is in, and nothing wider. The board's image installs it from the
+# release's os/usr/lib/udev/rules.d/; it takes effect for each device as it's added.
+#
+# A USB reset is written to the camera's usbfs node (/dev/bus/usb/BBB/DDD), root's alone by
+# default: the video group may write the nodes of USB devices with a video interface (class 0e),
+# and no others. After 50-udev-default.rules, which reads the device's interfaces.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{ID_USB_INTERFACES}=="*:0e????:*", GROUP="video", MODE="0664"
+
+# A power cycle of a camera's Type-C port is written to the port's port_type, root's alone by
+# default: the video group may write that one attribute of each Type-C port (port0 and on, not
+# their partners, cables or plugs).
+SUBSYSTEM=="typec", ACTION=="add", KERNEL=="port[0-9]*", KERNEL!="*-*", RUN+="/usr/bin/chgrp video /sys%p/port_type", RUN+="/usr/bin/chmod g+w /sys%p/port_type"

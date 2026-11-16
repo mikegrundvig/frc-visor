@@ -61,7 +61,8 @@ pub struct Camera {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// The pixel format to ask for; without one, `GREY` if offered, else `YUYV`.
+    /// The pixel format to ask for; without one, the first of `GREY`, `YUYV` and `MJPG` that gives
+    /// the size at the frame rate ([`crate::formats`]).
     pub format: Option<PixelFormat>,
     pub min_tag_px: i32,
     /// Added to every capture time: the spin test's result.
@@ -124,6 +125,9 @@ pub enum PixelFormat {
     /// 4:2:2 colour; Visor takes the luma.
     #[serde(rename = "YUYV")]
     Yuyv,
+    /// Motion JPEG; Visor decodes each frame's luma.
+    #[serde(rename = "MJPG")]
+    Mjpg,
 }
 
 impl PixelFormat {
@@ -131,7 +135,24 @@ impl PixelFormat {
         match self {
             PixelFormat::Grey => *b"GREY",
             PixelFormat::Yuyv => *b"YUYV",
+            PixelFormat::Mjpg => *b"MJPG",
         }
+    }
+
+    /// Its four characters, as the log and the configuration say it.
+    pub fn name(self) -> &'static str {
+        match self {
+            PixelFormat::Grey => "GREY",
+            PixelFormat::Yuyv => "YUYV",
+            PixelFormat::Mjpg => "MJPG",
+        }
+    }
+
+    /// The format with these four characters, if it's one of Visor's.
+    pub fn from_fourcc(fourcc: [u8; 4]) -> Option<PixelFormat> {
+        [PixelFormat::Grey, PixelFormat::Yuyv, PixelFormat::Mjpg]
+            .into_iter()
+            .find(|format| format.fourcc() == fourcc)
     }
 }
 
@@ -590,7 +611,7 @@ mod tests {
                 "min_tag_px",
             ),
             (
-                format!("team = 1234\n{CAMERA}format = \"MJPG\"\n"),
+                format!("team = 1234\n{CAMERA}format = \"H264\"\n"),
                 "unknown variant",
             ),
             (

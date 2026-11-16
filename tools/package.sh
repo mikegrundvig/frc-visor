@@ -7,7 +7,8 @@
 # The archive holds the program, its licence and notices (NAPA's, and a list of the Rust crates it's
 # built from and their licences, which needs cargo-deny), the chrony configuration to start from,
 # Visor's Spotter pack (spotter/), and os/: what a board's image installs at its root for Visor, its
-# account, its folder, its unit, and what the agent needs to run Visor's pack (spotter/visor/README.md).
+# account, its folder, its unit, the udev rule that lets it recover a camera's USB link, and what the
+# agent needs to run Visor's pack (spotter/visor/README.md).
 # The same files make the same archive: fixed owner, order and times, no gzip timestamp.
 set -euo pipefail
 # Folders 0755 and files as given, whatever the caller's umask.
@@ -50,6 +51,7 @@ install -D -m 0644 "$repo/deploy/visor.sysusers" "$os/usr/lib/sysusers.d/visor.c
 install -D -m 0644 "$repo/deploy/visor.tmpfiles" "$os/usr/lib/tmpfiles.d/visor.conf"
 install -D -m 0644 "$repo/deploy/frc-spotter-visor.conf" "$os/usr/lib/systemd/system/frc-spotter.service.d/visor.conf"
 install -D -m 0644 "$repo/deploy/50-frc-spotter-visor.rules" "$os/usr/share/polkit-1/rules.d/50-frc-spotter-visor.rules"
+install -D -m 0644 "$repo/deploy/70-visor-usb-cameras.rules" "$os/usr/lib/udev/rules.d/70-visor-usb-cameras.rules"
 
 tar -C "$package" --owner=0 --group=0 --numeric-owner --sort=name \
   --mtime="@$(git -C "$repo" log -1 --format=%ct)" -cf - . | gzip -n >"$out/$name"

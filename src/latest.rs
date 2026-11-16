@@ -1,15 +1,16 @@
 //! The hand-off between a camera's capture thread and its detect thread: one slot holding the
 //! newest frame. The capture thread replaces whatever is waiting, so a slow detection drops frames
 //! rather than falling behind. Images are recycled, so frames don't allocate. The slot counts the
-//! frames that never went on: replaced before they were taken, broken, or never given by the
-//! driver; and the times the detect thread asked for one, which say it's running
-//! ([`crate::watchdog`]).
+//! frames that never went on: replaced before they were taken, broken, never given by the driver,
+//! or compressed and undecodable; and the times the detect thread asked for one, which say it's
+//! running ([`crate::watchdog`]).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use crate::image::GrayImage;
+use crate::link_state::LinkState;
 use crate::settings::InEffect;
 
 /// A frame as the camera gave it.
@@ -22,6 +23,8 @@ pub struct Captured {
     pub dequeue_time: bool,
     /// The exposure and gain it was taken at.
     pub settings: InEffect,
+    /// The camera's link and pixel format when it was taken.
+    pub link: LinkState,
 }
 
 /// The slot.
@@ -43,6 +46,8 @@ struct State {
     short: ShortFrames,
     /// Since the detect thread last asked.
     withheld: u32,
+    /// Since the detect thread last asked.
+    undecoded: u32,
 }
 
 /// The frames the camera gave too short to use, since the detect thread last asked: counted and
@@ -130,6 +135,20 @@ impl Latest {
         std::mem::take(&mut self.state.lock().unwrap().withheld)
     }
 
+    /// Counts a compressed frame that didn't decode, as dropped, and keeps how many for the report:
+    /// the compressed counterpart of a frame the driver never gave, since the driver passes a
+    /// compressed frame on whole or not.
+    pub fn undecoded(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.dropped += 1;
+        state.undecoded = state.undecoded.saturating_add(1);
+    }
+
+    /// The frames that didn't decode since the last call, which starts the count again.
+    pub fn take_undecoded(&self) -> u32 {
+        std::mem::take(&mut self.state.lock().unwrap().undecoded)
+    }
+
     /// Gives back a taken frame's image for reuse.
     pub fn recycle(&self, image: GrayImage) {
         let mut state = self.state.lock().unwrap();
@@ -159,6 +178,7 @@ mod tests {
             monotonic_nanos: at,
             dequeue_time: false,
             settings: InEffect::default(),
+            link: LinkState::default(),
         }
     }
 
@@ -197,6 +217,12 @@ mod tests {
         assert_eq!(latest.take_withheld(), 3);
         assert_eq!(latest.take_withheld(), 0);
         assert_eq!(latest.dropped(), 8);
+        // And compressed frames that didn't decode.
+        latest.undecoded();
+        latest.undecoded();
+        assert_eq!(latest.dropped(), 10);
+        assert_eq!(latest.take_undecoded(), 2);
+        assert_eq!(latest.take_undecoded(), 0);
     }
 
     #[test]

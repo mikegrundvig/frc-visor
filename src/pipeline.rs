@@ -43,12 +43,15 @@ pub fn run(
         if numbers.started.elapsed() >= REPORT_EVERY {
             let dropped = latest.dropped();
             let short = latest.take_short();
-            let withheld = latest.take_withheld();
+            let unseen = Unseen {
+                withheld: latest.take_withheld(),
+                undecoded: latest.take_undecoded(),
+            };
             numbers.report(
                 &camera.name,
                 dropped - numbers.dropped_before,
                 &short,
-                withheld,
+                unseen,
             );
             numbers = Numbers::new(dropped);
         }
@@ -81,6 +84,7 @@ pub fn run(
             exposure_us: settings.exposure_us,
             gain: settings.gain,
             auto_exposure: settings.auto_exposure == Some(true),
+            link: captured.link,
             brightness,
             detect_us: u32::try_from(detect_time.as_micros()).unwrap_or(u32::MAX),
             // Wraps, as the robot reads it: only the difference between two frames' counts matters.
@@ -135,14 +139,29 @@ fn tags_of(found: &[Detection], lens: Option<&Lens>, tag_size_m: f64) -> Vec<Tag
         .collect()
 }
 
+/// The dropped frames detection never saw, since the last report: those the driver never gave,
+/// and compressed ones that didn't decode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Unseen {
+    withheld: u32,
+    undecoded: u32,
+}
+
 /// The frames dropped since the last report, as its line says them: how many, and how many of
-/// those the driver never gave Visor. A camera that sends some of its frames incomplete has these
-/// in every report, so they're part of the line and not a warning.
-fn dropped_shown(dropped: u64, withheld: u32) -> String {
-    if withheld == 0 {
+/// those the driver never gave Visor or didn't decode. A camera that sends some of its frames
+/// incomplete has these in every report, so they're part of the line and not a warning.
+fn dropped_shown(dropped: u64, unseen: Unseen) -> String {
+    let mut why = Vec::new();
+    if unseen.withheld > 0 {
+        why.push(format!("{} the driver never gave", unseen.withheld));
+    }
+    if unseen.undecoded > 0 {
+        why.push(format!("{} that didn't decode", unseen.undecoded));
+    }
+    if why.is_empty() {
         format!("{dropped} dropped")
     } else {
-        format!("{dropped} dropped ({withheld} the driver never gave)")
+        format!("{dropped} dropped ({})", why.join(", "))
     }
 }
 
@@ -291,12 +310,12 @@ impl Numbers {
         warnings
     }
 
-    fn report(&self, camera: &str, dropped: u64, short: &ShortFrames, withheld: u32) {
+    fn report(&self, camera: &str, dropped: u64, short: &ShortFrames, unseen: Unseen) {
         if self.frames == 0 {
             let seconds = self.started.elapsed().as_secs_f64();
             warn!("{camera}: no frames for {seconds:.0} s");
         } else {
-            self.report_frames(camera, dropped, withheld);
+            self.report_frames(camera, dropped, unseen);
         }
         for warning in self.problems(camera, short) {
             warn!("{warning}");
@@ -304,14 +323,14 @@ impl Numbers {
     }
 
     /// The numbers of a report with frames in it.
-    fn report_frames(&self, camera: &str, dropped: u64, withheld: u32) {
+    fn report_frames(&self, camera: &str, dropped: u64, unseen: Unseen) {
         let seconds = self.started.elapsed().as_secs_f64();
         let frames = f64::from(self.frames);
         info!(
             "{camera}: {:.1} fps, {}, detect {:.1} ms mean, {:.1} ms worst, \
              {:.2} tags per frame, brightness {} median and {} at 99%",
             frames / seconds,
-            dropped_shown(dropped, withheld),
+            dropped_shown(dropped, unseen),
             self.detect_total.as_secs_f64() * 1000.0 / frames,
             self.detect_worst.as_secs_f64() * 1000.0,
             self.tags as f64 / frames,
@@ -509,16 +528,28 @@ mod tests {
     }
 
     #[test]
-    fn the_report_s_line_says_how_many_dropped_frames_the_driver_never_gave() {
-        // (the frames dropped since the last report, those of them the driver never gave)
-        let cases: [(u64, u32, &str); 4] = [
-            (0, 0, "0 dropped"),
-            (3, 0, "3 dropped"),
-            (72, 72, "72 dropped (72 the driver never gave)"),
-            (75, 72, "75 dropped (72 the driver never gave)"),
+    fn the_report_s_line_says_how_many_dropped_frames_the_driver_never_gave_or_didn_t_decode() {
+        // (the frames dropped since the last report, those of them the driver never gave, those
+        // that didn't decode)
+        let cases: [(u64, u32, u32, &str); 6] = [
+            (0, 0, 0, "0 dropped"),
+            (3, 0, 0, "3 dropped"),
+            (72, 72, 0, "72 dropped (72 the driver never gave)"),
+            (75, 72, 0, "75 dropped (72 the driver never gave)"),
+            (4, 0, 2, "4 dropped (2 that didn't decode)"),
+            (
+                9,
+                5,
+                2,
+                "9 dropped (5 the driver never gave, 2 that didn't decode)",
+            ),
         ];
-        for (dropped, withheld, expected) in cases {
-            assert_eq!(dropped_shown(dropped, withheld), expected);
+        for (dropped, withheld, undecoded, expected) in cases {
+            let unseen = Unseen {
+                withheld,
+                undecoded,
+            };
+            assert_eq!(dropped_shown(dropped, unseen), expected);
         }
     }
 

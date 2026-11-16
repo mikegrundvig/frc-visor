@@ -44,11 +44,10 @@ pub fn unconfigured(
         width,
         height,
         fps,
-        format: match format {
-            Some("GREY") => Some(PixelFormat::Grey),
-            Some("YUYV") => Some(PixelFormat::Yuyv),
-            _ => None,
-        },
+        format: format.and_then(|name| {
+            let fourcc: [u8; 4] = name.as_bytes().try_into().ok()?;
+            PixelFormat::from_fourcc(fourcc)
+        }),
         min_tag_px: visor::config::DEFAULT_MIN_TAG_PX,
         time_offset_nanos: 0,
         exposure_us: None,

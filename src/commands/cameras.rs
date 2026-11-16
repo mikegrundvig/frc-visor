@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use visor::cameras;
+use visor::usb::{self, Outlook};
 
 use super::Result;
 
@@ -14,7 +15,7 @@ pub fn list_cameras(names: bool, by_id: &Path, by_path: &Path, sysfs: &Path) -> 
         camera_names(&plugged);
         return Ok(());
     }
-    cameras(&plugged)
+    cameras(&plugged, sysfs)
 }
 
 /// Each camera's name, one per line, for Visor's Spotter pack.
@@ -24,9 +25,10 @@ fn camera_names(plugged: &[cameras::Plugged]) {
     }
 }
 
-/// Each camera plugged in: the device to give Visor, what it offers, and its controls. A video
-/// device that doesn't capture (a UVC camera's second, metadata, device) is left out.
-fn cameras(plugged: &[cameras::Plugged]) -> Result<()> {
+/// Each camera plugged in: the device to give Visor, its USB link, what it offers, and its
+/// controls. A video device that doesn't capture (a UVC camera's second, metadata, device) is left
+/// out.
+fn cameras(plugged: &[cameras::Plugged], sysfs: &Path) -> Result<()> {
     let mut listed = 0;
     for each in plugged.iter().filter(|each| each.captures()) {
         let offers = match offered(&each.device) {
@@ -47,6 +49,7 @@ fn cameras(plugged: &[cameras::Plugged]) -> Result<()> {
                  port and its cable"
             );
         }
+        println!("  {}", link_line(sysfs, &each.device));
         for line in offers {
             println!("  {line}");
         }
@@ -65,11 +68,29 @@ fn cameras(plugged: &[cameras::Plugged]) -> Result<()> {
         println!("no cameras plugged in");
     } else {
         println!(
-            "Visor reads GREY and YUYV; give a camera its device and one of these sizes. Its \
-             exposure and gain are set by the robot's configuration (exposure_us, gain)."
+            "Visor reads GREY, YUYV and MJPG, taking the first of those that gives the size at \
+             the frame rate; give a camera its device and one of these sizes. Its exposure and \
+             gain are set by the robot's configuration (exposure_us, gain)."
         );
     }
     Ok(())
+}
+
+/// A camera's USB link as `visor cameras` says it: its speed, and whether it could do better.
+fn link_line(sysfs: &Path, device: &Path) -> String {
+    match usb::link_of(sysfs, device) {
+        Ok(Some(link)) => match link.outlook() {
+            Outlook::MayDoBetter => format!(
+                "on {link}: below SuperSpeed though it reports USB {}, likely a USB 3 camera \
+                 whose USB 3 contacts aren't connecting; Visor tries once to bring it to USB 3 \
+                 as it opens it",
+                link.version
+            ),
+            Outlook::Fast | Outlook::AtItsBest => format!("on {link}"),
+        },
+        Ok(None) => "not on USB, or its USB link can't be found".to_string(),
+        Err(why) => format!("its USB link can't be read: {why}"),
+    }
 }
 
 /// A device's controls: each one's range, default and value now.

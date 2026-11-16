@@ -79,8 +79,8 @@ enum Command {
         height: Option<u32>,
         #[arg(long, requires = "device", default_value_t = visor::config::DEFAULT_FPS)]
         fps: u32,
-        /// GREY or YUYV; without one, GREY if the camera offers it.
-        #[arg(long, requires = "device", value_parser = ["GREY", "YUYV"])]
+        /// GREY, YUYV or MJPG; without one, the first of those that gives the size at the rate.
+        #[arg(long, requires = "device", value_parser = ["GREY", "YUYV", "MJPG"])]
         format: Option<String>,
         /// In RAM on a read-only board, and gone at the next boot.
         #[arg(long, default_value = "/tmp/visor-frames")]
@@ -207,7 +207,7 @@ fn run(path: &Path) -> Result<()> {
     for camera in &config.cameras {
         cameras.push(Wired {
             camera,
-            source: V4l2,
+            source: V4l2::default(),
             detector: Detector::new(camera.min_tag_px)?,
             socket: UdpSocket::bind((any, 0))?,
             latest: Latest::new(),

@@ -36,6 +36,11 @@ class VisorWireTest {
     frame.addTag(400, 0, 12f, new float[] {1, 2, 3, 4, 5, 6, 7, 8});
     frame.setExposure(1300);
     frame.setGain(55);
+    frame.setLink(
+        VisorLink.Speed.SUPER,
+        VisorLink.Format.GREY,
+        VisorLink.Headroom.NONE_KNOWN,
+        VisorLink.Recovery.NOT_TRIED);
     frame.setBrightness(41, 187, 0.0042);
     frame.setHealth(3_900, 4_294_967_295L);
     // Past the top bit, so it's read back as the same four bytes, not as a sign.
@@ -61,6 +66,11 @@ class VisorWireTest {
     assertThat(frame.gainKnown()).isTrue();
     assertThat(frame.gain()).isEqualTo(40);
     assertThat(frame.autoExposure()).isFalse();
+    // A USB 3 camera stuck at USB 2 after Visor's recovery, run in MJPG: 0x7a.
+    assertThat(frame.linkSpeed()).isEqualTo(VisorLink.Speed.HIGH);
+    assertThat(frame.pixelFormat()).isEqualTo(VisorLink.Format.MJPG);
+    assertThat(frame.linkHeadroom()).isEqualTo(VisorLink.Headroom.MAY_DO_BETTER);
+    assertThat(frame.linkRecovery()).isEqualTo(VisorLink.Recovery.TRIED_STILL_SLOW);
     assertThat(frame.medianBrightness()).isEqualTo(37);
     assertThat(frame.highBrightness()).isEqualTo(201);
     assertThat(frame.clippedShare()).isEqualTo(0.0125);
@@ -149,6 +159,78 @@ class VisorWireTest {
     assertThatThrownBy(() -> sent.setExposure(0)).hasMessageContaining("microseconds");
     assertThatThrownBy(() -> sent.setHealth(-1, 0)).hasMessageContaining("microseconds");
     assertThatThrownBy(() -> sent.setHealth(0, 1L << 32)).hasMessageContaining("2^32");
+  }
+
+  /** Each link state, its byte as Visor's tests have it, and an older Visor's 0 as unknown. */
+  @Test
+  void theLinkStateIsOneByteWithZeroUnknown() {
+    record Case(
+        int link,
+        VisorLink.Speed speed,
+        VisorLink.Format format,
+        VisorLink.Headroom headroom,
+        VisorLink.Recovery recovery) {}
+    List<Case> cases =
+        List.of(
+            new Case(
+                0x00,
+                VisorLink.Speed.UNKNOWN,
+                VisorLink.Format.UNKNOWN,
+                VisorLink.Headroom.NONE_KNOWN,
+                VisorLink.Recovery.NOT_TRIED),
+            new Case(
+                0x0b,
+                VisorLink.Speed.SUPER,
+                VisorLink.Format.GREY,
+                VisorLink.Headroom.NONE_KNOWN,
+                VisorLink.Recovery.NOT_TRIED),
+            new Case(
+                0x0c,
+                VisorLink.Speed.FASTER,
+                VisorLink.Format.GREY,
+                VisorLink.Headroom.NONE_KNOWN,
+                VisorLink.Recovery.NOT_TRIED),
+            new Case(
+                0x3a,
+                VisorLink.Speed.HIGH,
+                VisorLink.Format.MJPG,
+                VisorLink.Headroom.MAY_DO_BETTER,
+                VisorLink.Recovery.NOT_TRIED),
+            new Case(
+                0x7a,
+                VisorLink.Speed.HIGH,
+                VisorLink.Format.MJPG,
+                VisorLink.Headroom.MAY_DO_BETTER,
+                VisorLink.Recovery.TRIED_STILL_SLOW),
+            new Case(
+                0x12,
+                VisorLink.Speed.HIGH,
+                VisorLink.Format.YUYV,
+                VisorLink.Headroom.NONE_KNOWN,
+                VisorLink.Recovery.NOT_TRIED),
+            new Case(
+                0x79,
+                VisorLink.Speed.LOW_OR_FULL,
+                VisorLink.Format.MJPG,
+                VisorLink.Headroom.MAY_DO_BETTER,
+                VisorLink.Recovery.TRIED_STILL_SLOW));
+    for (Case c : cases) {
+      String name = Integer.toHexString(c.link());
+      assertThat(VisorLink.speed(c.link())).as(name).isEqualTo(c.speed());
+      assertThat(VisorLink.format(c.link())).as(name).isEqualTo(c.format());
+      assertThat(VisorLink.headroom(c.link())).as(name).isEqualTo(c.headroom());
+      assertThat(VisorLink.recovery(c.link())).as(name).isEqualTo(c.recovery());
+      assertThat(VisorLink.of(c.speed(), c.format(), c.headroom(), c.recovery()))
+          .as(name)
+          .isEqualTo(c.link());
+    }
+    // A speed this client doesn't know reads as unknown.
+    assertThat(VisorLink.speed(0x07)).isEqualTo(VisorLink.Speed.UNKNOWN);
+    // A frame built for a simulation starts unknown, as one from an older Visor reads.
+    VisorFrame frame = built(1, 0);
+    frame.setHeader(1, 1600, 1304, 5, 0, true, false);
+    assertThat(frame.linkSpeed()).isEqualTo(VisorLink.Speed.UNKNOWN);
+    assertThat(frame.pixelFormat()).isEqualTo(VisorLink.Format.UNKNOWN);
   }
 
   @Test
@@ -243,6 +325,10 @@ class VisorWireTest {
     assertThat(actual.gainKnown()).isEqualTo(expected.gainKnown());
     assertThat(actual.gain()).isEqualTo(expected.gain());
     assertThat(actual.autoExposure()).isEqualTo(expected.autoExposure());
+    assertThat(actual.linkSpeed()).isEqualTo(expected.linkSpeed());
+    assertThat(actual.pixelFormat()).isEqualTo(expected.pixelFormat());
+    assertThat(actual.linkHeadroom()).isEqualTo(expected.linkHeadroom());
+    assertThat(actual.linkRecovery()).isEqualTo(expected.linkRecovery());
     assertThat(actual.medianBrightness()).isEqualTo(expected.medianBrightness());
     assertThat(actual.highBrightness()).isEqualTo(expected.highBrightness());
     assertThat(actual.clippedShare()).isEqualTo(expected.clippedShare());

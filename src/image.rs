@@ -1,9 +1,13 @@
-//! 8-bit grayscale images: what NAPA reads, what cameras are converted to, and what `visor record`
-//! saves as PGM files for lens calibration.
+//! 8-bit grayscale images: what NAPA reads, what cameras' frames are converted or decoded to, and
+//! what `visor record` saves as PGM files for lens calibration.
 
 use std::fs;
 use std::io;
 use std::path::Path;
+
+use zune_jpeg::JpegDecoder;
+use zune_jpeg::zune_core::colorspace::ColorSpace;
+use zune_jpeg::zune_core::options::DecoderOptions;
 
 /// A grayscale image, its rows packed with no padding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +48,24 @@ impl GrayImage {
             }
         }
         Ok(())
+    }
+
+    /// Decodes a JPEG (a V4L2 `MJPG` frame) to its luma, which must be this image's size. Only
+    /// the luma is made: the colour is never converted.
+    pub fn decode_jpeg_luma(&mut self, jpeg: &[u8]) -> Result<(), String> {
+        let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::Luma);
+        let mut decoder = JpegDecoder::new_with_options(jpeg, options);
+        decoder.decode_headers().map_err(|why| why.to_string())?;
+        let (width, height) = decoder.dimensions().ok_or("no size in its headers")?;
+        if (width, height) != (self.width as usize, self.height as usize) {
+            return Err(format!(
+                "a {width}x{height} JPEG for a {}x{} image",
+                self.width, self.height
+            ));
+        }
+        decoder
+            .decode_into(&mut self.pixels)
+            .map_err(|why| why.to_string())
     }
 
     /// Reads a binary PGM (`P5`, 8-bit).
@@ -132,6 +154,35 @@ fn parse_pgm(bytes: &[u8]) -> Result<GrayImage, String> {
     })
 }
 
+/// JPEGs made in tests, as a USB camera's MJPEG frames are: baseline, YCbCr 4:2:2, a restart
+/// marker every MCU row.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
+
+    /// A `width` x `height` JPEG of a pattern whose luma is known: grey levels from `level`, with
+    /// colour that a luma decode must ignore.
+    pub fn jpeg(width: u16, height: u16, level: impl Fn(usize, usize) -> u8) -> Vec<u8> {
+        let mut rgb = Vec::with_capacity(usize::from(width) * usize::from(height) * 3);
+        for y in 0..usize::from(height) {
+            for x in 0..usize::from(width) {
+                let grey = level(x, y);
+                // Equal red, green and blue: luma is the grey, and the chroma neutral.
+                rgb.extend_from_slice(&[grey, grey, grey]);
+            }
+        }
+        let mut out = Vec::new();
+        let mut encoder = Encoder::new(&mut out, 95);
+        encoder.set_sampling_factor(SamplingFactor::R_4_2_2);
+        // One MCU row of a 4:2:2 image is width / 16 MCUs.
+        encoder.set_restart_interval(width.div_ceil(16));
+        encoder
+            .encode(&rgb, width, height, ColorType::Rgb)
+            .expect("a test JPEG");
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +198,39 @@ mod tests {
         let mut image = GrayImage::new(3, 2);
         image.copy_yuyv_luma(&yuyv, 8).unwrap();
         assert_eq!(image.pixels, [1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn a_jpeg_decodes_to_its_luma_and_a_bad_one_is_refused() {
+        // A gradient across, banded down: smooth enough that JPEG keeps it within a few levels.
+        let level = |x: usize, y: usize| (x * 2 + (y / 8) * 16) as u8;
+        let (width, height) = (96, 40);
+        let jpeg = fixtures::jpeg(width, height, level);
+        let mut image = GrayImage::new(width.into(), height.into());
+        image.decode_jpeg_luma(&jpeg).unwrap();
+        for y in 0..usize::from(height) {
+            for x in 0..usize::from(width) {
+                let got = image.pixels[y * usize::from(width) + x];
+                assert!(got.abs_diff(level(x, y)) <= 3, "({x}, {y}): {got}");
+            }
+        }
+        // (the bytes, the image's size, part of why it's refused)
+        let cut = &jpeg[..jpeg.len() / 2];
+        let mut garbled = jpeg.clone();
+        garbled[2..40].fill(0x55);
+        let cases: [(&[u8], (u32, u32), &str); 4] = [
+            (&jpeg, (48, 40), "a 96x40 JPEG for a 48x40 image"),
+            (b"not a jpeg", (96, 40), ""),
+            (&garbled, (96, 40), ""),
+            (&[], (96, 40), ""),
+        ];
+        for (bytes, (w, h), why) in cases {
+            let mut image = GrayImage::new(w, h);
+            let error = image.decode_jpeg_luma(bytes).unwrap_err();
+            assert!(error.contains(why), "{error}");
+        }
+        // A frame cut short decodes or not as the decoder can, but never panics.
+        let _ = GrayImage::new(96, 40).decode_jpeg_luma(cut);
     }
 
     #[test]

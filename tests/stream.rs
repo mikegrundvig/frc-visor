@@ -190,6 +190,7 @@ fn with_camera(options: Options, pace: &(impl Pace + Sync), test: impl FnOnce(&R
                         gain: Some(40),
                         auto_exposure: Some(false),
                     },
+                    link: visor::link_state::LinkState::default(),
                 });
                 put += 1;
             }

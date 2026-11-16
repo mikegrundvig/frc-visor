@@ -8,6 +8,9 @@ messages with it, so robot code never links GPL code.
   loop through a fixed ring. `inMemory()` makes one a simulation feeds directly.
 - `VisorFrame` is one frame, reused: receiving allocates nothing once running. Its `sender()` is
   the coprocessor it came from, and its `configId()` the configuration Visor ran as it sent it.
+  Its `linkSpeed()`, `pixelFormat()`, `linkHeadroom()` and `linkRecovery()` are the camera's USB
+  link state as `VisorLink` enums: a USB 3 camera stuck at USB 2, and whether Visor's one recovery
+  left it there ([docs/wire.md](../docs/wire.md#the-cameras-health)).
 - `VisorStream` names a camera's live view on its coprocessor, `http://<board>:5809/stream/<camera>`
   ([docs/live-view.md](../docs/live-view.md)): the browser fetches it from the board directly.
 - `CameraToTag` is a tag's pose from the camera in WPILib's axes (camera-to-tag).

@@ -18,12 +18,14 @@ use v4l::timestamp::Timestamp;
 use visor::capture::{Opened, Source};
 use visor::clock::{Clocks, EPOCH_NANOS};
 use visor::config::{Camera, Stream};
+use visor::formats::Rates;
 use visor::image::GrayImage;
 use visor::latest::Latest;
 use visor::napa::Detector;
 use visor::service::{self, Wired};
 use visor::settings::{Control, Controls};
 use visor::stream::server::Options;
+use visor::usb::{Back, Link, PowerPort, Usb};
 use visor::wire::Frame;
 
 /// The robot's clock, synced.
@@ -44,6 +46,25 @@ impl Clocks for Synced {
 /// A camera that sees one rendered scene, at 30 frames a second, and has no controls.
 struct Scene {
     image: GrayImage,
+}
+
+/// Not on USB: nothing to recover.
+impl Usb for Scene {
+    fn link(&mut self, _device: &Path) -> io::Result<Option<Link>> {
+        Ok(None)
+    }
+    fn reset(&mut self, _device: &Path, _link: &Link) -> io::Result<Back> {
+        unreachable!("a scene has no USB link")
+    }
+    fn power_port(&mut self, _link: &Link) -> io::Result<PowerPort> {
+        unreachable!("a scene has no USB link")
+    }
+    fn power_cycle(&mut self, _device: &Path, _port: &Path) -> io::Result<Back> {
+        unreachable!("a scene has no USB link")
+    }
+    fn now(&mut self) -> Duration {
+        Duration::ZERO
+    }
 }
 
 impl Source for Scene {
@@ -83,6 +104,10 @@ impl Opened for SceneCamera<'_> {
         Ok(vec![*b"GREY"])
     }
 
+    fn rates(&self, _fourcc: [u8; 4], _width: u32, _height: u32) -> Rates {
+        Rates::Offered(vec![30.0])
+    }
+
     fn set_format(&self, wanted: &Format) -> io::Result<Format> {
         let size = (self.image.width, self.image.height);
         assert_eq!((wanted.width, wanted.height), size, "the scene's size");
@@ -96,7 +121,7 @@ impl Opened for SceneCamera<'_> {
         Ok(Fraction::new(1, 30))
     }
 
-    fn start(&mut self) -> io::Result<()> {
+    fn start(&mut self, _stall: Duration) -> io::Result<()> {
         Ok(())
     }
 

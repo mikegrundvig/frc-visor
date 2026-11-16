@@ -32,6 +32,7 @@ board's image installs that folder at its root (copied as it is, then `systemd-s
 | `usr/lib/systemd/system/visor.service` | `deploy/visor.service` | Visor's unit, which runs `/opt/visor/visor` as `visor` once the robot has configured it |
 | `usr/lib/systemd/system/frc-spotter.service.d/visor.conf` | `deploy/frc-spotter-visor.conf` | The agent may write `/opt/visor` (`ReadWritePaths=`) |
 | `usr/share/polkit-1/rules.d/50-frc-spotter-visor.rules` | `deploy/50-frc-spotter-visor.rules` | The agent may restart `visor.service`, and nothing more: it sorts before Spotter's own `99-frc-spotter.rules` |
+| `usr/lib/udev/rules.d/70-visor-usb-cameras.rules` | `deploy/70-visor-usb-cameras.rules` | The `video` group, Visor's, may write the usbfs nodes of USB devices with a video interface (a camera's USB reset) and each Type-C port's `port_type` (a power cycle of its port), and nothing wider: Visor's one recovery of a camera stuck below its USB link (the README's "Formats and USB links"). It takes effect as each device is added, so from the next boot |
 
 What stays the image's own is the board's: keeping `/opt/visor` across boots on a read-only root,
 and which cores Visor runs on (a drop-in for `visor.service` with `CPUAffinity=`). A drop-in in the
