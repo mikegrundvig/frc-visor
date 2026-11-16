@@ -25,7 +25,7 @@ use visor::napa::Detector;
 use visor::service::{self, Wired};
 use visor::settings::{Control, Controls};
 use visor::stream::server::Options;
-use visor::usb::{Back, Link, PowerPort, Usb};
+use visor::usb::{Back, Found, Identity, Link, PowerPort, Usb};
 use visor::wire::Frame;
 
 /// The robot's clock, synced.
@@ -55,6 +55,9 @@ impl Usb for Scene {
     }
     fn reset(&mut self, _device: &Path, _link: &Link) -> io::Result<Back> {
         unreachable!("a scene has no USB link")
+    }
+    fn find(&mut self, _identity: &Identity) -> io::Result<Found> {
+        Ok(Found::Nothing)
     }
     fn power_port(&mut self, _link: &Link) -> io::Result<PowerPort> {
         unreachable!("a scene has no USB link")

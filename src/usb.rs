@@ -7,11 +7,12 @@
 //! With its USB 3 contacts apart, it comes back at USB 2 again. Nothing the host can read tells
 //! the two apart beforehand, so the only test is the attempt ([`crate::recovery`] decides when).
 //!
-//! As observed on a board, a reset that works usually ends in `ENODEV`: the camera leaves the USB 2
-//! bus for the USB 3 one while the reset runs, so the device it was sent to is gone before the call
-//! returns, and the camera is at SuperSpeed 0.13 to 0.24 s later. So a reset that ends with the
-//! device gone ([`left_during`]) was sent, and the camera is waited for just as after one that
-//! ends cleanly.
+//! As observed on a board, what the reset's call says tells the two apart after. A reset that works
+//! usually ends in `ENODEV`: the camera leaves the USB 2 bus for the USB 3 one while the reset runs,
+//! so the device it was sent to is gone before the call returns, and the camera is at SuperSpeed
+//! 0.13 to 0.24 s later; it's waited for as one that went away. When the USB 3 side can't link,
+//! the kernel resets the camera in place, same bus and address with no disconnect, and the call
+//! returns cleanly: only its video device is waited for ([`reset_and_wait`]).
 //!
 //! A camera's USB device is its video device's `device/..` in sysfs, with its `speed` (Mb/s) and
 //! its `version` (the USB version it reports it can do: ` 3.10` for a USB 3 camera, whatever it's
@@ -27,6 +28,10 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+mod find;
+
+pub use find::{Found, find_devices};
+
 /// SuperSpeed, USB 3's first: the speed a USB 3 camera links at with its wiring whole.
 pub const SUPER_SPEED_MBPS: u32 = 5000;
 /// Where the kernel puts the usbfs nodes.
@@ -39,6 +44,12 @@ const LOOK_EVERY: Duration = Duration::from_millis(20);
 /// and in about 0.4 s at USB 2; past 3 s something else is wrong, and the capture loop's own
 /// retries take over.
 pub const RESET_RETURN: Duration = Duration::from_secs(3);
+/// How long a camera reset in place is looked for at most: the kernel has finished the reset when
+/// the call returns, and uvcvideo binds it again at once; only udev's name for its new video
+/// device can lag.
+pub const IN_PLACE_RETURN: Duration = Duration::from_secs(1);
+/// Where the kernel lists every USB device.
+pub const USB_DEVICES: &str = "/sys/bus/usb/devices";
 
 /// A camera's USB device, as it's linked now.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +67,34 @@ pub struct Link {
     /// The USB controller it hangs from, as its sysfs path names it (the last part ending
     /// `.usb`, like `fc000000.usb`); none when its path has no such part.
     pub controller: Option<String>,
+    /// What it is, to find it again when it has no video device.
+    pub identity: Identity,
+}
+
+/// A USB device's vendor, product and serial, as it reports them; each none when it doesn't.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Identity {
+    pub vendor: Option<u16>,
+    pub product: Option<u16>,
+    pub serial: Option<String>,
+}
+
+/// Whether a camera can be found by its identity alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Findable {
+    /// It reports a vendor, a product and a serial.
+    BySerial,
+    /// It doesn't: another camera of its model could be taken for it.
+    No,
+}
+
+impl Identity {
+    pub fn findable(&self) -> Findable {
+        match (self.vendor, self.product, &self.serial) {
+            (Some(_), Some(_), Some(serial)) if !serial.is_empty() => Findable::BySerial,
+            _ => Findable::No,
+        }
+    }
 }
 
 /// A USB version as a device reports it, `bcdUSB`: 2.00, 2.10, 3.10.
@@ -153,11 +192,17 @@ pub fn link_of(sysfs: &Path, device: &Path) -> io::Result<Option<Link>> {
         Err(error) if gone(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let Some(speed) = read_field(&usb, "speed")? else {
+    link_at(&usb)
+}
+
+/// The link of the USB device whose sysfs folder (resolved) is `usb`; none when it isn't there,
+/// or isn't a USB device (no `speed`).
+pub fn link_at(usb: &Path) -> io::Result<Option<Link>> {
+    let Some(speed) = read_field(usb, "speed")? else {
         return Ok(None);
     };
     let read = |field: &str| -> io::Result<String> {
-        read_field(&usb, field)?
+        read_field(usb, field)?
             .ok_or_else(|| invalid(format!("{} has a speed but no {field}", usb.display())))
     };
     let number = |field: &str| -> io::Result<u32> {
@@ -171,7 +216,16 @@ pub fn link_of(sysfs: &Path, device: &Path) -> io::Result<Option<Link>> {
         .filter_map(|part| part.to_str())
         .rfind(|part| part.ends_with(".usb"))
         .map(str::to_string);
+    let hex = |field: &str| -> io::Result<Option<u16>> {
+        Ok(read_field(usb, field)?.and_then(|text| u16::from_str_radix(&text, 16).ok()))
+    };
+    let identity = Identity {
+        vendor: hex("idVendor")?,
+        product: hex("idProduct")?,
+        serial: read_field(usb, "serial")?.filter(|serial| !serial.is_empty()),
+    };
     Ok(Some(Link {
+        identity,
         controller,
         name: usb
             .file_name()
@@ -214,6 +268,8 @@ pub trait Usb {
     /// to come back. An error when the reset can't be sent: [`io::ErrorKind::PermissionDenied`]
     /// when Visor may not.
     fn reset(&mut self, device: &Path, link: &Link) -> io::Result<Back>;
+    /// The USB devices with this identity, wherever they are, video device or not.
+    fn find(&mut self, identity: &Identity) -> io::Result<Found>;
     /// The port whose power can be switched for a camera last on `link`, or why there is none.
     fn power_port(&mut self, link: &Link) -> io::Result<PowerPort>;
     /// Powers `port` off and on again ([`crate::typec::power_cycle`]), then waits a bounded time
@@ -236,7 +292,11 @@ pub enum PowerPort {
 /// Whether a reset camera came back within the wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Back {
+    /// It went away and came back, or its video device is there again after a reset in place.
     Returned,
+    /// It was reset in place, and is on its bus still, but its video device isn't there (yet).
+    InPlace,
+    /// It went away and isn't back by the end of the wait.
     NotYet,
 }
 
@@ -252,6 +312,8 @@ pub struct SystemUsb {
     pub typec: PathBuf,
     /// `/sys/class/usb_role`.
     pub roles: PathBuf,
+    /// `/sys/bus/usb/devices`.
+    pub devices: PathBuf,
     started: Instant,
 }
 
@@ -262,6 +324,7 @@ impl Default for SystemUsb {
             usbfs: PathBuf::from(USBFS),
             typec: PathBuf::from(crate::typec::TYPEC),
             roles: PathBuf::from(crate::typec::ROLES),
+            devices: PathBuf::from(USB_DEVICES),
             started: Instant::now(),
         }
     }
@@ -287,6 +350,10 @@ impl Usb for SystemUsb {
         let sent = send_reset(&link.node(&self.usbfs));
         let look = || self.look(device);
         reset_and_wait(sent, link, look, std::thread::sleep)
+    }
+
+    fn find(&mut self, identity: &Identity) -> io::Result<Found> {
+        find_devices(&self.devices, identity)
     }
 
     fn power_port(&mut self, link: &Link) -> io::Result<PowerPort> {
@@ -323,22 +390,39 @@ pub fn left_during(error: &io::Error) -> bool {
     )
 }
 
-/// After a reset whose sending came to `sent`, waits for the camera that was on `before` to come
-/// back ([`await_return`], with `look` and `pause` as its). A reset that ended with the device
-/// gone ([`left_during`]) is how one that works usually ends, so it's waited for the same as one
-/// that ended cleanly; any other error is the reset's, and nothing is waited for.
+/// After a reset whose sending came to `sent`, waits for the camera that was on `before` (`look`
+/// and `pause` as [`await_return`]'s). What the call says decides how:
+///
+/// - It returned cleanly: the kernel finished the reset with the device where it was, on the same
+///   bus and address; it never left. Only its video device is waited for, briefly
+///   ([`IN_PLACE_RETURN`]), as uvcvideo binds it again: [`Back::Returned`] once it's there, else
+///   [`Back::InPlace`], never "not back".
+/// - It ended with the device gone ([`left_during`]): it left, the camera's way to another bus,
+///   and is waited for as one that went away and comes back ([`await_return`]).
+/// - Any other error is the reset's, and nothing is waited for.
 pub fn reset_and_wait(
     sent: io::Result<()>,
     before: &Link,
-    look: impl FnMut() -> Seen,
-    pause: impl FnMut(Duration),
+    mut look: impl FnMut() -> Seen,
+    mut pause: impl FnMut(Duration),
 ) -> io::Result<Back> {
     match sent {
-        Ok(()) => {}
-        Err(error) if left_during(&error) => {}
-        Err(error) => return Err(error),
+        Ok(()) => {
+            let mut waited = Duration::ZERO;
+            while waited < IN_PLACE_RETURN {
+                if let Seen::Present(_) = look() {
+                    return Ok(Back::Returned);
+                }
+                pause(LOOK_EVERY);
+                waited += LOOK_EVERY;
+            }
+            Ok(Back::InPlace)
+        }
+        Err(error) if left_during(&error) => {
+            Ok(await_return(Some(before), RESET_RETURN, look, pause))
+        }
+        Err(error) => Err(error),
     }
-    Ok(await_return(Some(before), RESET_RETURN, look, pause))
 }
 
 /// What a look for a reset camera finds.
@@ -393,6 +477,7 @@ mod tests {
             bus,
             address,
             controller: Some("fc000000.usb".into()),
+            identity: Identity::default(),
         }
     }
 
@@ -551,9 +636,15 @@ mod tests {
                 (got, expected) => panic!("{name}: {got:?}, expected {expected:?}"),
             }
         }
+        // A reset whose call returns cleanly happened in place: back as soon as its video device
+        // is there, and at worst there without one after a second, never "not back".
+        let mut waited = Duration::ZERO;
+        let in_place = reset_and_wait(Ok(()), &before, back, |pause| waited += pause).unwrap();
+        assert_eq!((in_place, waited), (Back::Returned, Duration::ZERO));
+        let no_video = reset_and_wait(Ok(()), &before, || Seen::Absent, |pause| waited += pause);
         assert_eq!(
-            reset_and_wait(Ok(()), &before, back, |_| {}).unwrap(),
-            Back::Returned
+            (no_video.unwrap(), waited),
+            (Back::InPlace, IN_PLACE_RETURN)
         );
     }
 

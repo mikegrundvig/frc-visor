@@ -239,6 +239,10 @@ impl Usb for Fake<'_> {
         Ok(crate::usb::Back::Returned)
     }
 
+    fn find(&mut self, _identity: &crate::usb::Identity) -> io::Result<crate::usb::Found> {
+        Ok(crate::usb::Found::Nothing)
+    }
+
     fn power_port(&mut self, _link: &Link) -> io::Result<crate::usb::PowerPort> {
         Ok(crate::usb::PowerPort::Fixed("a test's".into()))
     }
@@ -686,6 +690,7 @@ fn on(mbps: u32, major: u8, minor: u8, address: u32) -> Link {
         bus: 7,
         address,
         controller: None,
+        identity: crate::usb::Identity::default(),
     }
 }
 

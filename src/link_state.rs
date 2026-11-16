@@ -167,6 +167,7 @@ mod tests {
             bus: 8,
             address: 2,
             controller: None,
+            identity: crate::usb::Identity::default(),
         }
     }
 

@@ -17,7 +17,7 @@ use v4l::{Device, Format, FourCC};
 use super::{Opened, Source};
 use crate::formats::Rates;
 use crate::settings::{Control, Controls};
-use crate::usb::{Back, Link, PowerPort, SystemUsb, Usb};
+use crate::usb::{Back, Found, Identity, Link, PowerPort, SystemUsb, Usb};
 
 const BUFFERS: u32 = 4;
 
@@ -34,6 +34,10 @@ impl Usb for V4l2 {
 
     fn reset(&mut self, device: &Path, link: &Link) -> io::Result<Back> {
         self.usb.reset(device, link)
+    }
+
+    fn find(&mut self, identity: &Identity) -> io::Result<Found> {
+        self.usb.find(identity)
     }
 
     fn power_port(&mut self, link: &Link) -> io::Result<PowerPort> {

@@ -153,6 +153,7 @@ mod tests {
             bus: 8,
             address: 2,
             controller: Some("fc000000.usb".into()),
+            identity: crate::usb::Identity::default(),
         }
     }
 

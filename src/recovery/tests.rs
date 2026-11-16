@@ -11,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use crate::typec;
-use crate::usb::Version;
+use crate::usb::{Identity, Seen, Version};
 
 /// The controller behind the Type-C port, and one behind a Type-A port.
 const TYPE_C: &str = "fc000000.usb";
@@ -29,6 +29,33 @@ fn link(mbps: u32, bus: u32, address: u32, controller: &str) -> Link {
         bus,
         address,
         controller: Some(controller.into()),
+        identity: Identity {
+            vendor: Some(0x05c8),
+            product: Some(0x0a00),
+            serial: Some("TC1".into()),
+        },
+    }
+}
+
+/// The camera fallen to USB 1's full speed, where it has no video device, behind its Type-C
+/// port's controller.
+fn full(address: u32) -> Link {
+    link(12, 6, address, TYPE_C)
+}
+
+/// The same on a Type-A port.
+fn full_on_a(address: u32) -> Link {
+    link(12, 2, address, TYPE_A)
+}
+
+/// A camera that reports no serial.
+fn unserialled(link: Link) -> Link {
+    Link {
+        identity: Identity {
+            serial: None,
+            ..link.identity
+        },
+        ..link
     }
 }
 
@@ -57,20 +84,34 @@ enum Ports {
     ReadOnly,
 }
 
-/// What a reset or a power cycle does to the camera.
+/// What a reset or a power cycle does to the camera. Each reset goes through the real wait, with
+/// the call ending as the kernel's does.
 #[derive(Clone)]
 enum Does {
-    /// It comes back on this link.
+    /// It leaves (a reset's call ends `ENODEV`) and comes back on this link with its video device.
     To(Link),
-    /// The reset ends with the device gone (`ENODEV`), as one that works usually does, and the
-    /// camera comes back on this link: through the real wait.
+    /// The same: named for the rows written for the `ENODEV` fix.
     LeftTo(Link),
-    /// The reset ends with the device gone, and the camera never comes back.
+    /// It leaves and never comes back.
     LeftNever,
-    /// It isn't back by the end of the wait.
+    /// The same.
     Never,
+    /// It leaves and comes back on this link with no video device.
+    Bare(Link),
+    /// The reset's call returns cleanly: the kernel reset it where it is, its video device there
+    /// again at once.
+    InPlace,
+    /// The reset's call returns cleanly, and it's where it was, still with no video device.
+    InPlaceNoVideo,
     /// Visor may not reset it.
     Refused,
+}
+
+/// Where a reset or power cycle leaves the camera.
+enum After {
+    Video(Link),
+    Bare(Link),
+    Gone,
 }
 
 /// The camera at each open.
@@ -78,6 +119,10 @@ enum Does {
 enum On {
     /// On this link.
     At(Link),
+    /// On USB on this link, with no video device.
+    Bare(Link),
+    /// Two devices on USB that report its identity, neither with a video device.
+    Twins(Link, Link),
     /// Where the last open left it.
     Kept,
     /// Not there.
@@ -89,6 +134,8 @@ enum On {
 struct Bench {
     now: Duration,
     on: Option<Link>,
+    /// Devices on USB with no video device.
+    bare: Vec<Link>,
     resets: VecDeque<Does>,
     cycles: VecDeque<Does>,
     typec: PathBuf,
@@ -98,23 +145,13 @@ struct Bench {
 }
 
 impl Bench {
-    /// A reset whose sending ends with the device gone, through the real wait: the camera is gone
-    /// at the first look, and on `back_on` (none: never) from the second.
-    fn left(&mut self, before: &Link, back_on: Option<Link>) -> io::Result<Back> {
-        let mut now = self.now;
-        let mut looks = 0;
-        let look = || {
-            looks += 1;
-            match (&back_on, looks) {
-                (Some(link), 2..) => crate::usb::Seen::Present(link.clone()),
-                _ => crate::usb::Seen::Absent,
-            }
+    /// Leaves the camera where `after` says.
+    fn put(&mut self, after: After) {
+        (self.on, self.bare) = match after {
+            After::Video(link) => (Some(link), Vec::new()),
+            After::Bare(link) => (None, vec![link]),
+            After::Gone => (None, Vec::new()),
         };
-        let sent = Err(io::Error::from_raw_os_error(libc::ENODEV));
-        let back = crate::usb::reset_and_wait(sent, before, look, |pause| now += pause);
-        self.now = now;
-        self.on = back_on;
-        back
     }
 }
 
@@ -125,25 +162,55 @@ impl Usb for Bench {
 
     fn reset(&mut self, _device: &Path, link: &Link) -> io::Result<Back> {
         self.reset_calls += 1;
-        match self
+        let does = self
             .resets
             .pop_front()
-            .expect("a reset the scenario expects")
-        {
-            Does::LeftTo(back) => self.left(link, Some(back)),
-            Does::LeftNever => self.left(link, None),
-            Does::To(link) => {
-                self.now += Duration::from_millis(300);
-                self.on = Some(link);
-                Ok(Back::Returned)
+            .expect("a reset the scenario expects");
+        let left = || Err(io::Error::from_raw_os_error(libc::ENODEV));
+        let (sent, after) = match does {
+            Does::To(back) | Does::LeftTo(back) => (left(), After::Video(back)),
+            Does::LeftNever | Does::Never => (left(), After::Gone),
+            Does::Bare(back) => (left(), After::Bare(back)),
+            Does::InPlace => (Ok(()), After::Video(link.clone())),
+            Does::InPlaceNoVideo => (Ok(()), After::Bare(link.clone())),
+            Does::Refused => return Err(io::Error::from_raw_os_error(libc::EACCES)),
+        };
+        // A camera that left is gone at the first look; its video device, if it has one, is
+        // there from the next. One reset in place has it at once.
+        let in_place = sent.is_ok();
+        let video = match &after {
+            After::Video(link) => Some(link.clone()),
+            After::Bare(_) | After::Gone => None,
+        };
+        let mut now = self.now;
+        let mut looks = 0;
+        let look = || {
+            looks += 1;
+            match (&video, in_place || looks >= 2) {
+                (Some(link), true) => Seen::Present(link.clone()),
+                _ => Seen::Absent,
             }
-            Does::Never => {
-                self.now += crate::usb::RESET_RETURN;
-                self.on = None;
-                Ok(Back::NotYet)
-            }
-            Does::Refused => Err(io::Error::from_raw_os_error(libc::EACCES)),
-        }
+        };
+        let back = crate::usb::reset_and_wait(sent, link, look, |pause| now += pause);
+        self.now = now;
+        self.put(after);
+        back
+    }
+
+    fn find(&mut self, identity: &Identity) -> io::Result<crate::usb::Found> {
+        let mut matching: Vec<Link> = self
+            .bare
+            .iter()
+            .chain(&self.on)
+            .filter(|link| link.identity == *identity)
+            .cloned()
+            .collect();
+        let found = match (identity.findable(), matching.len()) {
+            (crate::usb::Findable::No, _) | (_, 0) => crate::usb::Found::Nothing,
+            (_, 1) => crate::usb::Found::One(matching.remove(0)),
+            _ => crate::usb::Found::Many,
+        };
+        Ok(found)
     }
 
     fn power_port(&mut self, link: &Link) -> io::Result<PowerPort> {
@@ -152,9 +219,14 @@ impl Usb for Bench {
 
     fn power_cycle(&mut self, _device: &Path, port: &Path) -> io::Result<Back> {
         // Looked at only once the port has been switched: a refused one sends nothing.
-        let back_on = match self.cycles.front() {
-            Some(Does::To(link)) => Some(link.clone()),
-            Some(Does::Never | Does::Refused | Does::LeftTo(_) | Does::LeftNever) | None => None,
+        let after = match self.cycles.front() {
+            Some(Does::To(link) | Does::LeftTo(link)) => After::Video(link.clone()),
+            Some(Does::Bare(link)) => After::Bare(link.clone()),
+            Some(_) | None => After::Gone,
+        };
+        let back_on = match &after {
+            After::Video(link) => Some(link.clone()),
+            After::Bare(_) | After::Gone => None,
         };
         let mut now = self.now;
         let mut looks = 0;
@@ -183,7 +255,7 @@ impl Usb for Bench {
         );
         self.cycles_sent += 1;
         self.now = now;
-        self.on = back_on;
+        self.put(after);
         Ok(back)
     }
 
@@ -534,6 +606,120 @@ fn a_camera_is_reset_then_power_cycled_once_and_never_while_it_cant_be() {
             ],
         ),
         (
+            "reset in place on a fixed port, still slow: still on USB 2 after the reset at once, \
+             never a wait and never \"not back\"",
+            Ports::One,
+            vec![
+                recovers(
+                    0,
+                    On::At(slow_on_a(2)),
+                    Some(Does::InPlace),
+                    None,
+                    slow_by(slow_on_a(2), Reset),
+                    TriedStillSlow,
+                ),
+                quiet(1, On::Kept, TriedStillSlow),
+            ],
+        ),
+        (
+            "reset in place on a switchable port, still slow: then one power cycle",
+            Ports::One,
+            vec![recovers(
+                0,
+                On::At(slow(2)),
+                Some(Does::InPlace),
+                Some(Does::To(fast(4))),
+                fast_by(fast(4), ResetAndPowerCycle),
+                NotTried,
+            )],
+        ),
+        (
+            "seen, then on USB at 12 Mb/s with no video device: reset at once, back at \
+             SuperSpeed",
+            Ports::One,
+            vec![
+                quiet(0, On::At(fast(2)), NotTried),
+                recovers(
+                    1,
+                    On::Bare(full(3)),
+                    Some(Does::LeftTo(fast(4))),
+                    None,
+                    fast_by(fast(4), Reset),
+                    NotTried,
+                ),
+            ],
+        ),
+        (
+            "seen, then at 12 Mb/s with no video on a fixed port, and the reset leaves it there: \
+             said once, nothing more, however long",
+            Ports::One,
+            vec![
+                quiet(0, On::At(link(5000, 4, 2, TYPE_A)), NotTried),
+                recovers(
+                    1,
+                    On::Bare(full_on_a(3)),
+                    Some(Does::InPlaceNoVideo),
+                    None,
+                    None,
+                    NotTried,
+                ),
+                quiet(1, On::Kept, NotTried),
+                quiet(10, On::Kept, NotTried),
+            ],
+        ),
+        (
+            "seen, then at 12 Mb/s with no video on a switchable port, the reset leaving it \
+             there: one power cycle, which brings SuperSpeed",
+            Ports::One,
+            vec![
+                quiet(0, On::At(fast(2)), NotTried),
+                recovers(
+                    1,
+                    On::Bare(full(3)),
+                    Some(Does::InPlaceNoVideo),
+                    Some(Does::To(fast(5))),
+                    fast_by(fast(5), ResetAndPowerCycle),
+                    NotTried,
+                ),
+            ],
+        ),
+        (
+            "at 12 Mb/s with no video after its reset and its power cycle: nothing more",
+            Ports::One,
+            vec![
+                quiet(0, On::At(fast(2)), NotTried),
+                recovers(
+                    1,
+                    On::Bare(full(3)),
+                    Some(Does::InPlaceNoVideo),
+                    Some(Does::Bare(full(6))),
+                    None,
+                    NotTried,
+                ),
+                quiet(1, On::Kept, NotTried),
+                quiet(30, On::Kept, NotTried),
+            ],
+        ),
+        (
+            "at 12 Mb/s with no video, but no serial was recorded: it can't be told from another \
+             camera, so nothing is sent",
+            Ports::One,
+            vec![
+                quiet(0, On::At(unserialled(link(5000, 4, 2, TYPE_A))), NotTried),
+                quiet(1, On::Bare(unserialled(full_on_a(3))), NotTried),
+                quiet(1, On::Kept, NotTried),
+            ],
+        ),
+        (
+            "at 12 Mb/s with no video, and two devices report its serial: nothing is sent",
+            Ports::One,
+            vec![
+                quiet(0, On::At(fast(2)), NotTried),
+                quiet(1, On::Twins(full(3), full(4)), NotTried),
+                quiet(1, On::Kept, NotTried),
+            ],
+        ),
+        (
             "a camera never seen in this run: no power cycle, however long it's gone",
             Ports::One,
             vec![
@@ -552,6 +738,7 @@ fn a_camera_is_reset_then_power_cycled_once_and_never_while_it_cant_be() {
         let mut usb = Bench {
             now: Duration::ZERO,
             on: None,
+            bare: Vec::new(),
             resets: VecDeque::new(),
             cycles: VecDeque::new(),
             typec: typec.clone(),
@@ -563,8 +750,13 @@ fn a_camera_is_reset_then_power_cycled_once_and_never_while_it_cant_be() {
         for (at, open) in opens.into_iter().enumerate() {
             usb.now += Duration::from_secs(open.after_s);
             match open.on {
-                On::At(link) => usb.on = Some(link),
-                On::Gone => usb.on = None,
+                On::At(link) => usb.put(After::Video(link)),
+                On::Bare(link) => usb.put(After::Bare(link)),
+                On::Twins(one, other) => {
+                    usb.on = None;
+                    usb.bare = vec![one, other];
+                }
+                On::Gone => usb.put(After::Gone),
                 On::Kept => {}
             }
             usb.resets.extend(open.reset);

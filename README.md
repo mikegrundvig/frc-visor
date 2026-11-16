@@ -177,11 +177,13 @@ a camera that went away anyway), never while it streams:
 - **A USB reset**, for a camera linked below SuperSpeed that reports USB 2.10 or later (every USB 3
   camera does; a USB 2.1 camera does too, and costs one wasted half-second reset). With its wiring
   whole, the camera comes back at SuperSpeed in about 0.2 s, on another bus, as a new video device
-  behind the same name; with its USB 3 contacts apart, at USB 2 again. The reset itself usually
-  ends with the device gone (`ENODEV`), as observed on a board: the camera has left the USB 2 bus
-  for the USB 3 one before the call returns. That's the reset working, and Visor waits for the
-  camera the same as after a reset that ends cleanly. Nothing the host can read
-  tells the two apart beforehand: only the attempt does.
+  behind the same name; with its USB 3 contacts apart, at USB 2 again. Nothing the host can read
+  tells the two apart beforehand: only the attempt does. What the call says tells them apart
+  after, as observed on a board. When the camera links at USB 3, the call usually ends with the
+  device gone (`ENODEV`): it has left the USB 2 bus for the USB 3 one before the call returns, so
+  Visor waits for it to come back, up to 3 s. When it can't, the kernel resets it where it is,
+  same bus and address, and the call returns cleanly: it never left, so Visor waits only for its
+  video device (up to 1 s, as the camera's driver binds it again at once) and goes on.
 - **A power cycle of its port**, if it's still not at SuperSpeed after the reset (or not back
   within 3 s), and for a camera seen in this run that has been gone for 5 s, which is longer than
   a fall to USB 2, a reset or a replug by hand takes: the camera that stopped answering. The port
@@ -192,6 +194,17 @@ a camera that went away anyway), never while it streams:
   (`/sys/class/usb_role/<address>.usb-role-switch`) and the system has exactly one Type-C port;
   otherwise its port's power can't be switched, which Visor says once and is normal (a Type-A port
   fed from an always-on supply).
+
+A camera can also land at USB 1's full speed, 12 Mb/s, where it has no video at all: on a port with
+a USB 1 controller beside its USB 2 one, a USB 3 camera whose USB 3 side dropped came up there in
+2 of about 15 drops on a board. It's on USB, but its driver finds nothing it can stream, so there's
+no video device and no `/dev/v4l` name to find it by. A camera Visor has seen in this run is then
+looked for among every USB device by the vendor, product and serial it reported (only when it
+reported a serial, and only when exactly one device has it), and one found below SuperSpeed gets
+the same reset at once, without the 5 s wait, then the power cycle if its port can be switched.
+If it still has no video device, Visor says once that it's on USB where it offers no video, so it
+can't run until its plug is reseated, and tries nothing more. A camera with no serial can't be told
+from another of its model this way, so Visor leaves it.
 
 After a recovery that left the camera below SuperSpeed or gone, nothing more is tried until it
 comes back by itself (a new enumeration Visor didn't cause) or Visor restarts. The log says each
