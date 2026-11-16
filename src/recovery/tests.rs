@@ -62,6 +62,11 @@ enum Ports {
 enum Does {
     /// It comes back on this link.
     To(Link),
+    /// The reset ends with the device gone (`ENODEV`), as one that works usually does, and the
+    /// camera comes back on this link: through the real wait.
+    LeftTo(Link),
+    /// The reset ends with the device gone, and the camera never comes back.
+    LeftNever,
     /// It isn't back by the end of the wait.
     Never,
     /// Visor may not reset it.
@@ -92,18 +97,41 @@ struct Bench {
     cycles_sent: u32,
 }
 
+impl Bench {
+    /// A reset whose sending ends with the device gone, through the real wait: the camera is gone
+    /// at the first look, and on `back_on` (none: never) from the second.
+    fn left(&mut self, before: &Link, back_on: Option<Link>) -> io::Result<Back> {
+        let mut now = self.now;
+        let mut looks = 0;
+        let look = || {
+            looks += 1;
+            match (&back_on, looks) {
+                (Some(link), 2..) => crate::usb::Seen::Present(link.clone()),
+                _ => crate::usb::Seen::Absent,
+            }
+        };
+        let sent = Err(io::Error::from_raw_os_error(libc::ENODEV));
+        let back = crate::usb::reset_and_wait(sent, before, look, |pause| now += pause);
+        self.now = now;
+        self.on = back_on;
+        back
+    }
+}
+
 impl Usb for Bench {
     fn link(&mut self, _device: &Path) -> io::Result<Option<Link>> {
         Ok(self.on.clone())
     }
 
-    fn reset(&mut self, _device: &Path, _link: &Link) -> io::Result<Back> {
+    fn reset(&mut self, _device: &Path, link: &Link) -> io::Result<Back> {
         self.reset_calls += 1;
         match self
             .resets
             .pop_front()
             .expect("a reset the scenario expects")
         {
+            Does::LeftTo(back) => self.left(link, Some(back)),
+            Does::LeftNever => self.left(link, None),
             Does::To(link) => {
                 self.now += Duration::from_millis(300);
                 self.on = Some(link);
@@ -126,7 +154,7 @@ impl Usb for Bench {
         // Looked at only once the port has been switched: a refused one sends nothing.
         let back_on = match self.cycles.front() {
             Some(Does::To(link)) => Some(link.clone()),
-            Some(Does::Never | Does::Refused) | None => None,
+            Some(Does::Never | Does::Refused | Does::LeftTo(_) | Does::LeftNever) | None => None,
         };
         let mut now = self.now;
         let mut looks = 0;
@@ -280,6 +308,48 @@ fn a_camera_is_reset_then_power_cycled_once_and_never_while_it_cant_be() {
                 fast_by(fast(4), ResetAndPowerCycle),
                 NotTried,
             )],
+        ),
+        (
+            "the reset ends with the device gone and the camera back at SuperSpeed: that's the \
+             reset working, no power cycle",
+            Ports::One,
+            vec![recovers(
+                0,
+                On::At(slow(2)),
+                Some(Does::LeftTo(fast(3))),
+                None,
+                fast_by(fast(3), Reset),
+                NotTried,
+            )],
+        ),
+        (
+            "the reset ends with the device gone and the camera back slow: then one power cycle",
+            Ports::One,
+            vec![recovers(
+                0,
+                On::At(slow(2)),
+                Some(Does::LeftTo(slow(3))),
+                Some(Does::To(fast(4))),
+                fast_by(fast(4), ResetAndPowerCycle),
+                NotTried,
+            )],
+        ),
+        (
+            "the reset ends with the device gone and the camera never back: one power cycle, \
+             which doesn't bring it either, then nothing more",
+            Ports::One,
+            vec![
+                recovers(
+                    0,
+                    On::At(slow(2)),
+                    Some(Does::LeftNever),
+                    Some(Does::Never),
+                    None,
+                    NotTried,
+                ),
+                quiet(5, On::Gone, NotTried),
+                quiet(30, On::Gone, NotTried),
+            ],
         ),
         (
             "not back from the reset in time: the power cycle brings SuperSpeed",

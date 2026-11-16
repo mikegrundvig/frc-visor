@@ -5,7 +5,13 @@
 //! way to make it. A USB reset does: with the wiring whole, the camera comes back at SuperSpeed a
 //! fraction of a second later, on another bus, as a new video device behind the same udev name.
 //! With its USB 3 contacts apart, it comes back at USB 2 again. Nothing the host can read tells
-//! the two apart beforehand, so the only test is the attempt ([`crate::promotion`] decides when).
+//! the two apart beforehand, so the only test is the attempt ([`crate::recovery`] decides when).
+//!
+//! As observed on a board, a reset that works usually ends in `ENODEV`: the camera leaves the USB 2
+//! bus for the USB 3 one while the reset runs, so the device it was sent to is gone before the call
+//! returns, and the camera is at SuperSpeed 0.13 to 0.24 s later. So a reset that ends with the
+//! device gone ([`left_during`]) was sent, and the camera is waited for just as after one that
+//! ends cleanly.
 //!
 //! A camera's USB device is its video device's `device/..` in sysfs, with its `speed` (Mb/s) and
 //! its `version` (the USB version it reports it can do: ` 3.10` for a USB 3 camera, whatever it's
@@ -136,7 +142,7 @@ fn parse_version(text: &str) -> Option<Version> {
 pub fn link_of(sysfs: &Path, device: &Path) -> io::Result<Option<Link>> {
     let video = match fs::canonicalize(device) {
         Ok(video) => video,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if gone(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
     let Some(video) = video.file_name() else {
@@ -144,7 +150,7 @@ pub fn link_of(sysfs: &Path, device: &Path) -> io::Result<Option<Link>> {
     };
     let usb = match fs::canonicalize(sysfs.join(video).join("device/..")) {
         Ok(usb) => usb,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if gone(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
     let Some(speed) = read_field(&usb, "speed")? else {
@@ -185,9 +191,14 @@ pub fn link_of(sysfs: &Path, device: &Path) -> io::Result<Option<Link>> {
 fn read_field(folder: &Path, field: &str) -> io::Result<Option<String>> {
     match fs::read_to_string(folder.join(field)) {
         Ok(text) => Ok(Some(text.trim().to_string())),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) if gone(&error) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+/// Whether a sysfs read failed because the device is gone, or going: not there, not an error.
+fn gone(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ENODEV)
 }
 
 fn invalid(why: String) -> io::Error {
@@ -273,14 +284,9 @@ impl Usb for SystemUsb {
     }
 
     fn reset(&mut self, device: &Path, link: &Link) -> io::Result<Back> {
-        send_reset(&link.node(&self.usbfs))?;
+        let sent = send_reset(&link.node(&self.usbfs));
         let look = || self.look(device);
-        Ok(await_return(
-            Some(link),
-            RESET_RETURN,
-            look,
-            std::thread::sleep,
-        ))
+        reset_and_wait(sent, link, look, std::thread::sleep)
     }
 
     fn power_port(&mut self, link: &Link) -> io::Result<PowerPort> {
@@ -306,6 +312,33 @@ fn send_reset(node: &Path) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Whether an error from talking to a USB device means it went away while Visor talked to it: its
+/// node gone (`ENOENT`), the device gone (`ENODEV`), or the transfer cut off by it going (`EIO`).
+pub fn left_during(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::ENODEV | libc::ENOENT | libc::EIO)
+    )
+}
+
+/// After a reset whose sending came to `sent`, waits for the camera that was on `before` to come
+/// back ([`await_return`], with `look` and `pause` as its). A reset that ended with the device
+/// gone ([`left_during`]) is how one that works usually ends, so it's waited for the same as one
+/// that ended cleanly; any other error is the reset's, and nothing is waited for.
+pub fn reset_and_wait(
+    sent: io::Result<()>,
+    before: &Link,
+    look: impl FnMut() -> Seen,
+    pause: impl FnMut(Duration),
+) -> io::Result<Back> {
+    match sent {
+        Ok(()) => {}
+        Err(error) if left_during(&error) => {}
+        Err(error) => return Err(error),
+    }
+    Ok(await_return(Some(before), RESET_RETURN, look, pause))
 }
 
 /// What a look for a reset camera finds.
@@ -483,6 +516,45 @@ mod tests {
         let (class, _) = sysfs(&root, &usb_3);
         assert_eq!(link_of(&class, &root.join("dev/gone")).unwrap(), None);
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_reset_that_ends_with_the_device_gone_was_sent_and_its_camera_is_waited_for() {
+        let before = link("7-1", 480, (3, 10), 7, 2);
+        let back = || Seen::Present(link("8-1", 5000, (3, 10), 8, 4));
+        // (how the reset's sending ended, whether it's waited for and back, or the error's kind)
+        let cases: [(io::Error, Result<Back, io::ErrorKind>); 5] = [
+            (
+                io::Error::from_raw_os_error(libc::ENODEV),
+                Ok(Back::Returned),
+            ),
+            (
+                io::Error::from_raw_os_error(libc::ENOENT),
+                Ok(Back::Returned),
+            ),
+            (io::Error::from_raw_os_error(libc::EIO), Ok(Back::Returned)),
+            (
+                io::Error::from_raw_os_error(libc::EACCES),
+                Err(io::ErrorKind::PermissionDenied),
+            ),
+            (
+                io::Error::from_raw_os_error(libc::EBUSY),
+                Err(io::ErrorKind::ResourceBusy),
+            ),
+        ];
+        for (error, expected) in cases {
+            let name = error.to_string();
+            let waited = reset_and_wait(Err(error), &before, back, |_| {});
+            match (waited, expected) {
+                (Ok(got), Ok(back)) => assert_eq!(got, back, "{name}"),
+                (Err(got), Err(kind)) => assert_eq!(got.kind(), kind, "{name}"),
+                (got, expected) => panic!("{name}: {got:?}, expected {expected:?}"),
+            }
+        }
+        assert_eq!(
+            reset_and_wait(Ok(()), &before, back, |_| {}).unwrap(),
+            Back::Returned
+        );
     }
 
     #[test]

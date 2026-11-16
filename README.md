@@ -177,7 +177,10 @@ a camera that went away anyway), never while it streams:
 - **A USB reset**, for a camera linked below SuperSpeed that reports USB 2.10 or later (every USB 3
   camera does; a USB 2.1 camera does too, and costs one wasted half-second reset). With its wiring
   whole, the camera comes back at SuperSpeed in about 0.2 s, on another bus, as a new video device
-  behind the same name; with its USB 3 contacts apart, at USB 2 again. Nothing the host can read
+  behind the same name; with its USB 3 contacts apart, at USB 2 again. The reset itself usually
+  ends with the device gone (`ENODEV`), as observed on a board: the camera has left the USB 2 bus
+  for the USB 3 one before the call returns. That's the reset working, and Visor waits for the
+  camera the same as after a reset that ends cleanly. Nothing the host can read
   tells the two apart beforehand: only the attempt does.
 - **A power cycle of its port**, if it's still not at SuperSpeed after the reset (or not back
   within 3 s), and for a camera seen in this run that has been gone for 5 s, which is longer than
