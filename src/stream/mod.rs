@@ -10,6 +10,7 @@
 //! newest picture whenever its connection is ready, so a slow watcher skips pictures.
 
 pub mod feed;
+pub mod focus;
 pub mod picture;
 pub mod server;
 pub mod view;

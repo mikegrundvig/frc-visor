@@ -171,6 +171,7 @@ async fn serve(
         .route("/stream/{camera}", get(stream))
         .route("/frame/{camera}", get(frame))
         .route("/settings/{camera}", post(settings))
+        .route("/focus/{camera}", post(forget_focus))
         .with_state(shared)
         .layer(middleware::from_fn_with_state(names, only_addressed_here));
     let connections = Places::new(
@@ -290,17 +291,20 @@ async fn index(State(shared): State<Arc<Shared>>) -> Html<String> {
          <style>body{font-family:sans-serif;background:#111;color:#eee;margin:1em}\
          img{max-width:100%;background:#000}</style></head><body>\n<h1>Visor's cameras</h1>\n",
     );
+    page.push_str(FOCUS_SCRIPT);
     if shared.try_settings {
         page.push_str(TRY_SCRIPT);
     }
     for view in shared.views.iter() {
         let href = stream_path(&view.name);
         let full = frame_path(&view.name);
+        let focus = focus_path(&view.name);
         let name = escaped(&view.name);
         let _ = write!(
             page,
             "<h2><a href=\"{href}\">{name}</a></h2>\n<img src=\"{href}\" alt=\"{name}'s live view\">\n\
-             <p><a href=\"{full}\">one frame at full size, as detection read it (PGM)</a></p>\n"
+             <p><button onclick=\"forgetFocus(this, '{focus}')\">forget the best focus seen</button> \
+             <a href=\"{full}\">one frame at full size, as detection read it (PGM)</a></p>\n"
         );
         if shared.try_settings {
             let to = settings_path(&view.name);
@@ -320,6 +324,21 @@ async fn index(State(shared): State<Arc<Shared>>) -> Html<String> {
 /// A camera's stream's address on this server: `/stream/front-left`.
 pub fn stream_path(camera: &str) -> String {
     format!("/stream/{}", utf8_percent_encode(camera, SEGMENT))
+}
+
+/// The page's script for a camera's focus button: asks Visor to forget the best seen, and says so
+/// on the button for a moment.
+const FOCUS_SCRIPT: &str = "<script>function forgetFocus(button, to) {\n\
+  const was = button.textContent;\n\
+  fetch(to, {method: 'POST'})\n\
+    .then(answer => { button.textContent = answer.ok ? 'forgotten' : 'not forgotten: ' + answer.status; })\n\
+    .catch(error => { button.textContent = String(error); })\n\
+    .finally(() => setTimeout(() => { button.textContent = was; }, 1500));\n\
+}</script>\n";
+
+/// Where a camera's best focus is forgotten on this server: `/focus/front-left`.
+pub fn focus_path(camera: &str) -> String {
+    format!("/focus/{}", utf8_percent_encode(camera, SEGMENT))
 }
 
 /// The page's script where settings can be tried: posts what a camera's form holds, and shows the
@@ -482,6 +501,27 @@ async fn settings(
         "{camera}: trying {}, until the camera is opened again. The view's line says what's in effect\n",
         asked.join(" and ")
     );
+    (StatusCode::ACCEPTED, answer).into_response()
+}
+
+/// Forgets the best focus a camera's view has seen: `POST /focus/<camera>`. The view's focus line
+/// keeps the smallest edge width it has shown, to turn the lens back to; this starts it afresh, for
+/// another go or another lens. It changes nothing but what the line says. A page from another site
+/// can't ask ([`same_origin`]).
+async fn forget_focus(
+    State(shared): State<Arc<Shared>>,
+    Path(camera): Path<String>,
+    request: Request,
+) -> Response {
+    let Some(view) = shared.views.iter().find(|view| view.name == camera) else {
+        return no_such_camera(&shared, &camera);
+    };
+    if !same_origin(request.headers()) {
+        let why = "a camera's best focus is forgotten from Visor's own page, not another site's\n";
+        return (StatusCode::FORBIDDEN, why).into_response();
+    }
+    view.forget_focus();
+    let answer = format!("{camera}: the best focus seen is forgotten\n");
     (StatusCode::ACCEPTED, answer).into_response()
 }
 

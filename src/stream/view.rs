@@ -6,8 +6,8 @@
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,8 @@ use crate::config::Camera;
 use crate::latest::Latest;
 use crate::settings::Trial;
 use crate::stream::feed::{Detected, Feed};
-use crate::stream::picture::{self, Painter};
+use crate::stream::focus::{self, Measured, Shown, Tracker};
+use crate::stream::picture::Painter;
 
 /// How often an unwatched view looks for a watcher.
 const IDLE_CHECK: Duration = Duration::from_millis(100);
@@ -36,6 +37,9 @@ pub struct View {
     stills: watch::Sender<Option<Arc<Still>>>,
     still_asked: AtomicBool,
     stills_made: AtomicU64,
+    forget_focus: AtomicBool,
+    focus_forgotten: AtomicU64,
+    focus: Mutex<Shown>,
     /// An exposure and gain asked for from the live view, which the camera's capture thread sets.
     pub trial: Trial,
 }
@@ -52,7 +56,7 @@ pub struct Still {
 }
 
 impl Still {
-    fn of(camera: &Camera, frame: &Detected, focus: f64) -> Still {
+    fn of(camera: &Camera, frame: &Detected, focus: &Measured) -> Still {
         let image = &frame.image;
         let mut pgm = format!("P5\n{} {}\n255\n", image.width, image.height).into_bytes();
         pgm.extend_from_slice(&image.pixels);
@@ -64,8 +68,10 @@ impl Still {
 }
 
 /// A frame's facts as JSON: the camera, the frame's number as sent to the robot, its size, the
-/// exposure and gain in effect, its brightness and focus, and each tag with its corners.
-fn about(camera: &Camera, frame: &Detected, focus: f64) -> String {
+/// exposure and gain in effect, its brightness, the width of a tag's edge in it (the view's focus
+/// number, [`focus`]: the measured tag nearest the frame's middle), and each tag with its corners
+/// and its own edge's width.
+fn about(camera: &Camera, frame: &Detected, focus: &Measured) -> String {
     let optional = |value: Option<String>| value.unwrap_or_else(|| "null".to_string());
     let settings = frame.settings;
     let mut json = String::from("{\"camera\":");
@@ -74,7 +80,7 @@ fn about(camera: &Camera, frame: &Detected, focus: f64) -> String {
         json,
         ",\"sequence\":{},\"width\":{},\"height\":{},\"exposure_us\":{},\"gain\":{},\
          \"auto_exposure\":{},\"brightness_median\":{},\"brightness_high\":{},\
-         \"clipped_percent\":{},\"focus\":{},\"tags\":[",
+         \"clipped_percent\":{},\"edge_px\":{},\"tags\":[",
         frame.sequence,
         frame.image.width,
         frame.image.height,
@@ -84,7 +90,7 @@ fn about(camera: &Camera, frame: &Detected, focus: f64) -> String {
         frame.brightness.median,
         frame.brightness.high,
         f64::from(frame.brightness.clipped) / 100.0,
-        number(focus),
+        number(focus.edge_px().unwrap_or(f64::NAN)),
     );
     for (i, tag) in frame.tags.iter().enumerate() {
         let corners: Vec<String> = tag.corners.iter().map(|c| number(f64::from(*c))).collect();
@@ -101,12 +107,13 @@ fn about(camera: &Camera, frame: &Detected, focus: f64) -> String {
         let _ = write!(
             json,
             "{}{{\"id\":{},\"hamming\":{},\"decision_margin\":{},\"corners\":[{}],\
-             \"distance_m\":{distance},\"pose_error_px\":{error}}}",
+             \"distance_m\":{distance},\"pose_error_px\":{error},\"edge_px\":{}}}",
             if i == 0 { "" } else { "," },
             tag.id,
             tag.hamming,
             number(f64::from(tag.decision_margin)),
             corners.join(","),
+            number(focus.edges[i].unwrap_or(f64::NAN)),
         );
     }
     json.push_str("]}");
@@ -147,6 +154,9 @@ impl View {
             stills: watch::Sender::new(None),
             still_asked: AtomicBool::new(false),
             stills_made: AtomicU64::new(0),
+            forget_focus: AtomicBool::new(false),
+            focus_forgotten: AtomicU64::new(0),
+            focus: Mutex::new(Shown::default()),
             trial: Trial::default(),
         }
     }
@@ -188,6 +198,26 @@ impl View {
     pub fn stills_made(&self) -> u64 {
         self.stills_made.load(Ordering::Relaxed)
     }
+
+    /// Forgets the best focus seen, before the next picture: the lens is to be turned afresh.
+    pub fn forget_focus(&self) {
+        self.forget_focus.store(true, Ordering::Release);
+    }
+
+    /// How many times it has forgotten the best focus because it was asked to.
+    pub fn focus_forgotten(&self) -> u64 {
+        self.focus_forgotten.load(Ordering::Relaxed)
+    }
+
+    /// What its newest picture's focus line says: nothing while no one watches.
+    pub fn focus(&self) -> Shown {
+        *self.focus.lock().unwrap()
+    }
+
+    fn say_focus(&self, focus: Shown) -> Shown {
+        *self.focus.lock().unwrap() = focus;
+        focus
+    }
 }
 
 /// The time the view paces its pictures by: the real one ([`RealTime`]), or a test's.
@@ -224,13 +254,18 @@ pub fn run(
     let period = Duration::from_secs_f64(1.0 / f64::from(camera.stream.fps));
     let mut painter = Painter::new(camera.stream);
     let mut rate = Rate::default();
+    let mut tracker = Tracker::default();
     let mut said = false;
     while !stop.load(Ordering::Relaxed) {
         let watched = view.watchers() > 0;
         if !watched && rate.started() {
-            // Its last picture is no one's now; a new watcher waits for a fresh one.
+            // Its last picture is no one's now; a new watcher waits for a fresh one, and the best
+            // focus seen was that watcher's.
             view.show(None);
             rate = Rate::default();
+            tracker.forget();
+            painter.look_afresh();
+            view.say_focus(Shown::default());
         }
         if !watched && !view.still_asked.load(Ordering::Acquire) {
             thread::sleep(IDLE_CHECK);
@@ -243,16 +278,21 @@ pub fn run(
         let Some(frame) = feed.take(FRAME_WAIT) else {
             continue;
         };
-        let focus = picture::focus(&frame.image);
+        let measured = focus::measure(&frame.image, &frame.tags);
         // Asked for, and still waited for: an ask given up on makes nothing.
         if view.still_asked.swap(false, Ordering::AcqRel) && view.stills.receiver_count() > 0 {
-            let still = Still::of(camera, &frame, focus);
+            let still = Still::of(camera, &frame, &measured);
             view.stills_made.fetch_add(1, Ordering::Relaxed);
             view.stills.send_replace(Some(Arc::new(still)));
         }
+        if view.forget_focus.swap(false, Ordering::AcqRel) {
+            tracker.forget();
+            view.focus_forgotten.fetch_add(1, Ordering::Relaxed);
+        }
         let painted = watched.then(|| {
             rate.add(frame.sequence, frame.monotonic_nanos);
-            painter.paint(&frame, rate.fps(), focus)
+            let focus = view.say_focus(tracker.add(measured.edge_px()));
+            painter.paint(&frame, rate.fps(), focus, measured.nearest)
         });
         latest.recycle(frame.image);
         match painted {
@@ -396,7 +436,12 @@ mod tests {
             sequence: 42,
             monotonic_nanos: 0,
         };
-        let still = Still::of(&camera, &frame, 12.3456);
+        // The second tag is the one the view's focus number goes by; the first couldn't be measured.
+        let focus = Measured {
+            edges: vec![None, Some(2.3456)],
+            nearest: Some(1),
+        };
+        let still = Still::of(&camera, &frame, &focus);
         assert_eq!(&still.pgm[..], b"P5\n3 2\n255\n\x01\x02\x03\x04\x05\x06");
         assert!(still.about.is_ascii(), "{}", still.about);
         assert!(!still.about.contains('\n'));
@@ -410,7 +455,7 @@ mod tests {
         assert_eq!(about["brightness_median"], 37);
         assert_eq!(about["brightness_high"], 201);
         assert_eq!(about["clipped_percent"], 1.25);
-        assert_eq!(about["focus"], 12.346);
+        assert_eq!(about["edge_px"], 2.346);
         let tags = about["tags"].as_array().unwrap();
         assert_eq!(tags.len(), 2);
         assert_eq!(tags[0]["id"], 7);
@@ -420,6 +465,11 @@ mod tests {
         assert_eq!(tags[0]["corners"].as_array().unwrap().len(), 8);
         assert_eq!(tags[0]["distance_m"], 5.0);
         assert_eq!(tags[0]["pose_error_px"], 0.25);
+        assert!(
+            tags[0]["edge_px"].is_null(),
+            "a tag that couldn't be measured"
+        );
+        assert_eq!(tags[1]["edge_px"], 2.346);
         // No lens, so no pose; and a number that isn't one is null, never invalid JSON.
         assert!(tags[1]["distance_m"].is_null());
         assert!(tags[1]["decision_margin"].is_null());

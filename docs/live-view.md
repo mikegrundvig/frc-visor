@@ -13,6 +13,7 @@ asked, and, on a bench, takes an exposure and gain to try.
 | `/stream/<camera>` | One camera's view as an MJPEG stream: `multipart/x-mixed-replace; boundary=frame`, each part one JPEG with its `Content-Type` and `Content-Length` |
 | `/frame/<camera>` | The camera's next frame at full size, as detection read it: a binary PGM, with what Visor found in it in the `X-Visor-Frame` header (below) |
 | `/settings/<camera>` | `POST` only, and only with `try_settings = true`: an exposure and gain to try (below) |
+| `/focus/<camera>` | `POST` only: forgets the best focus the camera's view has seen (below) |
 
 A camera is named as in Visor's configuration, which a robot's deploy writes from the robot's
 definition of it, escaped as an address needs: `front left` is `/stream/front%20left`. Any other
@@ -30,11 +31,43 @@ white over black, with its ID in its middle. The line along the top gives:
   is on;
 - the gain, or `no gain` for a camera without the control;
 - the frame's brightness, its median and its 99th percentile (docs/wire.md, "Exposure and
-  brightness");
-- its focus: how steep the steps between neighbouring pixels are, on average. An edge in focus is a
-  steep step, so the number peaks as the lens comes into focus: turn the lens, watch it climb, and
-  stop when it falls. Noise is steps too, and so is whatever is in view, so it only compares one
-  scene with itself at one exposure and gain. It says nothing between two cameras or two rooms.
+  brightness").
+
+## Focus
+
+The line under it says how sharply the camera sees a tag: `focus: a tag's edge is 2.4 px wide, 1.9
+at best`, and a bar that is full when the focus is at its best.
+
+A printed tag's black square ends in a clean step to white. In the frame that step is as wide as
+the lens and the sensor make it: about a pixel and a half in focus, and about two and a half more
+for each pixel of blur. So the number is a width in the camera's own pixels, and **smaller is
+sharper**. It is the step's height over its steepest slope, read on lines across the four sides of
+the square, so the exposure, the gain, the light and what else is in view don't move it, and the
+tag's distance and angle move it little. Two cameras of one kind, focused alike, read alike.
+
+To focus a camera:
+
+1. Fix the camera and put a tag in view at the distance it is to see best, large enough to read:
+   its black square 100 px or more across in the frame is good, and under 32 px isn't measured.
+   With several tags in view, the number is the one nearest the middle of the frame.
+2. Turn the lens. The width falls as the focus comes in and rises once it's past: the best the
+   width has been stays on the line, and the bar shows how near it the lens is now.
+3. Turn back until the bar is full, and lock the lens.
+
+The number is smoothed over the last few pictures, and the best is the smallest the smoothed number
+has been while anyone has watched; the page's button for the camera, or `POST /focus/<camera>`,
+forgets it, for another go. With no tag it can measure, the line says so and keeps the best: a lens
+turned far from focus loses the tag until it's turned back.
+
+The corner of the picture shows the frame round that tag's first corner three times its size, each
+of the frame's pixels as it is, nothing smoothed: what the number measures, for the eye. A box in
+the picture marks the part shown. It stays where the tag was when the tag is lost, and it's the
+middle of the frame until a tag has been measured. A picture under 180 px high has none.
+
+What it doesn't do: it gives no number without a tag in view, and none for a tag under 32 px
+across; a tag small in the frame (under about 60 px) reads low once it is well out of focus,
+though its smallest reading is still at the best focus; and it is a frame's own pixels, so a
+camera set to a smaller frame size reads a narrower edge for the same lens.
 
 ## A frame at full size
 
@@ -49,15 +82,18 @@ line of JSON:
 ```json
 {"camera":"front-left","sequence":18021,"width":1600,"height":1304,"exposure_us":1000,"gain":2,
  "auto_exposure":false,"brightness_median":37,"brightness_high":201,"clipped_percent":1.25,
- "focus":12.346,"tags":[{"id":7,"hamming":0,"decision_margin":81.5,
- "corners":[610.2,480.9,702.4,481.3,702.0,573.8,609.7,573.1],"distance_m":2.013,"pose_error_px":0.21}]}
+ "edge_px":1.846,"tags":[{"id":7,"hamming":0,"decision_margin":81.5,
+ "corners":[610.2,480.9,702.4,481.3,702.0,573.8,609.7,573.1],"distance_m":2.013,"pose_error_px":0.21,
+ "edge_px":1.846}]}
 ```
 
 `sequence` is the frame's number as sent to the robot, so it's the same frame the robot got. A
 value the camera can't give is `null` (no gain control; automatic exposure on). `corners` are as
 on the wire: x0, y0 to x3, y3, in pixel-centre coordinates, raw. `distance_m` is from the lens to
-the tag's centre by its best pose, and `null` without a lens calibration. So a frame the detector
-missed a tag in, saved with this header, is a test case.
+the tag's centre by its best pose, and `null` without a lens calibration. A tag's `edge_px` is the
+width of its edge in that frame ("Focus", above), `null` for a tag too small or too faint to
+measure; the frame's is the measured tag's nearest the frame's middle, the one the view's line goes
+by, unsmoothed. So a frame the detector missed a tag in, saved with this header, is a test case.
 
 It costs detection nothing, as the view costs it nothing: the frame is the one detection hands
 over after sending it to the robot, copied on the view's thread. But it's a lot of network: one

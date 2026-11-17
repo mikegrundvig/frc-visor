@@ -246,8 +246,10 @@ own thread asks for a frame at the view's rate, the detect thread hands over its
 sending it to the robot, without waiting, and the picture is made on that thread at a lower
 priority (nice 10): about 2.2 ms a picture on a laptop core, about 2% of one core at the defaults.
 Each watcher gets the newest picture when its connection is ready for one, so a slow watcher skips
-pictures; one that stops reading is closed after 5 s, and at most 8 watch at once. The view's line
-includes a focus number that peaks as the lens comes into focus. `/frame/<camera>` gives the
+pictures; one that stops reading is closed after 5 s, and at most 8 watch at once. To focus a
+camera by, the view says how many pixels wide a tag's edge is in the frame (smaller is sharper),
+with the best it has been and a bar that fills as the lens nears it, and shows that tag's corner
+magnified. `/frame/<camera>` gives the
 camera's next frame at full size, as detection read it, with the tags found in it; and a bench's
 configuration can let an exposure and gain be tried from the page. More in
 [docs/live-view.md](docs/live-view.md).

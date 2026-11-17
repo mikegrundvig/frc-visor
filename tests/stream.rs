@@ -466,9 +466,13 @@ fn a_frame_at_full_size_is_what_detection_read_with_the_tags_it_found() {
         );
         assert_eq!(about["exposure_us"], 1000);
         assert_eq!(about["gain"], 40);
-        assert!(about["focus"].as_f64().unwrap() > 0.0, "{about}");
         let tags = about["tags"].as_array().unwrap();
         assert_eq!(tags.len(), 1, "{about}");
+        // The scene's tag is sharp: its edge is a pixel or two wide, and the frame's focus number
+        // is that tag's.
+        let edge = tags[0]["edge_px"].as_f64().unwrap();
+        assert!((1.0..2.5).contains(&edge), "{about}");
+        assert_eq!(about["edge_px"], tags[0]["edge_px"], "{about}");
         let expected = &scene.tags[0];
         assert_eq!(tags[0]["id"], expected.id);
         for (i, corner) in tags[0]["corners"].as_array().unwrap().iter().enumerate() {
@@ -531,6 +535,71 @@ fn post_from(address: SocketAddr, path: &str, origin: Option<&str>) -> (u16, Str
     )
     .unwrap();
     answer(&mut connection)
+}
+
+#[test]
+fn a_watcher_s_view_measures_focus_and_forgets_its_best_when_the_page_asks() {
+    let _one = one_at_a_time();
+    const FOCUS: &str = "/focus/front%20left";
+    let received = with_camera(Options::default(), &RealTime, |rig| {
+        let here = format!("http://{}", rig.address);
+        let agent = agent();
+        let mut page = agent.get(format!("{here}/")).call().unwrap();
+        let page = page.body_mut().read_to_string().unwrap();
+        assert!(
+            page.contains(&format!("forgetFocus(this, '{FOCUS}')")),
+            "{page}"
+        );
+
+        // No one watches: no focus is measured.
+        assert_eq!(rig.view.focus(), visor::stream::focus::Shown::default());
+        let mut response = agent.get(format!("{here}{STREAM}")).call().unwrap();
+        let mut reader = BufReader::new(response.body_mut().as_reader());
+        next_picture(&mut reader);
+        // The scene's tag is sharp and still: its edge's width settles as the best.
+        wait_until("a best focus", || rig.view.focus().best_px.is_some());
+        let focus = rig.view.focus();
+        let (now, best) = (focus.now_px.unwrap(), focus.best_px.unwrap());
+        assert!((1.0..2.5).contains(&now), "{focus:?}");
+        assert!((now - best).abs() < 0.05, "{focus:?}");
+
+        // Each row: who asks, the camera asked about, and the answer.
+        let cases = [
+            (
+                Some("http://elsewhere.example"),
+                FOCUS,
+                403,
+                "not another site's",
+            ),
+            (None, "/focus/back", 404, "front left"),
+            (Some(here.as_str()), FOCUS, 202, "forgotten"),
+            (None, FOCUS, 202, "forgotten"),
+        ];
+        let mut forgotten = 0;
+        for (origin, path, status, says) in cases {
+            let (answered, said) = post_from(rig.address, path, origin);
+            assert_eq!(answered, status, "{origin:?} {path}: {said}");
+            assert!(said.contains(says), "{origin:?} {path}: {said}");
+            if status == 202 {
+                forgotten += 1;
+                wait_until("the best forgotten", || {
+                    rig.view.focus_forgotten() == forgotten
+                });
+            }
+            assert_eq!(rig.view.focus_forgotten(), forgotten, "{origin:?} {path}");
+        }
+        // A GET isn't an ask.
+        let (status, _) = get_from(CONTROLLER, rig.address, FOCUS, "localhost");
+        assert_eq!(status, 405);
+        assert_eq!(rig.view.focus_forgotten(), forgotten);
+
+        drop(reader);
+        wait_until("the watcher's gone", || rig.view.watchers() == 0);
+        wait_until("its focus forgotten with it", || {
+            rig.view.focus() == visor::stream::focus::Shown::default()
+        });
+    });
+    assert_detection_kept_up(&received);
 }
 
 #[test]
