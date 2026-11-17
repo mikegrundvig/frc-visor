@@ -686,6 +686,40 @@ fn an_exposure_tried_is_set_before_the_next_frame_and_gone_when_the_camera_is_op
 }
 
 #[test]
+fn an_ask_to_go_back_to_the_configuration_sets_it_over_what_was_tried() {
+    use Event::*;
+    // Each row: what's asked before the first frame, and the exposure that frame is taken at.
+    let rows = [
+        ("tried", settings::Base::AsItIs, Some(2000)),
+        (
+            "back to the configuration's",
+            settings::Base::Configured,
+            Some(1000),
+        ),
+    ];
+    for (name, from, exposure) in rows {
+        let camera = camera("back", None);
+        let latest = Latest::new();
+        let stop = AtomicBool::new(false);
+        let mut fake = Fake::new(vec![Plug::Streams(vec![Frame])], &latest, &stop);
+        let trial = Trial::default();
+        trial.ask(settings::Tried {
+            exposure_us: Some(2000),
+            gain: None,
+        });
+        if from == settings::Base::Configured {
+            trial.ask_configured(settings::Tried::default());
+        }
+        let retry = Duration::from_millis(1);
+        run_from(&mut fake, &camera, &latest, &Unread, &trial, &stop, retry);
+        fake.take();
+        assert_eq!(fake.exposures, [exposure], "{name}");
+        // The camera's ranges were said when it was opened.
+        assert!(trial.ranges().is_some(), "{name}");
+    }
+}
+
+#[test]
 fn the_frames_the_driver_never_gave_are_the_numbers_it_skipped() {
     // (the number of the frame before, this frame's, the frames between that never came)
     let cases: [(&str, Option<u32>, u32, u32); 7] = [

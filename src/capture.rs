@@ -174,6 +174,7 @@ fn capture(
         }
     }
     let mut in_effect = applied.in_effect;
+    trial.offer(settings::ranges(&opened));
     info!("{}: {}", camera.name, described(in_effect));
     // The camera as tried: the configuration's, with each exposure and gain asked for since.
     let mut tried: Option<Camera> = None;
@@ -208,9 +209,14 @@ fn capture(
     let mut numbered: Option<u32> = None;
     while !stop.load(Ordering::Relaxed) {
         if let Some(asked) = trial.take() {
+            // Back to the configuration's first, when asked: it's how the camera's own automatic
+            // exposure comes back after an exposure was tried.
+            if asked.from == settings::Base::Configured {
+                tried = None;
+            }
             let with = tried.get_or_insert_with(|| camera.clone());
-            with.exposure_us = asked.exposure_us.or(with.exposure_us);
-            with.gain = asked.gain.or(with.gain);
+            with.exposure_us = asked.tried.exposure_us.or(with.exposure_us);
+            with.gain = asked.tried.gain.or(with.gain);
             // A trial that can't be set is said, and the camera keeps what it had.
             match settings::apply(&opened, with) {
                 Ok(applied) => {

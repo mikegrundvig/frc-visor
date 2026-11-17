@@ -6,8 +6,14 @@
 //! The width is the step's height over its steepest slope, so it doesn't change with the exposure,
 //! the gain, the light or what else is in view, and little with how far away the tag is. It is read
 //! on lines across each side of the square, and a tag's width is their median.
+//!
+//! That holds while the camera's response is straight across the step, which a real camera's isn't
+//! near the top of its range: there the white is squeezed and the edge reads falsely sharp. So a
+//! line whose white side is brighter than [`light::TOO_BRIGHT_ABOVE`] is left out, and a tag's
+//! reading counts only in light that's good for it ([`light`]).
 
 use crate::image::GrayImage;
+use crate::stream::light::{self, Light, TagLight};
 use crate::wire::Tag;
 
 /// A tag is measured when its black square is at least this many pixels along each side and across
@@ -34,8 +40,25 @@ const LEAST_STEP: f64 = 24.0;
 /// A tag's width is given when at least this many of its lines counted.
 const FEWEST_LINES: usize = 8;
 
+/// Whether a tag's black square is large enough in the frame to measure: each side, and the
+/// distance across from each side to the one opposite, at least [`SHORTEST_SIDE_PX`].
+pub fn large_enough(corners: &[f32; 8]) -> bool {
+    let point = |i: usize| (f64::from(corners[2 * i]), f64::from(corners[2 * i + 1]));
+    let points = [point(0), point(1), point(2), point(3)];
+    (0..4).all(|side| {
+        let (from, to) = (points[side], points[(side + 1) % 4]);
+        let length = (to.0 - from.0).hypot(to.1 - from.1);
+        let (far_from, far_to) = (points[(side + 2) % 4], points[(side + 3) % 4]);
+        let mid = ((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0);
+        let opposite = ((far_from.0 + far_to.0) / 2.0, (far_from.1 + far_to.1) / 2.0);
+        let across = (opposite.0 - mid.0).hypot(opposite.1 - mid.1);
+        length >= SHORTEST_SIDE_PX && across >= SHORTEST_SIDE_PX
+    })
+}
+
 /// The width of a tag's edges in the frame, in pixels: the median over lines across the four sides
-/// of its black square. None for a tag too small, too dim or too near the frame's edge to measure.
+/// of its black square. None for a tag too small, too dim, too bright or too near the frame's edge
+/// to measure.
 pub fn edge_px(image: &GrayImage, corners: &[f32; 8]) -> Option<f64> {
     let point = |i: usize| (f64::from(corners[2 * i]), f64::from(corners[2 * i + 1]));
     let points = [point(0), point(1), point(2), point(3)];
@@ -100,7 +123,13 @@ fn across(image: &GrayImage, on_edge: (f64, f64), inward: (f64, f64), reach: f64
     // The two levels, each the mean of the line's end furthest from the edge.
     let ends = (count / 6).max(2);
     let mean = |levels: &[f64]| levels.iter().sum::<f64>() / levels.len() as f64;
-    let step = mean(&levels[..ends]) - mean(&levels[count - ends..]);
+    let bright = mean(&levels[..ends]);
+    // A white side too bright to trust: the camera's response is squeezed there, so the step is
+    // shorter than it is and the edge would read sharper than it is.
+    if bright > f64::from(light::TOO_BRIGHT_ABOVE) {
+        return None;
+    }
+    let step = bright - mean(&levels[count - ends..]);
     if step < LEAST_STEP {
         return None;
     }
@@ -132,20 +161,71 @@ fn level_at(image: &GrayImage, x: f64, y: f64) -> Option<f64> {
     Some(upper * (1.0 - down) + lower * down)
 }
 
-/// A frame's focus: each tag's edge width, and which tag the view goes by.
+/// A frame's focus: each tag's edge width and light, and which tag the view goes by.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Measured {
     /// Each tag's edge width, in the frame's order of tags: None for one that can't be measured.
     pub edges: Vec<Option<f64>>,
-    /// The measured tag nearest the middle of the frame, the one a camera being focused is pointed
-    /// at: its place among the frame's tags.
+    /// Each tag's black and white, in the same order: None for one wholly off the frame.
+    pub lights: Vec<Option<TagLight>>,
+    /// The tag the view goes by: the one nearest the middle of the frame, the one a camera being
+    /// focused is pointed at, among those measured and those large enough to measure and wholly
+    /// in the frame, so a tag too bright or too dim to measure is still the one the view says so
+    /// of. Its place among the frame's tags.
     pub nearest: Option<usize>,
 }
 
+/// What a frame says of focus: the edge's width, or why there is none.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Reading {
+    /// No tag in the frame large enough to measure.
+    #[default]
+    NoTag,
+    /// The tag's white is too dim for its edge to be read truly.
+    TooDim,
+    /// The tag's white is too bright for its edge to be read truly.
+    TooBright,
+    /// The tag is well lit, but too few lines across its edge could be read: too faint a step
+    /// (glare on it), or partly hidden.
+    Unreadable,
+    /// The tag's edge width, in pixels: one that counts.
+    Edge(f64),
+}
+
+impl Reading {
+    /// The width, when it counts.
+    pub fn edge_px(&self) -> Option<f64> {
+        match self {
+            Reading::Edge(width) => Some(*width),
+            _ => None,
+        }
+    }
+}
+
 impl Measured {
-    /// The edge width the view goes by: the measured tag nearest the frame's middle.
+    /// The edge width of the tag the view goes by, whatever its light.
     pub fn edge_px(&self) -> Option<f64> {
         self.edges[self.nearest?]
+    }
+
+    /// The light of the tag the view goes by.
+    pub fn light(&self) -> Option<TagLight> {
+        self.lights[self.nearest?]
+    }
+
+    /// What the view's focus goes by: the edge width of the tag nearest the frame's middle when
+    /// its light is good, or why not.
+    pub fn reading(&self) -> Reading {
+        let Some(nearest) = self.nearest else {
+            return Reading::NoTag;
+        };
+        let verdict = self.lights[nearest].map(|light| light.verdict());
+        match (verdict, self.edges[nearest]) {
+            (Some(Light::TooDim), _) => Reading::TooDim,
+            (Some(Light::TooBright), _) => Reading::TooBright,
+            (_, Some(width)) => Reading::Edge(width),
+            (_, None) => Reading::Unreadable,
+        }
     }
 }
 
@@ -154,6 +234,10 @@ pub fn measure(image: &GrayImage, tags: &[Tag]) -> Measured {
     let edges: Vec<Option<f64>> = tags
         .iter()
         .map(|tag| edge_px(image, &tag.corners))
+        .collect();
+    let lights: Vec<Option<TagLight>> = tags
+        .iter()
+        .map(|tag| light::of(image, &tag.corners))
         .collect();
     let centre = (
         (f64::from(image.width) - 1.0) / 2.0,
@@ -167,10 +251,24 @@ pub fn measure(image: &GrayImage, tags: &[Tag]) -> Measured {
             / 4.0;
         (x - centre.0).hypot(y - centre.1)
     };
+    let in_frame = |tag: &Tag| {
+        (0..4).all(|i| {
+            let (x, y) = (
+                f64::from(tag.corners[2 * i]),
+                f64::from(tag.corners[2 * i + 1]),
+            );
+            (0.0..=f64::from(image.width) - 1.0).contains(&x)
+                && (0.0..=f64::from(image.height) - 1.0).contains(&y)
+        })
+    };
     let nearest = (0..tags.len())
-        .filter(|&i| edges[i].is_some())
+        .filter(|&i| edges[i].is_some() || (large_enough(&tags[i].corners) && in_frame(&tags[i])))
         .min_by(|&a, &b| from_centre(&tags[a]).total_cmp(&from_centre(&tags[b])));
-    Measured { edges, nearest }
+    Measured {
+        edges,
+        lights,
+        nearest,
+    }
 }
 
 /// How much of each new reading goes into the smoothed one: the rest is what it was.
@@ -192,20 +290,23 @@ pub struct Tracker {
 /// What the view's line says of focus.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Shown {
-    /// The edge width now, smoothed: None while no tag in view can be measured.
+    /// The edge width now, smoothed: None while no reading counts.
     pub now_px: Option<f64>,
     /// The smallest the smoothed width has been since the best was last forgotten.
     pub best_px: Option<f64>,
+    /// This picture's reading, or why there is none.
+    pub reading: Reading,
 }
 
 impl Tracker {
-    /// Takes a picture's reading: None when no tag in it could be measured.
-    pub fn add(&mut self, edge_px: Option<f64>) -> Shown {
-        match edge_px {
-            Some(reading) => {
+    /// Takes a picture's reading. Only an edge's width counts: anything else is a gap, which
+    /// keeps the best and starts the smoothing afresh.
+    pub fn add(&mut self, reading: Reading) -> Shown {
+        match reading {
+            Reading::Edge(width) => {
                 let smoothed = match self.smoothed {
-                    Some(was) => was + NEW_SHARE * (reading - was),
-                    None => reading,
+                    Some(was) => was + NEW_SHARE * (width - was),
+                    None => width,
                 };
                 self.smoothed = Some(smoothed);
                 self.in_a_row += 1;
@@ -214,7 +315,7 @@ impl Tracker {
                 }
             }
             // The next reading starts afresh: it isn't averaged with one from before the gap.
-            None => {
+            _ => {
                 self.smoothed = None;
                 self.in_a_row = 0;
             }
@@ -222,6 +323,7 @@ impl Tracker {
         Shown {
             now_px: self.smoothed,
             best_px: self.best,
+            reading,
         }
     }
 
@@ -236,7 +338,8 @@ mod tests {
     use super::*;
 
     /// A frame with a black square on white whose edges ramp over `width_px` pixels: `turn` turns
-    /// the square about its middle, in degrees. Each pixel is the mean of a 4 x 4 grid of samples.
+    /// the square about its middle, in degrees. The square is a black border an eighth of its side
+    /// wide round white, as a tag is. Each pixel is the mean of a 4 x 4 grid of samples.
     fn square(
         side: f64,
         width_px: f64,
@@ -257,7 +360,11 @@ mod tests {
                     // In the square's own frame, how far inside its nearest edge: negative outside.
                     let (u, v) = (sx * cos + sy * sin, -sx * sin + sy * cos);
                     let inside = side / 2.0 - u.abs().max(v.abs());
-                    let share = (inside / width_px + 0.5).clamp(0.0, 1.0);
+                    // Black for a cell's width in from the edge, then white, as a tag's border
+                    // and payload are, so the square has a white to measure its light by.
+                    let outer = (inside / width_px + 0.5).clamp(0.0, 1.0);
+                    let inner = ((side / 8.0 - inside) / width_px + 0.5).clamp(0.0, 1.0);
+                    let share = outer.min(inner);
                     sum += white + (black - white) * share;
                 }
                 image.pixels[y * size + x] = (sum / 16.0).round() as u8;
@@ -281,13 +388,13 @@ mod tests {
         // white. A ramp's width is its step over its slope, so each should read its own width, a
         // little more for the pixels' own width.
         let cases = [
-            (160.0, 2.0, 7.0, 30.0, 215.0),
-            (160.0, 3.0, 7.0, 30.0, 215.0),
-            (160.0, 5.0, 7.0, 30.0, 215.0),
-            (160.0, 3.0, 33.0, 30.0, 215.0),
-            (160.0, 3.0, 45.0, 30.0, 215.0),
-            (60.0, 3.0, 7.0, 30.0, 215.0),
-            (280.0, 3.0, 7.0, 30.0, 215.0),
+            (160.0, 2.0, 7.0, 30.0, 160.0),
+            (160.0, 3.0, 7.0, 30.0, 160.0),
+            (160.0, 5.0, 7.0, 30.0, 160.0),
+            (160.0, 3.0, 33.0, 30.0, 160.0),
+            (160.0, 3.0, 45.0, 30.0, 160.0),
+            (60.0, 3.0, 7.0, 30.0, 160.0),
+            (280.0, 3.0, 7.0, 30.0, 160.0),
             // Half the exposure, and a dim tag.
             (160.0, 3.0, 7.0, 15.0, 108.0),
             (160.0, 3.0, 7.0, 40.0, 75.0),
@@ -304,10 +411,10 @@ mod tests {
 
     #[test]
     fn a_tag_too_small_too_faint_or_off_the_frame_isn_t_measured() {
-        let (image, corners) = square(160.0, 3.0, 7.0, 30.0, 215.0);
+        let (image, corners) = square(160.0, 3.0, 7.0, 30.0, 160.0);
         assert!(edge_px(&image, &corners).is_some());
         let cases = [
-            ("too small", square(28.0, 2.0, 7.0, 30.0, 215.0)),
+            ("too small", square(28.0, 2.0, 7.0, 30.0, 160.0)),
             ("too faint", square(160.0, 3.0, 7.0, 100.0, 115.0)),
         ];
         for (what, (image, corners)) in cases {
@@ -335,43 +442,78 @@ mod tests {
     }
 
     #[test]
-    fn the_view_goes_by_the_measured_tag_nearest_the_middle() {
-        let (image, middle) = square(160.0, 3.0, 7.0, 30.0, 215.0);
-        // A second "tag" that isn't in the frame's pixels at all, and one off the frame.
+    fn the_view_goes_by_the_tag_nearest_the_middle_and_says_why_it_has_no_reading() {
+        let (image, middle) = square(160.0, 3.0, 7.0, 30.0, 160.0);
+        // A "tag" in the frame's plain white, large enough to measure but with no edge; one off the
+        // frame; and one too small.
         let blank = [20.0, 20.0, 60.0, 20.0, 60.0, 60.0, 20.0, 60.0];
         let off = [-80.0, 150.0, 0.0, 150.0, 0.0, 230.0, -80.0, 230.0];
+        let small = [20.0, 340.0, 40.0, 340.0, 40.0, 360.0, 20.0, 360.0];
+        // Each row: the tags, the one the view goes by, and its reading.
         let cases = [
-            (vec![], None),
-            (vec![tag(blank), tag(off)], None),
-            (vec![tag(blank), tag(middle)], Some(1)),
-            (vec![tag(middle), tag(off)], Some(0)),
+            (vec![], None, Reading::NoTag),
+            (vec![tag(off), tag(small)], None, Reading::NoTag),
+            // The plain white is lit well, but has no edge to read.
+            (vec![tag(blank), tag(off)], Some(0), Reading::Unreadable),
+            (vec![tag(blank), tag(middle)], Some(1), Reading::Edge(0.0)),
+            (vec![tag(middle), tag(off)], Some(0), Reading::Edge(0.0)),
         ];
-        for (tags, nearest) in cases {
+        for (tags, nearest, reading) in cases {
             let measured = measure(&image, &tags);
             assert_eq!(measured.nearest, nearest);
             assert_eq!(measured.edges.len(), tags.len());
-            assert_eq!(measured.edge_px().is_some(), nearest.is_some());
+            assert_eq!(measured.lights.len(), tags.len());
+            match (measured.reading(), reading) {
+                (Reading::Edge(width), Reading::Edge(_)) => assert!((2.9..3.6).contains(&width)),
+                (read, expected) => assert_eq!(read, expected),
+            }
+        }
+        // The middle tag lit too dim, and too bright: each says so, and neither counts, though
+        // the too dim one's edge is still measured.
+        let rows = [
+            (30.0, 70.0, Reading::TooDim),
+            (60.0, 240.0, Reading::TooBright),
+        ];
+        for (black, white, reading) in rows {
+            let (image, corners) = square(160.0, 3.0, 7.0, black, white);
+            let measured = measure(&image, &[tag(corners)]);
+            assert_eq!(measured.reading(), reading, "{black} to {white}");
+            assert_eq!(measured.reading().edge_px(), None);
         }
     }
 
     #[test]
+    fn a_line_whose_white_is_too_bright_to_trust_is_left_out() {
+        // The same square, its white raised past the ceiling: every line's white side is too
+        // bright, so there's no width, where without the ceiling it would read sharper than it is.
+        let (image, corners) = square(160.0, 3.0, 7.0, 30.0, 160.0);
+        assert!(edge_px(&image, &corners).is_some());
+        let (image, corners) = square(160.0, 3.0, 7.0, 30.0, 200.0);
+        assert_eq!(edge_px(&image, &corners), None);
+    }
+
+    #[test]
     fn readings_are_smoothed_and_the_best_is_the_smallest_smoothed_one() {
+        use Reading::{Edge, NoTag, TooBright, TooDim};
         // Each row: a picture's reading, then the smoothed reading and the best after it.
         let steps = [
-            (Some(4.0), Some(4.0), None),
-            (Some(4.0), Some(4.0), None),
+            (Edge(4.0), Some(4.0), None),
+            (Edge(4.0), Some(4.0), None),
             // The third in a row: settled, so it's the best so far.
-            (Some(4.0), Some(4.0), Some(4.0)),
-            (Some(2.0), Some(3.4), Some(3.4)),
-            (Some(2.0), Some(2.98), Some(2.98)),
+            (Edge(4.0), Some(4.0), Some(4.0)),
+            (Edge(2.0), Some(3.4), Some(3.4)),
+            (Edge(2.0), Some(2.98), Some(2.98)),
             // Past focus: the reading rises, the best stays.
-            (Some(5.0), Some(3.586), Some(2.98)),
+            (Edge(5.0), Some(3.586), Some(2.98)),
             // No tag: nothing now, the best kept.
-            (None, None, Some(2.98)),
+            (NoTag, None, Some(2.98)),
             // Back: afresh, not averaged with before, and not the best until it has settled.
-            (Some(1.0), Some(1.0), Some(2.98)),
-            (Some(1.0), Some(1.0), Some(2.98)),
-            (Some(1.0), Some(1.0), Some(1.0)),
+            (Edge(1.0), Some(1.0), Some(2.98)),
+            (Edge(1.0), Some(1.0), Some(2.98)),
+            (Edge(1.0), Some(1.0), Some(1.0)),
+            // Too bright or too dim: a gap, never the best.
+            (TooBright, None, Some(1.0)),
+            (TooDim, None, Some(1.0)),
         ];
         let mut tracker = Tracker::default();
         for (i, (reading, now, best)) in steps.into_iter().enumerate() {
@@ -387,8 +529,9 @@ mod tests {
                 "step {i}: best {:?}",
                 shown.best_px
             );
+            assert_eq!(shown.reading, reading);
         }
         tracker.forget();
-        assert_eq!(tracker.add(None), Shown::default());
+        assert_eq!(tracker.add(NoTag), Shown::default());
     }
 }

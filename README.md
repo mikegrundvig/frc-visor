@@ -249,9 +249,17 @@ Each watcher gets the newest picture when its connection is ready for one, so a 
 pictures; one that stops reading is closed after 5 s, and at most 8 watch at once. To focus a
 camera by, the view says how many pixels wide a tag's edge is in the frame (smaller is sharper),
 with the best it has been and a bar that fills as the lens nears it, and shows that tag's corner
-magnified. `/frame/<camera>` gives the
-camera's next frame at full size, as detection read it, with the tags found in it; and a bench's
-configuration can let an exposure and gain be tried from the page. More in
+magnified. A reading counts only when the tag is lit well for it (its white from 80 to 170: a
+camera's squeezed top end reads an edge falsely sharp), and a sentence in plain words says what to
+do: no tag, too dim, too bright, keep turning, sharp. When the camera has slowed because the
+exposure is longer than a frame, the view says so. `/frame/<camera>` gives the camera's next frame
+at full size, as detection read it, with the tags found in it and each one's black and white.
+
+A bench's configuration (`try_settings = true`) adds, under each camera, sliders for the exposure
+and gain bounded by the camera's own ranges, and a focus step: one button and Visor remembers the
+settings, sets the least gain and an exposure that lights the tag for focusing (never longer than
+a frame, so the frame rate holds), and says so; another puts the settings back, as the last watcher
+leaving does. It's bench-only for now, never on a robot. More in
 [docs/live-view.md](docs/live-view.md).
 
 ## Releases

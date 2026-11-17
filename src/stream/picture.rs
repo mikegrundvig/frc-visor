@@ -1,6 +1,7 @@
 //! A live view's picture: the camera's frame made smaller, each tag outlined with its ID, a line
-//! along the top with the detection's frame rate, the exposure and gain and the brightness, a line
-//! under it with the focus, and the tag the focus is read from magnified in a corner, as a JPEG. Resizing
+//! along the top with the detection's frame rate, the exposure and gain and the brightness, lines
+//! under it in plain words ([`super::words`]), then the focus's small print with its bar, and the
+//! tag the focus is read from magnified in a corner, as a JPEG. Resizing
 //! is fast_image_resize's, drawing embedded-graphics', and the JPEG jpeg-encoder's.
 
 use std::convert::Infallible;
@@ -21,6 +22,7 @@ use crate::image::GrayImage;
 use crate::settings::InEffect;
 use crate::stream::feed::Detected;
 use crate::stream::focus::Shown;
+use crate::stream::words;
 
 /// Pictures this wide or wider get the larger lettering.
 const LARGE_FROM: u32 = 640;
@@ -60,13 +62,14 @@ impl Painter {
         self.looked_at = None;
     }
 
-    /// A frame's picture, as a JPEG, with its line saying `fps` (none while it's being measured)
-    /// and the line under it the camera's `focus`, read from the tag at `measured` among the
-    /// frame's (none when no tag could be measured).
+    /// A frame's picture, as a JPEG, with its line saying `fps` (none while it's being measured),
+    /// the `said` lines under it, and under those the camera's `focus`, read from the tag at
+    /// `measured` among the frame's (none when no tag could be measured).
     pub fn paint(
         &mut self,
         frame: &Detected,
         fps: Option<f64>,
+        said: &[String],
         focus: Shown,
         measured: Option<usize>,
     ) -> Result<Vec<u8>, String> {
@@ -105,13 +108,20 @@ impl Painter {
         Text::with_baseline(&line, Point::new(2, 2), lettering(font), Baseline::Top)
             .draw(&mut canvas)
             .unwrap_or_else(|never| match never {});
-        let second = Point::new(2, 4 + font.character_size.height as i32);
-        let line = focus_line(focus);
-        Text::with_baseline(&line, second, lettering(font), Baseline::Top)
+        let line_height = 2 + font.character_size.height as i32;
+        let mut next = Point::new(2, 2 + line_height);
+        for words in said {
+            Text::with_baseline(words, next, lettering(font), Baseline::Top)
+                .draw(&mut canvas)
+                .unwrap_or_else(|never| match never {});
+            next.y += line_height;
+        }
+        let line = words::small_print(focus);
+        Text::with_baseline(&line, next, lettering(font), Baseline::Top)
             .draw(&mut canvas)
             .unwrap_or_else(|never| match never {});
         if let Some(share) = share_of_best(focus) {
-            let after = second
+            let after = next
                 + Point::new(
                     (line.len() as u32 * font.character_size.width) as i32 + 8,
                     0,
@@ -146,19 +156,6 @@ pub fn caption(fps: Option<f64>, settings: InEffect, brightness: Brightness) -> 
         "{rate}  {exposure}  {gain}  brightness {} / {}",
         brightness.median, brightness.high
     )
-}
-
-/// The line under it: `focus: a tag's edge is 2.4 px wide, 1.9 at best`. Smaller is sharper.
-pub fn focus_line(focus: Shown) -> String {
-    let best =
-        |best: Option<f64>| best.map_or(String::new(), |best| format!(", {best:.1} at best"));
-    match focus.now_px {
-        Some(now) => format!(
-            "focus: a tag's edge is {now:.1} px wide{}",
-            best(focus.best_px)
-        ),
-        None => format!("focus: no tag to measure{}", best(focus.best_px)),
-    }
 }
 
 /// How near its best the focus is now, for the bar: 1 at the best, less the wider the edge is.
@@ -398,7 +395,7 @@ mod tests {
         };
         let mut painter = Painter::new(Stream::default());
         let jpeg = painter
-            .paint(&frame(vec![tag]), Some(60.0), Shown::default(), None)
+            .paint(&frame(vec![tag]), Some(60.0), &[], Shown::default(), None)
             .unwrap();
         assert_eq!(&jpeg[..2], [0xff, 0xd8], "a JPEG's start");
         let small = &painter.small;
@@ -432,40 +429,28 @@ mod tests {
             quality: 50,
         });
         let jpeg = painter
-            .paint(&frame(vec![tag]), None, Shown::default(), None)
+            .paint(&frame(vec![tag]), None, &[], Shown::default(), None)
             .unwrap();
         assert!(jpeg.len() > 100);
         assert_eq!(painter.small.len(), 400 * 326);
     }
 
     #[test]
-    fn the_focus_line_says_the_edge_s_width_and_the_best_and_the_bar_fills_toward_the_best() {
-        // Each row: the width now, the best, the line, and how full the bar is.
+    fn the_bar_fills_toward_the_best() {
+        // Each row: the width now, the best, and how full the bar is.
         let cases = [
-            (None, None, "focus: no tag to measure", None),
-            (
-                None,
-                Some(1.94),
-                "focus: no tag to measure, 1.9 at best",
-                None,
-            ),
-            (Some(2.44), None, "focus: a tag's edge is 2.4 px wide", None),
-            (
-                Some(3.0),
-                Some(1.5),
-                "focus: a tag's edge is 3.0 px wide, 1.5 at best",
-                Some(0.5),
-            ),
-            (
-                Some(1.5),
-                Some(1.5),
-                "focus: a tag's edge is 1.5 px wide, 1.5 at best",
-                Some(1.0),
-            ),
+            (None, None, None),
+            (None, Some(1.94), None),
+            (Some(2.44), None, None),
+            (Some(3.0), Some(1.5), Some(0.5)),
+            (Some(1.5), Some(1.5), Some(1.0)),
         ];
-        for (now_px, best_px, line, share) in cases {
-            let focus = Shown { now_px, best_px };
-            assert_eq!(focus_line(focus), line);
+        for (now_px, best_px, share) in cases {
+            let focus = Shown {
+                now_px,
+                best_px,
+                ..Shown::default()
+            };
             assert_eq!(share_of_best(focus), share);
         }
     }
@@ -482,7 +467,7 @@ mod tests {
         }
         let mut painter = Painter::new(Stream::default());
         painter
-            .paint(&shown, Some(60.0), Shown::default(), None)
+            .paint(&shown, Some(60.0), &[], Shown::default(), None)
             .unwrap();
         let small = &painter.small;
         let at = |x: usize, y: usize| small[y * 800 + x];
@@ -520,7 +505,7 @@ mod tests {
         }];
         let marked = |painter: &Painter, x: usize, y: usize| painter.small[y * 800 + x] == 255;
         painter
-            .paint(&shown, Some(60.0), Shown::default(), Some(0))
+            .paint(&shown, Some(60.0), &[], Shown::default(), Some(0))
             .unwrap();
         // The frame's 72 px from (764, 264): in the picture, a box 36 px across from (382, 132).
         assert!(marked(&painter, 382, 140) && marked(&painter, 382 + 35, 140));
@@ -529,17 +514,17 @@ mod tests {
         assert_eq!(painter.small[(top + 100) * 800 + left + 108], 220);
         shown.tags.clear();
         painter
-            .paint(&shown, Some(60.0), Shown::default(), None)
+            .paint(&shown, Some(60.0), &[], Shown::default(), None)
             .unwrap();
         assert!(marked(&painter, 382, 140), "still where the tag was");
         painter.look_afresh();
         painter
-            .paint(&shown, Some(60.0), Shown::default(), None)
+            .paint(&shown, Some(60.0), &[], Shown::default(), None)
             .unwrap();
         assert!(marked(&painter, 382, 320) && !marked(&painter, 382, 140));
         // A tag in the frame's corner: the part stops at the frame's edges.
         painter
-            .paint(&shown, Some(60.0), Shown::default(), None)
+            .paint(&shown, Some(60.0), &[], Shown::default(), None)
             .unwrap();
         shown.tags = vec![Tag {
             id: 3,
@@ -549,7 +534,7 @@ mod tests {
             poses: None,
         }];
         painter
-            .paint(&shown, Some(60.0), Shown::default(), Some(0))
+            .paint(&shown, Some(60.0), &[], Shown::default(), Some(0))
             .unwrap();
         assert!(
             marked(&painter, 764 + 35, 10),
@@ -562,7 +547,9 @@ mod tests {
             fps: 10,
             quality: 50,
         });
-        painter.paint(&shown, None, Shown::default(), None).unwrap();
+        painter
+            .paint(&shown, None, &[], Shown::default(), None)
+            .unwrap();
         assert_eq!(painter.small.len(), 160 * 130);
         assert_eq!(painter.small[129 * 160 + 159], 220);
         assert_eq!(painter.small[100 * 160 + 120], 220);

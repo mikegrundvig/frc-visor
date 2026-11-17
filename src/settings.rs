@@ -118,11 +118,15 @@ pub struct InEffect {
 /// (`try_settings` in the configuration) and applied by the camera's capture thread before its next
 /// frame. A trial lasts until the camera is opened again (Visor restarted, the camera replugged),
 /// which sets what the configuration says: the configuration is still what a camera does.
+///
+/// It also carries the other way the ranges the camera takes an exposure and gain in, which the
+/// capture thread says each time it opens the camera, so the page and the focus step keep to them.
 #[derive(Debug, Default)]
 pub struct Trial {
     /// Checked once a frame by the capture thread, so an untried camera costs it one load.
     asked: AtomicBool,
-    wanted: Mutex<Option<Tried>>,
+    wanted: Mutex<Option<Asked>>,
+    ranges: Mutex<Option<Ranges>>,
 }
 
 /// What a trial changes: each of the two that's given, the other left as it is.
@@ -132,27 +136,108 @@ pub struct Tried {
     pub gain: Option<i64>,
 }
 
+/// What the capture thread is asked to set, and what it starts from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Asked {
+    pub from: Base,
+    pub tried: Tried,
+}
+
+/// What a trial's values are set over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Base {
+    /// The camera as it is now, with what was tried before.
+    #[default]
+    AsItIs,
+    /// The configuration's settings, as the camera was opened with: the only way back to the
+    /// camera's own automatic exposure, which a tried exposure turns off.
+    Configured,
+}
+
+/// The values a camera's control takes, as it says: from `least` to `most`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Range {
+    pub least: i64,
+    pub most: i64,
+}
+
+impl Range {
+    /// A value held to the range.
+    pub fn hold(&self, value: i64) -> i64 {
+        value.clamp(self.least, self.most)
+    }
+}
+
+/// The ranges a camera takes an exposure and gain in: none for a control it hasn't.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Ranges {
+    /// In microseconds, from the control's 100 µs units.
+    pub exposure_us: Option<Range>,
+    /// In the camera's own units.
+    pub gain: Option<Range>,
+}
+
+/// The ranges of a camera's exposure and gain, as its controls say; none where it can't be read.
+pub fn ranges(device: &impl Controls) -> Ranges {
+    let Ok(known) = device.list() else {
+        return Ranges::default();
+    };
+    let range = |id: u32, unit: i64| {
+        known.iter().find(|c| c.id == id).map(|c| Range {
+            least: c.minimum * unit,
+            most: c.maximum * unit,
+        })
+    };
+    Ranges {
+        exposure_us: range(EXPOSURE_TIME, i64::from(EXPOSURE_UNIT_US)),
+        gain: range(GAIN, 1),
+    }
+}
+
 impl Trial {
     /// For the live view: asks the capture thread to set these. A later ask before it has replaces
     /// an earlier one's values where it gives them.
     pub fn ask(&self, tried: Tried) {
         let mut wanted = self.wanted.lock().unwrap();
         let before = wanted.unwrap_or_default();
-        *wanted = Some(Tried {
-            exposure_us: tried.exposure_us.or(before.exposure_us),
-            gain: tried.gain.or(before.gain),
+        *wanted = Some(Asked {
+            from: before.from,
+            tried: Tried {
+                exposure_us: tried.exposure_us.or(before.tried.exposure_us),
+                gain: tried.gain.or(before.tried.gain),
+            },
+        });
+        self.asked.store(true, Ordering::Release);
+    }
+
+    /// For the live view: asks the capture thread to go back to the configuration's settings, then
+    /// set these over them. It replaces anything asked before that the thread hasn't set.
+    pub fn ask_configured(&self, tried: Tried) {
+        *self.wanted.lock().unwrap() = Some(Asked {
+            from: Base::Configured,
+            tried,
         });
         self.asked.store(true, Ordering::Release);
     }
 
     /// For the capture thread: what's been asked since it last looked, if anything.
-    pub fn take(&self) -> Option<Tried> {
+    pub fn take(&self) -> Option<Asked> {
         if !self.asked.load(Ordering::Relaxed) {
             return None;
         }
         let mut wanted = self.wanted.lock().unwrap();
         self.asked.store(false, Ordering::Release);
         wanted.take()
+    }
+
+    /// For the capture thread, each time it opens the camera: the ranges it takes.
+    pub fn offer(&self, ranges: Ranges) {
+        *self.ranges.lock().unwrap() = Some(ranges);
+    }
+
+    /// The ranges the camera takes an exposure and gain in: none until it has been opened.
+    pub fn ranges(&self) -> Option<Ranges> {
+        *self.ranges.lock().unwrap()
     }
 }
 
@@ -1035,13 +1120,66 @@ mod tests {
             exposure_us: None,
             gain: Some(2),
         });
+        let both = Tried {
+            exposure_us: Some(1500),
+            gain: Some(2),
+        };
         assert_eq!(
             trial.take(),
-            Some(Tried {
-                exposure_us: Some(1500),
-                gain: Some(2),
+            Some(Asked {
+                from: Base::AsItIs,
+                tried: both,
             })
         );
         assert_eq!(trial.take(), None, "taken once");
+
+        // Back to the configuration's: it replaces what was asked before, and a later ask by
+        // value is set over it.
+        trial.ask(both);
+        trial.ask_configured(Tried {
+            exposure_us: None,
+            gain: Some(16),
+        });
+        trial.ask(Tried {
+            exposure_us: None,
+            gain: Some(20),
+        });
+        assert_eq!(
+            trial.take(),
+            Some(Asked {
+                from: Base::Configured,
+                tried: Tried {
+                    exposure_us: None,
+                    gain: Some(20),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn a_camera_s_ranges_are_its_controls_in_microseconds_and_its_own_units() {
+        // Each row: the controls, then the exposure's range in µs and the gain's.
+        let rows = [
+            (
+                vec![exposure_time(), gain()],
+                Some((100, 500_000)),
+                Some((0, 100)),
+            ),
+            (vec![exposure_time()], Some((100, 500_000)), None),
+            (vec![brightness()], None, None),
+        ];
+        for (controls, exposure, gain) in rows {
+            let ranges = ranges(&Fake::new(controls));
+            let pair = |r: Option<Range>| r.map(|r| (r.least, r.most));
+            assert_eq!(pair(ranges.exposure_us), exposure);
+            assert_eq!(pair(ranges.gain), gain);
+        }
+        let mut unlisted = Fake::new(vec![gain()]);
+        unlisted.unlisted = true;
+        assert_eq!(ranges(&unlisted), Ranges::default());
+        let trial = Trial::default();
+        assert_eq!(trial.ranges(), None, "not opened yet");
+        trial.offer(ranges(&Fake::new(vec![gain()])));
+        assert_eq!(trial.ranges().unwrap().gain.unwrap().most, 100);
     }
 }

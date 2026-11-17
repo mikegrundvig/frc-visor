@@ -17,10 +17,13 @@ use tokio::sync::watch;
 
 use crate::config::Camera;
 use crate::latest::Latest;
-use crate::settings::Trial;
+use crate::settings::{Asked, Base, InEffect, Trial};
+use crate::stream::dial::Seen;
 use crate::stream::feed::{Detected, Feed};
 use crate::stream::focus::{self, Measured, Shown, Tracker};
 use crate::stream::picture::Painter;
+use crate::stream::step::{Phase, Step};
+use crate::stream::words;
 
 /// How often an unwatched view looks for a watcher.
 const IDLE_CHECK: Duration = Duration::from_millis(100);
@@ -42,6 +45,24 @@ pub struct View {
     focus: Mutex<Shown>,
     /// An exposure and gain asked for from the live view, which the camera's capture thread sets.
     pub trial: Trial,
+    /// The camera's focus step: held while what it answers is asked of [`View::trial`], so an
+    /// ask from the view's thread and one from the server never cross.
+    step: Mutex<Step>,
+    status: Mutex<Status>,
+}
+
+/// What the view says now, for the page: its newest picture's words.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Status {
+    pub phase: Phase,
+    /// The sentence for focus and the focus step.
+    pub sentence: String,
+    /// Said when the camera has slowed because its exposure is longer than a frame.
+    pub slowed: Option<String>,
+    /// The focus's small print: the edge's width.
+    pub small_print: String,
+    /// The exposure and gain the newest frame was taken at.
+    pub in_effect: InEffect,
 }
 
 /// One frame at full size, as detection had it: not made smaller, not compressed, nothing drawn on
@@ -69,8 +90,8 @@ impl Still {
 
 /// A frame's facts as JSON: the camera, the frame's number as sent to the robot, its size, the
 /// exposure and gain in effect, its brightness, the width of a tag's edge in it (the view's focus
-/// number, [`focus`]: the measured tag nearest the frame's middle), and each tag with its corners
-/// and its own edge's width.
+/// number, [`focus`]: the tag nearest the frame's middle) and that tag's light, and each tag with
+/// its corners, its own edge's width and its black and white.
 fn about(camera: &Camera, frame: &Detected, focus: &Measured) -> String {
     let optional = |value: Option<String>| value.unwrap_or_else(|| "null".to_string());
     let settings = frame.settings;
@@ -80,7 +101,7 @@ fn about(camera: &Camera, frame: &Detected, focus: &Measured) -> String {
         json,
         ",\"sequence\":{},\"width\":{},\"height\":{},\"exposure_us\":{},\"gain\":{},\
          \"auto_exposure\":{},\"brightness_median\":{},\"brightness_high\":{},\
-         \"clipped_percent\":{},\"edge_px\":{},\"tags\":[",
+         \"clipped_percent\":{},\"edge_px\":{},\"light\":{},\"tags\":[",
         frame.sequence,
         frame.image.width,
         frame.image.height,
@@ -91,6 +112,11 @@ fn about(camera: &Camera, frame: &Detected, focus: &Measured) -> String {
         frame.brightness.high,
         f64::from(frame.brightness.clipped) / 100.0,
         number(focus.edge_px().unwrap_or(f64::NAN)),
+        optional(
+            focus
+                .light()
+                .map(|light| format!("\"{}\"", light.verdict().word()))
+        ),
     );
     for (i, tag) in frame.tags.iter().enumerate() {
         let corners: Vec<String> = tag.corners.iter().map(|c| number(f64::from(*c))).collect();
@@ -107,13 +133,16 @@ fn about(camera: &Camera, frame: &Detected, focus: &Measured) -> String {
         let _ = write!(
             json,
             "{}{{\"id\":{},\"hamming\":{},\"decision_margin\":{},\"corners\":[{}],\
-             \"distance_m\":{distance},\"pose_error_px\":{error},\"edge_px\":{}}}",
+             \"distance_m\":{distance},\"pose_error_px\":{error},\"edge_px\":{},\
+             \"black\":{},\"white\":{}}}",
             if i == 0 { "" } else { "," },
             tag.id,
             tag.hamming,
             number(f64::from(tag.decision_margin)),
             corners.join(","),
             number(focus.edges[i].unwrap_or(f64::NAN)),
+            optional(focus.lights[i].map(|light| light.black.to_string())),
+            optional(focus.lights[i].map(|light| light.white.to_string())),
         );
     }
     json.push_str("]}");
@@ -158,6 +187,8 @@ impl View {
             focus_forgotten: AtomicU64::new(0),
             focus: Mutex::new(Shown::default()),
             trial: Trial::default(),
+            step: Mutex::new(Step::default()),
+            status: Mutex::new(Status::default()),
         }
     }
 
@@ -218,6 +249,62 @@ impl View {
         *self.focus.lock().unwrap() = focus;
         focus
     }
+
+    /// What its newest picture says, for the page: nothing while no one watches.
+    pub fn status(&self) -> Status {
+        self.status.lock().unwrap().clone()
+    }
+
+    /// Starts the camera's focus step, or dials in again where it's on: the settings in effect at
+    /// the next frame are remembered, to be put back when it ends.
+    pub fn start_focus_step(&self) {
+        self.step.lock().unwrap().start();
+    }
+
+    /// Ends the camera's focus step, and puts back the settings it remembered. Whether it was on.
+    pub fn end_focus_step(&self) -> bool {
+        let mut step = self.step.lock().unwrap();
+        let was_on = step.is_on();
+        if let Some(asked) = step.end() {
+            self.put_back(asked);
+        }
+        was_on
+    }
+
+    /// Whether the camera's focus step is on.
+    pub fn focus_step_on(&self) -> bool {
+        self.step.lock().unwrap().is_on()
+    }
+
+    /// Asks for an exposure and gain set by hand: the focus step's dial, if it's on, stops.
+    pub fn try_by_hand(&self, tried: crate::settings::Tried) {
+        let mut step = self.step.lock().unwrap();
+        step.by_hand();
+        self.trial.ask(tried);
+    }
+
+    fn put_back(&self, asked: Asked) {
+        match asked.from {
+            Base::AsItIs => self.trial.ask(asked.tried),
+            Base::Configured => self.trial.ask_configured(asked.tried),
+        }
+    }
+
+    /// Gives the focus step a frame, and asks for what it answers.
+    fn step_frame(&self, seen: &Seen, period: Duration) -> Phase {
+        let mut step = self.step.lock().unwrap();
+        let ranges = self.trial.ranges();
+        if let Some(tried) = step.frame(seen, ranges.as_ref(), period) {
+            self.trial.ask(tried);
+        }
+        step.phase()
+    }
+
+    /// The last watcher has gone: the focus step ends, and puts back what it remembered.
+    fn unwatched(&self) {
+        self.end_focus_step();
+        *self.status.lock().unwrap() = Status::default();
+    }
 }
 
 /// The time the view paces its pictures by: the real one ([`RealTime`]), or a test's.
@@ -256,9 +343,13 @@ pub fn run(
     let mut rate = Rate::default();
     let mut tracker = Tracker::default();
     let mut said = false;
+    // The exposure and gain of the last frame looked at: a change of either forgets the best focus,
+    // which was seen in other light.
+    let mut last_settings: Option<InEffect> = None;
     while !stop.load(Ordering::Relaxed) {
         let watched = view.watchers() > 0;
-        if !watched && rate.started() {
+        // The focus step too: one started with no picture made yet ends with its watcher.
+        if !watched && (rate.started() || view.focus_step_on()) {
             // Its last picture is no one's now; a new watcher waits for a fresh one, and the best
             // focus seen was that watcher's.
             view.show(None);
@@ -266,6 +357,8 @@ pub fn run(
             tracker.forget();
             painter.look_afresh();
             view.say_focus(Shown::default());
+            view.unwatched();
+            last_settings = None;
         }
         if !watched && !view.still_asked.load(Ordering::Acquire) {
             thread::sleep(IDLE_CHECK);
@@ -289,10 +382,34 @@ pub fn run(
             tracker.forget();
             view.focus_forgotten.fetch_add(1, Ordering::Relaxed);
         }
+        if last_settings.is_some_and(|last| last != frame.settings) {
+            tracker.forget();
+        }
+        last_settings = Some(frame.settings);
         let painted = watched.then(|| {
             rate.add(frame.sequence, frame.monotonic_nanos);
-            let focus = view.say_focus(tracker.add(measured.edge_px()));
-            painter.paint(&frame, rate.fps(), focus, measured.nearest)
+            let focus = view.say_focus(tracker.add(measured.reading()));
+            let seen = Seen {
+                in_effect: frame.settings,
+                white: measured.light().map(|light| light.white),
+                at_nanos: frame.monotonic_nanos,
+            };
+            let phase = view.step_frame(&seen, period_of(camera.fps));
+            let status = Status {
+                phase,
+                sentence: words::sentence(phase, focus),
+                slowed: words::slowed(rate.fps(), camera.fps, frame.settings.exposure_us),
+                small_print: words::small_print(focus),
+                in_effect: frame.settings,
+            };
+            let said: Vec<String> = status
+                .slowed
+                .iter()
+                .chain(std::iter::once(&status.sentence))
+                .cloned()
+                .collect();
+            *view.status.lock().unwrap() = status;
+            painter.paint(&frame, rate.fps(), &said, focus, measured.nearest)
         });
         latest.recycle(frame.image);
         match painted {
@@ -311,6 +428,11 @@ pub fn run(
             pace.sleep(rest);
         }
     }
+}
+
+/// A camera's frame period at the rate it's configured for.
+fn period_of(fps: u32) -> Duration {
+    Duration::from_secs(1) / fps.max(1)
 }
 
 /// Detection's frame rate, from the frames' numbers and capture times over about the last second.
@@ -439,6 +561,13 @@ mod tests {
         // The second tag is the one the view's focus number goes by; the first couldn't be measured.
         let focus = Measured {
             edges: vec![None, Some(2.3456)],
+            lights: vec![
+                None,
+                Some(crate::stream::light::TagLight {
+                    black: 30,
+                    white: 140,
+                }),
+            ],
             nearest: Some(1),
         };
         let still = Still::of(&camera, &frame, &focus);
@@ -470,6 +599,14 @@ mod tests {
             "a tag that couldn't be measured"
         );
         assert_eq!(tags[1]["edge_px"], 2.346);
+        // Each tag's black and white, and the measured one's verdict, so the result can be checked
+        // from the numbers alone.
+        assert!(tags[0]["black"].is_null() && tags[0]["white"].is_null());
+        assert_eq!(
+            (&tags[1]["black"], &tags[1]["white"]),
+            (&30.into(), &140.into())
+        );
+        assert_eq!(about["light"], "good");
         // No lens, so no pose; and a number that isn't one is null, never invalid JSON.
         assert!(tags[1]["distance_m"].is_null());
         assert!(tags[1]["decision_margin"].is_null());

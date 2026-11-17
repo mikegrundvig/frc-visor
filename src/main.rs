@@ -225,6 +225,9 @@ fn run(path: &Path) -> Result<()> {
         listener,
         server::Options {
             try_settings: config.try_settings,
+            // Its own decision, bench-only for now as the same key says. Later it may be allowed
+            // on a robot while it is disabled, once Visor is told the robot's state.
+            focus_step: config.try_settings,
             ..server::Options::default()
         },
         watchdog::interval(),

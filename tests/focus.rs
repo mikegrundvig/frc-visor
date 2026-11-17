@@ -54,7 +54,8 @@ fn readings(view: View) -> Vec<Option<f64>> {
                 rotation: turned * face_out,
                 translation_m: CAMERA.point_at(cx + offset.0, cy + offset.1, view.distance_m),
                 black: 25.0,
-                white: 210.0,
+                // Below the white a reading is trusted in (light::TOO_BRIGHT_ABOVE), noise and all.
+                white: 160.0,
             };
             let optics = Optics {
                 blur_px: view.blur_px,
@@ -161,4 +162,117 @@ fn a_tag_s_edge_width_follows_the_blur_and_little_else() {
         ..SHARP
     };
     assert_eq!(readings(small), vec![None; TRIALS.len()]);
+}
+
+/// A camera's response, as tests/dial.rs has it: straight to 172, then a slope of 0.2 to full
+/// white. A ThriftyCam read a sharp tag's edge true (within 3%) to a white of about 170, then
+/// falsely sharper, 10% by 175 and 30% by 200 (1.5 px reading 1.37 at 175, 1.04 at 201). A sharp
+/// tag rendered through this response reads true to 170, then 9% sharp by 180 and 17% by 188:
+/// from about where the camera did, if not as far.
+fn tone(linear: f64) -> u8 {
+    const KNEE: f64 = 172.0;
+    const SQUEEZE: f64 = 0.2;
+    let level = if linear <= KNEE {
+        linear
+    } else {
+        KNEE + SQUEEZE * (linear - KNEE)
+    };
+    level.round().clamp(0.0, 255.0) as u8
+}
+
+/// What the view's focus goes by for one tag rendered at `blur_px` and shown `brighter` times as
+/// bright through the camera's response, and that tag's white; and the width its edge would read if
+/// nothing were left out for being too bright: the same frame scaled down until its white is 130,
+/// which keeps the edge's shape (a width is a step over a slope) but brings it under the ceiling.
+fn through_the_camera(blur_px: f64, brighter: f64) -> (focus::Reading, Option<u8>, Option<f64>) {
+    let (id, seed, offset) = TRIALS[1];
+    let (cx, cy) = (
+        (f64::from(CAMERA.width) - 1.0) / 2.0,
+        (f64::from(CAMERA.height) - 1.0) / 2.0,
+    );
+    let face_out =
+        Rotation3::from_matrix_unchecked(Matrix3::from_diagonal(&Vector3::new(1.0, -1.0, -1.0)));
+    let tag = Placed {
+        payload: Payload::Bits(render::tag36h11_code(id)),
+        rotation: Rotation3::new(Vector3::new(0.05, 0.0, 0.1)) * face_out,
+        translation_m: CAMERA.point_at(cx + offset.0, cy + offset.1, 1.5),
+        black: 25.0,
+        white: 210.0,
+    };
+    let optics = Optics {
+        blur_px,
+        exposure: 1.0,
+    };
+    let mut image = CAMERA.render(&[tag], optics, seed);
+    for pixel in &mut image.pixels {
+        *pixel = tone(f64::from(*pixel) * brighter);
+    }
+    let mut detector = Detector::new(16).unwrap();
+    let found = detector.detect(&image).unwrap();
+    let Some(detection) = found.iter().find(|d| d.id == id) else {
+        return (focus::Reading::NoTag, None, None);
+    };
+    let tags = [visor::wire::Tag {
+        id: detection.id as u16,
+        hamming: 0,
+        decision_margin: 50.0,
+        corners: detection.corners.map(|c| c as f32),
+        poses: None,
+    }];
+    let measured = focus::measure(&image, &tags);
+    let white = measured.light().map(|l| l.white);
+    let shape = white.and_then(|white| {
+        let down = 130.0 / f64::from(white.max(1));
+        let mut scaled = image.clone();
+        for pixel in &mut scaled.pixels {
+            *pixel = (f64::from(*pixel) * down).round() as u8;
+        }
+        focus::edge_px(&scaled, &tags[0].corners)
+    });
+    (measured.reading(), white, shape)
+}
+
+#[test]
+fn an_overexposed_tag_never_reads_sharper_than_the_same_tag_well_exposed() {
+    use visor::stream::light::TOO_BRIGHT_ABOVE;
+    // At each blur: the tag well exposed (its white about 130, the dial's target), then brighter
+    // and brighter through the camera's squeezed, clipping response.
+    for blur_px in [0.0, 0.5, 1.0] {
+        let (well, white, _) = through_the_camera(blur_px, 0.62);
+        let well = well
+            .edge_px()
+            .unwrap_or_else(|| panic!("blur {blur_px}: well exposed, white {white:?}: {well:?}"));
+        println!("blur {blur_px}: well exposed {well:.3} px, white {white:?}");
+        for brighter in [0.7, 0.8, 0.85, 0.9, 1.0, 1.2, 1.5, 2.0, 3.0] {
+            let (reading, white, shape) = through_the_camera(blur_px, brighter);
+            println!("  x{brighter}: {reading:?}, white {white:?}, its shape reads {shape:?}");
+            let white = white.expect("the tag is found");
+            let shape = shape.expect("its shape is measured");
+            // The response itself, as the camera's: true to a white of about 170, falsely sharp
+            // past it, as the camera read.
+            if white <= TOO_BRIGHT_ABOVE {
+                assert!(
+                    shape >= well * 0.97,
+                    "x{brighter}: shape {shape:.3}, {well:.3}"
+                );
+            }
+            if (185..250).contains(&white) {
+                assert!(
+                    shape < well * 0.95,
+                    "x{brighter}: shape {shape:.3}, {well:.3}"
+                );
+            }
+            // Past the trusted white, a reading doesn't count at all; below it, one that counts
+            // is within a few percent of the well exposed one.
+            if let Some(width) = reading.edge_px() {
+                assert!(
+                    (width - well).abs() <= well * 0.03,
+                    "blur {blur_px}, x{brighter}: {width:.3} against {well:.3}, white {white}"
+                );
+            }
+            if white > TOO_BRIGHT_ABOVE {
+                assert_eq!(reading, focus::Reading::TooBright, "x{brighter}");
+            }
+        }
+    }
 }

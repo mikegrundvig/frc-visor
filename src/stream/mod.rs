@@ -9,11 +9,15 @@
 //! ([`picture`]) at a lower priority ([`view`]). The server ([`server`]) sends each watcher the
 //! newest picture whenever its connection is ready, so a slow watcher skips pictures.
 
+pub mod dial;
 pub mod feed;
 pub mod focus;
+pub mod light;
 pub mod picture;
 pub mod server;
+pub mod step;
 pub mod view;
+pub mod words;
 
 /// The live view's port: inside FRC's 5800 to 5810 for teams, beside Spotter's 5808.
 pub const PORT: u16 = 5809;
