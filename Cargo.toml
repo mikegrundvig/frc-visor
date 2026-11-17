@@ -37,7 +37,7 @@ toml = { version = "1", features = ["preserve_order"] }
 v4l = "0.14"
 # MJPEG frames, from a camera that offers its size at its rate only compressed (on USB 2), decoded
 # to luma on the capture thread.
-zune-jpeg = "0.4"
+zune-jpeg = "0.5"
 
 [build-dependencies]
 cc = "1"
