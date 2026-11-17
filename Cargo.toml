@@ -29,6 +29,8 @@ percent-encoding = "2"
 # Tells systemd Visor is ready and alive (src/watchdog.rs).
 sd-notify = "0.5"
 serde = { version = "1", features = ["derive"] }
+# The live view's status document and a frame's facts, as JSON.
+serde_json = "1"
 sha2 = "0.11"
 socket2 = "0.6"
 tokio = { version = "1", features = ["net", "rt", "sync", "time"] }
@@ -44,7 +46,6 @@ cc = "1"
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-serde_json = "1"
 ureq = "3"
 
 # A panic in any thread ends the process at once, so systemd restarts Visor (deploy/visor.service)

@@ -166,6 +166,127 @@ fn camera(name: &str, index: u8) -> Camera {
     }
 }
 
+/// Sets `stop` when dropped: at the end of a test's scope, or as a failing test unwinds out of it.
+struct StopOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// How long the whole service may take to stop once asked. Its slowest loops wait half a second for
+/// a frame or a hand-off before they look at the flag again, and systemd gives Visor 90 s.
+const STOPS_WITHIN: Duration = Duration::from_secs(5);
+
+#[test]
+fn the_service_stops_within_seconds_of_being_asked_with_its_page_watched_and_settings_asked() {
+    // On a thread of its own, holding all it uses, so a service that never stops fails this test
+    // with a message rather than hanging it: the stuck thread is left behind as the test ends.
+    let (done, finished) = std::sync::mpsc::channel::<Duration>();
+    thread::spawn(move || {
+        let cameras = [camera("front", 3), camera("back left", 8)];
+        let robot = UdpSocket::bind("127.0.0.1:0").unwrap();
+        robot
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let listener = service::listen("127.0.0.1:0".parse().unwrap()).expect("a free port");
+        let view = listener.local_addr().unwrap();
+        let wired: Vec<Wired<Scene>> = cameras
+            .iter()
+            .zip(["one-tag", "steep-far"])
+            .map(|(camera, scene)| Wired {
+                camera,
+                source: Scene {
+                    image: common::scene(scene).image,
+                },
+                detector: Detector::new(camera.min_tag_px).unwrap(),
+                socket: UdpSocket::bind("127.0.0.1:0").unwrap(),
+                latest: Latest::new(),
+            })
+            .collect();
+        let stop = AtomicBool::new(false);
+        let robot_address = robot.local_addr().unwrap();
+        let options = Options {
+            try_settings: true,
+            ..Options::default()
+        };
+        let mut asked_at = None;
+        thread::scope(|scope| {
+            let stop = &stop;
+            let _stops = StopOnDrop(stop);
+            let service = scope.spawn(move || {
+                service::run(
+                    wired,
+                    robot_address,
+                    Some(listener),
+                    options,
+                    None,
+                    &Synced,
+                    stop,
+                )
+            });
+            // Everything running: frames to the robot, a watcher on each camera's stream, the page's
+            // status read, and "Set exposure and gain" and settings by hand asked of one camera.
+            let mut buffer = [0u8; 2048];
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut sent = 0;
+            while sent < 10 {
+                assert!(Instant::now() < deadline, "no frames reached the robot");
+                if robot.recv(&mut buffer).is_ok() {
+                    sent += 1;
+                }
+            }
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .http_status_as_error(false)
+                .build()
+                .into();
+            let mut streams = Vec::new();
+            for path in ["/stream/front", "/stream/back%20left"] {
+                let mut response = agent.get(format!("http://{view}{path}")).call().unwrap();
+                let mut part = [0u8; 64];
+                let _ = io::Read::read(&mut response.body_mut().as_reader(), &mut part);
+                streams.push(response);
+            }
+            thread::sleep(Duration::from_millis(500));
+            for path in ["/set/front", "/settings/front?gain=2"] {
+                let answer = agent
+                    .post(format!("http://{view}{path}"))
+                    .send_empty()
+                    .unwrap();
+                assert!(answer.status().is_success(), "{path}: {}", answer.status());
+            }
+            let status = agent.get(format!("http://{view}/status")).call().unwrap();
+            assert_eq!(status.status(), 200);
+            asked_at = Some(Instant::now());
+            stop.store(true, Ordering::Relaxed);
+            service.join().expect("the service ran without panicking");
+            drop(streams);
+        });
+        let _ = done.send(asked_at.expect("asked to stop").elapsed());
+    });
+    use std::sync::mpsc::RecvTimeoutError;
+    match finished.recv_timeout(Duration::from_secs(40)) {
+        Ok(took) => {
+            println!("stopped {took:?} after it was asked");
+            assert!(
+                took < STOPS_WITHIN,
+                "the service took {took:?} to stop, more than {STOPS_WITHIN:?}"
+            );
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            panic!(
+                "the test's own thread failed before the service was stopped: its panic is above"
+            )
+        }
+        Err(RecvTimeoutError::Timeout) => panic!(
+            "the service didn't stop within 40 s of starting: a thread isn't looking at the stop \
+             flag, or two are holding each other's locks"
+        ),
+    }
+}
+
 /// Whether the live view's port is free for the service, or taken by another program.
 enum Port {
     Free,
@@ -229,6 +350,9 @@ fn each_camera_s_frames_go_out_under_its_own_index_whether_or_not_the_view_has_i
         let mut measured = None;
         thread::scope(|scope| {
             let stop = &stop;
+            // Whatever happens below, failing included, the service is told to stop, so a failure
+            // is reported rather than waited on for good as the scope joins the service.
+            let _stops = StopOnDrop(stop);
             scope.spawn(move || {
                 service::run(
                     wired,
@@ -250,18 +374,20 @@ fn each_camera_s_frames_go_out_under_its_own_index_whether_or_not_the_view_has_i
                 }
             }
             if let Some(view) = view {
-                let page = ureq::get(format!("http://{view}/"))
+                let status = ureq::get(format!("http://{view}/status"))
                     .call()
                     .unwrap()
                     .body_mut()
                     .read_to_string()
                     .unwrap();
-                for (camera, _, _) in &cameras {
-                    assert!(
-                        page.contains(&format!(">{}</a>", camera.name)),
-                        "{name}: {page}"
-                    );
-                }
+                let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+                let names: Vec<&str> = status["cameras"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|camera| camera["name"].as_str().unwrap())
+                    .collect();
+                assert_eq!(names, ["front", "back left"], "{name}: {status}");
             }
             if view.is_some() {
                 measured = Some(Measured::now());

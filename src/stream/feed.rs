@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::brightness::Brightness;
 use crate::image::GrayImage;
+use crate::link_state::LinkState;
 use crate::settings::InEffect;
 use crate::wire::Tag;
 
@@ -24,6 +25,28 @@ pub struct Detected {
     pub sequence: u32,
     /// When it was captured, on `CLOCK_MONOTONIC`.
     pub monotonic_nanos: i64,
+    /// The camera's USB link, as the frame was sent to the robot with it.
+    pub link: LinkState,
+    /// Whether the board's clock was synced to the robot's when it was sent.
+    pub clock: Clock,
+}
+
+/// Whether the board's clock is synced to the robot's (chrony), as a frame was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Clock {
+    Synced,
+    #[default]
+    NotSynced,
+}
+
+impl Clock {
+    pub fn of(synced: bool) -> Clock {
+        if synced {
+            Clock::Synced
+        } else {
+            Clock::NotSynced
+        }
+    }
 }
 
 /// The slot, and whether the view wants a frame.
@@ -101,6 +124,8 @@ mod tests {
             brightness: Brightness::default(),
             sequence,
             monotonic_nanos: 0,
+            link: LinkState::default(),
+            clock: Clock::Synced,
         }
     }
 

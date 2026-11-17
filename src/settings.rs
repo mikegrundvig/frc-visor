@@ -119,14 +119,27 @@ pub struct InEffect {
 /// frame. A trial lasts until the camera is opened again (Visor restarted, the camera replugged),
 /// which sets what the configuration says: the configuration is still what a camera does.
 ///
-/// It also carries the other way the ranges the camera takes an exposure and gain in, which the
-/// capture thread says each time it opens the camera, so the page and the focus step keep to them.
+/// It also carries the other way the ranges the camera takes an exposure and gain in, and its USB
+/// serial number, which the capture thread says each time it opens the camera, so the page and
+/// "Set exposure and gain" keep to them.
 #[derive(Debug, Default)]
 pub struct Trial {
     /// Checked once a frame by the capture thread, so an untried camera costs it one load.
     asked: AtomicBool,
-    wanted: Mutex<Option<Asked>>,
+    wanted: Mutex<Option<Wanted>>,
     ranges: Mutex<Option<Ranges>>,
+    serial: Mutex<Option<String>>,
+    configured: Mutex<Option<InEffect>>,
+}
+
+/// What the capture thread is asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wanted {
+    /// These values, over what the camera has.
+    Values(Tried),
+    /// The configuration's settings again, as the camera was opened with: the only way back to the
+    /// camera's own automatic exposure, which a value tried turns off.
+    Configuration,
 }
 
 /// What a trial changes: each of the two that's given, the other left as it is.
@@ -134,24 +147,6 @@ pub struct Trial {
 pub struct Tried {
     pub exposure_us: Option<u32>,
     pub gain: Option<i64>,
-}
-
-/// What the capture thread is asked to set, and what it starts from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Asked {
-    pub from: Base,
-    pub tried: Tried,
-}
-
-/// What a trial's values are set over.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Base {
-    /// The camera as it is now, with what was tried before.
-    #[default]
-    AsItIs,
-    /// The configuration's settings, as the camera was opened with: the only way back to the
-    /// camera's own automatic exposure, which a tried exposure turns off.
-    Configured,
 }
 
 /// The values a camera's control takes, as it says: from `least` to `most`.
@@ -199,29 +194,26 @@ impl Trial {
     /// an earlier one's values where it gives them.
     pub fn ask(&self, tried: Tried) {
         let mut wanted = self.wanted.lock().unwrap();
-        let before = wanted.unwrap_or_default();
-        *wanted = Some(Asked {
-            from: before.from,
-            tried: Tried {
-                exposure_us: tried.exposure_us.or(before.tried.exposure_us),
-                gain: tried.gain.or(before.tried.gain),
-            },
-        });
+        let before = match *wanted {
+            Some(Wanted::Values(before)) => before,
+            _ => Tried::default(),
+        };
+        *wanted = Some(Wanted::Values(Tried {
+            exposure_us: tried.exposure_us.or(before.exposure_us),
+            gain: tried.gain.or(before.gain),
+        }));
         self.asked.store(true, Ordering::Release);
     }
 
-    /// For the live view: asks the capture thread to go back to the configuration's settings, then
-    /// set these over them. It replaces anything asked before that the thread hasn't set.
-    pub fn ask_configured(&self, tried: Tried) {
-        *self.wanted.lock().unwrap() = Some(Asked {
-            from: Base::Configured,
-            tried,
-        });
+    /// For the live view: asks the capture thread to set the configuration's settings again. It
+    /// replaces anything asked before that the thread hasn't set.
+    pub fn ask_configuration(&self) {
+        *self.wanted.lock().unwrap() = Some(Wanted::Configuration);
         self.asked.store(true, Ordering::Release);
     }
 
     /// For the capture thread: what's been asked since it last looked, if anything.
-    pub fn take(&self) -> Option<Asked> {
+    pub fn take(&self) -> Option<Wanted> {
         if !self.asked.load(Ordering::Relaxed) {
             return None;
         }
@@ -238,6 +230,28 @@ impl Trial {
     /// The ranges the camera takes an exposure and gain in: none until it has been opened.
     pub fn ranges(&self) -> Option<Ranges> {
         *self.ranges.lock().unwrap()
+    }
+
+    /// For the capture thread, each time it opens the camera: its USB serial number, if it has one,
+    /// for the page to name it by.
+    pub fn offer_serial(&self, serial: Option<String>) {
+        *self.serial.lock().unwrap() = serial;
+    }
+
+    /// The camera's USB serial number, as last opened.
+    pub fn serial(&self) -> Option<String> {
+        self.serial.lock().unwrap().clone()
+    }
+
+    /// For the capture thread, each time it opens the camera: the exposure and gain its
+    /// configuration gave it, as read back, before anything was tried.
+    pub fn offer_configured(&self, in_effect: InEffect) {
+        *self.configured.lock().unwrap() = Some(in_effect);
+    }
+
+    /// The exposure and gain the configuration gave the camera when it was last opened.
+    pub fn configured(&self) -> Option<InEffect> {
+        *self.configured.lock().unwrap()
     }
 }
 
@@ -1124,35 +1138,24 @@ mod tests {
             exposure_us: Some(1500),
             gain: Some(2),
         };
-        assert_eq!(
-            trial.take(),
-            Some(Asked {
-                from: Base::AsItIs,
-                tried: both,
-            })
-        );
+        assert_eq!(trial.take(), Some(Wanted::Values(both)));
         assert_eq!(trial.take(), None, "taken once");
-
-        // Back to the configuration's: it replaces what was asked before, and a later ask by
-        // value is set over it.
+        // The configuration's again: it replaces what was asked, and a value asked after it is
+        // asked on its own.
         trial.ask(both);
-        trial.ask_configured(Tried {
-            exposure_us: None,
-            gain: Some(16),
-        });
+        trial.ask_configuration();
+        assert_eq!(trial.take(), Some(Wanted::Configuration));
+        trial.ask_configuration();
         trial.ask(Tried {
             exposure_us: None,
             gain: Some(20),
         });
         assert_eq!(
             trial.take(),
-            Some(Asked {
-                from: Base::Configured,
-                tried: Tried {
-                    exposure_us: None,
-                    gain: Some(20),
-                },
-            })
+            Some(Wanted::Values(Tried {
+                exposure_us: None,
+                gain: Some(20),
+            }))
         );
     }
 

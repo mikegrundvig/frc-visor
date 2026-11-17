@@ -1,14 +1,16 @@
-//! Dialling in exposure and gain for focusing, against a simulated camera with a real one's
+//! "Set exposure and gain": the configured exposure kept and the gain steered, against a simulated
+//! camera with a real one's
 //! traits: brightness goes as exposure times gain, its response is squeezed near the top and clips,
 //! a change shows in the frames a few frames after it's asked for (and in the pixels later still),
 //! and its frame rate falls once the exposure is longer than a frame. Each room is run from the
-//! camera's configured settings, as the focus step starts from them, and fed to the dial at the
-//! live view's 10 pictures a second, as the view's thread feeds it.
+//! settings in effect when it's asked for, and fed to the dial at the live view's 10 pictures a
+//! second, as the view's thread feeds it.
 
 use std::time::Duration;
 
+use visor::brightness::Brightness;
 use visor::settings::{InEffect, Range, Ranges, Tried};
-use visor::stream::dial::{BAND, Dial, Goal, Seen, State, Why};
+use visor::stream::dial::{BAND, Dial, Exposure, Seen, Start, State, Why};
 use visor::stream::light;
 
 /// How the camera's gain amplifies.
@@ -191,7 +193,7 @@ impl Camera {
 
     /// The next frame: its time moves on by the frame's interval, which an exposure longer than a
     /// frame stretches; gain never does.
-    fn next(&mut self) -> (InEffect, Option<u8>) {
+    fn next(&mut self) -> (InEffect, Option<u8>, Brightness) {
         let interval = (1.0 / self.kind.fps).max(f64::from(self.pixels.exposure_us) / 1e6 + 1e-4);
         self.slowest = self.slowest.max(interval);
         self.now_nanos += (interval * 1e9) as i64;
@@ -225,7 +227,14 @@ impl Camera {
             gain: Some(self.reported.gain as i32),
             auto_exposure: Some(false),
         };
-        (in_effect, found.then_some(white))
+        // The frame round the tag is lit as the tag's white is: its brightest 1% that white, its
+        // middle half as bright, and a third of it clipped once that white clips.
+        let frame = Brightness {
+            median: tone(linear * 0.5),
+            high: tone(linear),
+            clipped: if tone(linear) >= 250 { 3333 } else { 0 },
+        };
+        (in_effect, found.then_some(white), frame)
     }
 }
 
@@ -253,7 +262,7 @@ fn run(
     let mut next_view = 0i64;
     let mut done_at: Option<i64> = None;
     while (camera.now_nanos as f64) < seconds * 1e9 {
-        let (in_effect, white) = camera.next();
+        let (in_effect, white, brightness) = camera.next();
         if camera.now_nanos < next_view {
             continue;
         }
@@ -262,13 +271,23 @@ fn run(
             in_effect,
             white,
             at_nanos: camera.now_nanos,
+            brightness,
         };
         let answer = dial.step(&seen, &camera.kind.ranges, period);
+        // Gave up: what it started from goes back, as the view asks for it.
+        if let Some(was) = answer.put_back {
+            let tried = Tried {
+                exposure_us: was.exposure_us,
+                gain: was.gain.map(i64::from),
+            };
+            asks.push((camera.now_nanos, tried));
+            camera.ask(tried);
+        }
         if let Some(tried) = answer.ask {
             asks.push((camera.now_nanos, tried));
             camera.ask(tried);
         }
-        if matches!(answer.state, State::Settled | State::CouldNot(_)) {
+        if matches!(answer.state, State::Settled(_) | State::CouldNot(_)) {
             let at = *done_at.get_or_insert(camera.now_nanos);
             if camera.now_nanos - at >= on_after.as_nanos() as i64 {
                 break;
@@ -278,12 +297,12 @@ fn run(
     (asks, dial.state(), camera.now_nanos as f64 / 1e9)
 }
 
-fn dial_in(kind: Kind, room: Room, start: Setting) -> Run {
-    let mut dial = Dial::new(Goal::Focusing);
+fn dial_in(kind: Kind, room: Room, start: Setting, configured: Start) -> Run {
+    let mut dial = Dial::new(configured);
     let mut camera = Camera::new(kind, room, start);
     // Two seconds on past the end: the pixels catch up, and nothing more is asked.
     let (asks, state, seconds) = run(&mut dial, &mut camera, 40.0, Duration::from_secs(2));
-    let (_, white) = camera.next();
+    let (_, white, _) = camera.next();
     Run {
         state,
         asks,
@@ -296,31 +315,59 @@ fn dial_in(kind: Kind, room: Room, start: Setting) -> Run {
 /// What a run is expected to end in.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Ends {
-    /// In the band, the gain at its least.
-    AtLeastGain,
-    /// In the band, the exposure as long as a frame allows and the gain raised.
-    GainRaised,
-    /// Short of the band at the camera's limits, but in light good to focus in.
+    /// In the band at the configured exposure: only the gain changed.
+    Kept,
+    /// In the band, the gain run out at its most and the exposure made longer, never past a frame.
+    LongerExposure,
+    /// In the band, the gain run out at its least and the exposure made shorter.
+    ShorterExposure,
+    /// Settled with the gain at its least and the exposure shortened, near the band in light good
+    /// enough to measure focus.
+    ShortestExposure,
+    /// In the band, from the ladder, as no exposure is configured.
+    Chosen,
+    /// Short of the band at the camera's limits, but in light good enough to measure focus.
     Short,
     CouldNot(Why),
 }
 
 #[test]
-fn the_dial_lights_the_tag_for_focusing_in_every_room_or_says_why_it_can_t() {
+fn the_configured_exposure_is_kept_and_the_gain_steered_in_every_room_or_it_says_why_not() {
+    // As a robot's configuration has it: a short exposure against motion blur, and a gain.
     let configured = Setting {
-        exposure_us: 1000,
+        exposure_us: 2000,
         gain: 40,
     };
-    let other_start = Setting {
-        exposure_us: 2000,
-        gain: 20,
+    let kept = Start::Exposure(2000);
+    let washed_out = Setting {
+        exposure_us: 200_000,
+        gain: 255,
     };
-    // Each row: the camera, the room, its settings when the step starts, and how it ends.
+    // A bright venue: at the configured settings the tag is washed out, white and black alike, so
+    // no tag is seen; the frame clips, so the search walks down and finds it.
+    let venue = Room {
+        name: "bright venue, tag washed out",
+        white_per_ms: 1000.0,
+        tag: true,
+    };
+    let workable = Room {
+        name: "dark but workable",
+        white_per_ms: 0.19,
+        tag: true,
+    };
+    // Each row: the camera, the room, its settings when asked, what the dial starts from, and how
+    // it ends.
     let rows = [
-        (MEASURED, DAYLIT, configured, Ends::AtLeastGain),
-        (MEASURED, DIM, configured, Ends::GainRaised),
-        (MEASURED, DARK, configured, Ends::CouldNot(Why::TooDark)),
-        (MEASURED, BRIGHT, configured, Ends::AtLeastGain),
+        (MEASURED, DAYLIT, configured, kept, Ends::Kept),
+        (MEASURED, DIM, configured, kept, Ends::LongerExposure),
+        (
+            MEASURED,
+            DARK,
+            configured,
+            kept,
+            Ends::CouldNot(Why::TooDark),
+        ),
+        (MEASURED, BRIGHT, configured, kept, Ends::ShorterExposure),
         (
             MEASURED,
             SUNLIT,
@@ -328,56 +375,68 @@ fn the_dial_lights_the_tag_for_focusing_in_every_room_or_says_why_it_can_t() {
                 exposure_us: 100,
                 gain: 16,
             },
+            Start::Exposure(100),
             Ends::CouldNot(Why::TooBright),
         ),
-        (MEASURED, NO_TAG, configured, Ends::CouldNot(Why::NoTag)),
-        // Started where no tag can be seen: washed out, then found from the ladder's short start.
         (
             MEASURED,
-            DAYLIT,
-            Setting {
-                exposure_us: 200_000,
-                gain: 255,
-            },
-            Ends::AtLeastGain,
+            NO_TAG,
+            configured,
+            kept,
+            Ends::CouldNot(Why::NoTag),
         ),
-        (OTHER, DAYLIT, other_start, Ends::AtLeastGain),
-        (OTHER, BRIGHT, other_start, Ends::AtLeastGain),
-        (OTHER, DIM, other_start, Ends::GainRaised),
-        (OTHER, DARK, other_start, Ends::CouldNot(Why::TooDark)),
-        // Dark enough that the most gain falls short of the band, but light enough to focus in.
+        // Settled, the exposure shortened as far as it goes: its 100 µs steps there are too coarse
+        // to land in the band, so it stops on the nearer side where the light is still good.
+        (MEASURED, venue, configured, kept, Ends::ShortestExposure),
+        // The other camera's shortest exposure, 0.3 ms, is still too bright there: it says so,
+        // and puts back what it started from.
         (
             OTHER,
-            Room {
-                name: "dark but workable",
-                white_per_ms: 0.19,
-                tag: true,
-            },
-            other_start,
-            Ends::Short,
+            venue,
+            configured,
+            kept,
+            Ends::CouldNot(Why::TooBright),
         ),
-        (OTHER, NO_TAG, other_start, Ends::CouldNot(Why::NoTag)),
+        // Settings tried by hand before: back to the configured exposure.
+        (MEASURED, DAYLIT, washed_out, kept, Ends::Kept),
+        // No exposure configured (the camera's own automatic exposure): from the ladder.
+        (MEASURED, DAYLIT, configured, Start::Ladder, Ends::Chosen),
+        (MEASURED, DAYLIT, washed_out, Start::Ladder, Ends::Chosen),
+        (
+            MEASURED,
+            NO_TAG,
+            configured,
+            Start::Ladder,
+            Ends::CouldNot(Why::NoTag),
+        ),
+        (OTHER, DAYLIT, configured, kept, Ends::Kept),
+        (OTHER, DIM, configured, kept, Ends::Kept),
+        (OTHER, BRIGHT, configured, kept, Ends::ShorterExposure),
+        (OTHER, DARK, configured, kept, Ends::CouldNot(Why::TooDark)),
+        (OTHER, workable, configured, kept, Ends::Short),
+        (OTHER, NO_TAG, configured, kept, Ends::CouldNot(Why::NoTag)),
     ];
-    for (kind, room, start, ends) in rows {
-        let what = format!("{} in a {} room", kind.name, room.name);
-        let run = dial_in(kind, room, start);
+    for (kind, room, start, from, ends) in rows {
+        let what = format!("{} in a {} room from {from:?}", kind.name, room.name);
+        let run = dial_in(kind, room, start, from);
         println!(
-            "{what}: {:?} after {:.1} s, {} asks, white {:?}, last {:?}",
+            "{what}: {:?} after {:.1} s, {} asks, white {:?}, at {:?}",
             run.state,
             run.seconds,
             run.asks.len(),
             run.white,
-            run.asks.last()
+            run.camera.pixels
         );
         let exposure = kind.ranges.exposure_us.unwrap();
         let gain = kind.ranges.gain.unwrap();
         let frame_us = 1e6 / kind.fps;
+        let longest = ((frame_us * 0.96) as i64 / 100 * 100).min(exposure.most);
         // Never past the camera's ranges, never an exposure longer than a frame (so the frame
         // rate holds), and never an ask before the last could show in the pixels.
         for (at, tried) in &run.asks {
             let us = i64::from(tried.exposure_us.unwrap());
             assert!(
-                (exposure.least..=exposure.most).contains(&us) && (us as f64) < frame_us,
+                (exposure.least..=longest).contains(&us),
                 "{what}: {tried:?} at {at}"
             );
             assert!(gain.least <= tried.gain.unwrap() && tried.gain.unwrap() <= gain.most);
@@ -398,10 +457,54 @@ fn the_dial_lights_the_tag_for_focusing_in_every_room_or_says_why_it_can_t() {
         }
         assert!(run.seconds < 30.0, "{what}: {:.1} s", run.seconds);
         let pixels = run.camera.pixels;
+        let in_band = |white: Option<u8>| {
+            let white = white.expect("a tag in view");
+            assert!((BAND.0..=BAND.1).contains(&white), "{what}: white {white}");
+        };
         match ends {
-            Ends::CouldNot(why) => assert_eq!(run.state, State::CouldNot(why), "{what}"),
+            Ends::CouldNot(why) => {
+                assert_eq!(run.state, State::CouldNot(why), "{what}");
+                // Only a settled dial leaves new settings: what it started from is back.
+                assert_eq!(pixels, start, "{what}: put back");
+            }
+            Ends::Kept => {
+                assert_eq!(run.state, State::Settled(Exposure::Kept), "{what}");
+                in_band(run.white);
+                assert_eq!(pixels.exposure_us, 2000, "{what}");
+                // The exposure never moved: every ask kept it.
+                assert!(
+                    run.asks.iter().all(|(_, t)| t.exposure_us == Some(2000)),
+                    "{what}"
+                );
+            }
+            Ends::LongerExposure => {
+                assert_eq!(run.state, State::Settled(Exposure::Moved), "{what}");
+                in_band(run.white);
+                assert_eq!(pixels.gain, gain.most, "{what}");
+                assert!(pixels.exposure_us > 2000, "{what}");
+            }
+            Ends::ShorterExposure => {
+                assert_eq!(run.state, State::Settled(Exposure::Moved), "{what}");
+                in_band(run.white);
+                assert_eq!(pixels.gain, gain.least, "{what}");
+                assert!(pixels.exposure_us < 2000, "{what}");
+            }
+            Ends::ShortestExposure => {
+                assert_eq!(run.state, State::Settled(Exposure::Moved), "{what}");
+                let white = run.white.expect("a tag in view");
+                assert!(
+                    (light::TOO_DIM_BELOW..=light::TOO_BRIGHT_ABOVE).contains(&white),
+                    "{what}: {white}"
+                );
+                assert_eq!(pixels.gain, gain.least, "{what}");
+                assert!(pixels.exposure_us < 2000, "{what}");
+            }
+            Ends::Chosen => {
+                assert_eq!(run.state, State::Settled(Exposure::Chosen), "{what}");
+                in_band(run.white);
+            }
             Ends::Short => {
-                assert_eq!(run.state, State::Settled, "{what}");
+                assert!(matches!(run.state, State::Settled(_)), "{what}");
                 let white = run.white.expect("a tag in view");
                 assert!(
                     white < BAND.0 && white >= light::TOO_DIM_BELOW,
@@ -409,62 +512,54 @@ fn the_dial_lights_the_tag_for_focusing_in_every_room_or_says_why_it_can_t() {
                 );
                 assert_eq!(pixels.gain, gain.most, "{what}");
             }
-            Ends::AtLeastGain | Ends::GainRaised => {
-                assert_eq!(run.state, State::Settled, "{what}");
-                let white = run.white.expect("a tag in view");
-                assert!((BAND.0..=BAND.1).contains(&white), "{what}: white {white}");
-                assert!((light::TOO_DIM_BELOW..=light::TOO_BRIGHT_ABOVE).contains(&white));
-                if ends == Ends::AtLeastGain {
-                    assert_eq!(pixels.gain, gain.least, "{what}");
-                } else {
-                    assert!(pixels.gain > gain.least, "{what}");
-                    let longest = (frame_us * 0.96) as u32 / 100 * 100;
-                    let longest = longest.min(exposure.most as u32);
-                    assert_eq!(pixels.exposure_us, longest, "{what}");
-                }
-            }
         }
     }
 }
 
 #[test]
-fn once_settled_it_holds_still_and_set_it_for_me_again_dials_in_afresh() {
+fn once_settled_it_holds_still_and_asked_again_it_steers_afresh() {
     let start = Setting {
-        exposure_us: 1000,
+        exposure_us: 2000,
         gain: 40,
     };
-    let mut dial = Dial::new(Goal::Focusing);
+    let mut dial = Dial::new(Start::Exposure(2000));
     let mut camera = Camera::new(MEASURED, DAYLIT, start);
     let (_, state, _) = run(&mut dial, &mut camera, 30.0, Duration::ZERO);
-    assert_eq!(state, State::Settled);
+    assert_eq!(state, State::Settled(Exposure::Kept));
     let settled = camera.pixels;
 
     // The light changes: a cloud, a lamp. Settled, it doesn't chase it.
-    camera.room.white_per_ms = DAYLIT.white_per_ms * 2.0;
+    camera.room.white_per_ms = DAYLIT.white_per_ms * 1.5;
     let more = camera.now_nanos as f64 / 1e9 + 5.0;
     let (asks, state, _) = run(&mut dial, &mut camera, more, Duration::from_secs(5));
     assert!(asks.is_empty(), "{asks:?}");
-    assert_eq!(state, State::Settled);
+    assert_eq!(state, State::Settled(Exposure::Kept));
     assert_eq!(camera.pixels, settled);
 
-    // Set it for me again: a fresh dial, from what's in effect, into the band in the new light.
-    let mut again = Dial::new(Goal::Focusing);
+    // Asked again: a fresh dial, the exposure still kept, less gain for the brighter light.
+    let mut again = Dial::new(Start::Exposure(2000));
     let more = camera.now_nanos as f64 / 1e9 + 30.0;
     let (asks, state, _) = run(&mut again, &mut camera, more, Duration::from_secs(2));
-    assert_eq!(state, State::Settled);
+    assert_eq!(state, State::Settled(Exposure::Kept));
     assert!(!asks.is_empty());
-    assert!(camera.pixels.exposure_us < settled.exposure_us);
-    let (_, white) = camera.next();
+    assert_eq!(camera.pixels.exposure_us, 2000);
+    assert!(
+        camera.pixels.gain < settled.gain,
+        "{:?} {settled:?}",
+        camera.pixels
+    );
+    let (_, white, _) = camera.next();
     assert!((BAND.0..=BAND.1).contains(&white.unwrap()), "{white:?}");
 }
 
 #[test]
 fn a_camera_without_an_exposure_control_is_said_at_once() {
-    let mut dial = Dial::new(Goal::Focusing);
+    let mut dial = Dial::new(Start::Exposure(2000));
     let seen = Seen {
         in_effect: InEffect::default(),
         white: Some(100),
         at_nanos: 0,
+        brightness: Brightness::default(),
     };
     let ranges = Ranges {
         exposure_us: None,

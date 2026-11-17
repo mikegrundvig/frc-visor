@@ -1,29 +1,44 @@
-//! Dialling in: finding an exposure and gain that light a tag well for focusing, frame by frame.
-//! It's a state machine and nothing else: each frame it is told the settings in effect, the
-//! camera's ranges, the frame period and the measured tag's white, and answers with the settings
-//! to ask for next, if any, and a state to show. It never touches a camera; the live view asks for
-//! what it answers ([`super::step`]).
+//! Setting exposure and gain: finding settings that light a tag well, frame by frame, for the
+//! page's "Set exposure and gain". It's a state machine and nothing else: each frame it is told the
+//! settings in effect, the camera's ranges, the frame period and the measured tag's white, and
+//! answers with the settings to ask for next, if any, and a state to show. It never touches a
+//! camera; the live view asks for what it answers.
 //!
-//! For focusing, gain goes to the camera's least, since gain raises noise and also reads falsely
-//! sharp, and the exposure is steered until the tag's white is in [`BAND`]. The exposure is never
-//! longer than a frame (less a margin), so the frame rate holds; only when it is that long and the
-//! tag is still dim does gain rise. With no tag yet, it walks a ladder of exposures, doubling from
-//! a short one, then of gains, until one is seen. After each ask it waits for the frames to say the
-//! change is in effect, and a little longer for the pixels to follow, before it looks again. Once
-//! the white is in the band it is settled and does nothing more, whatever the light does after.
+//! The exposure is the one the camera's configuration asks for, which is chosen for motion blur,
+//! and the gain is steered until the tag's white is in [`BAND`]: gain hardly moves the focus number
+//! in good light (measured), so it's the one to spend. Only when the gain runs out, at either end,
+//! does the exposure move, and never past a frame's length (less a margin), so the frame rate holds;
+//! the state then says it moved. A camera configured with no exposure (its own automatic exposure)
+//! starts from a ladder: exposures doubling from a short one at the least gain, then gains, until
+//! a tag is seen; the exposure it's seen at is then kept as a configured one is. After each ask it
+//! waits for the frames to say the change is in effect, and a little longer for the pixels to
+//! follow, before it looks again. Once the white is in the band it is settled and does nothing more,
+//! whatever the light does after.
 
 use std::time::Duration;
 
+use crate::brightness::{self, Brightness};
 use crate::settings::{EXPOSURE_UNIT_US, InEffect, Range, Ranges, Tried};
 use crate::stream::light;
 
-/// What the settings are found for. Only focusing is built: a second goal, the exposure pinned
-/// (short, for a robot that moves) and the gain steered, would be another variant here and another
-/// arm in [`Dial::spread`].
+/// What the dial starts from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Goal {
-    /// The gain at its least and the exposure steered, never longer than a frame.
-    Focusing,
+pub enum Start {
+    /// The exposure the configuration asks for, in microseconds: kept, the gain steered.
+    Exposure(u32),
+    /// No exposure configured: the ladder, then the exposure a tag was first seen at, kept.
+    Ladder,
+}
+
+/// What became of the exposure once settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exposure {
+    /// The configured exposure, kept: only the gain changed.
+    Kept,
+    /// The gain ran out, so the exposure moved from the configured one.
+    Moved,
+    /// None was configured: the dial chose one.
+    Chosen,
 }
 
 /// The tag's white the dial steers into: centred on 130, inside the 90 to 170 a ThriftyCam read a
@@ -70,7 +85,7 @@ const MOST_ASKS: u32 = 30;
 /// What the dial is doing, to show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
-    /// No tag seen yet: trying rung `rung` (from 1) of `rungs`, at this exposure and gain.
+    /// No tag seen yet: trying rung `rung` (from 1) of `rungs`, at this exposure.
     Searching {
         rung: usize,
         rungs: usize,
@@ -79,8 +94,8 @@ pub enum State {
     /// A tag seen: steering its white into the band.
     Steering,
     /// The tag's white is in the band, or as near as the camera's steps and limits allow with the
-    /// light still good to focus in: done.
-    Settled,
+    /// light still good enough to measure focus in: done, and what became of the exposure.
+    Settled(Exposure),
     /// It can't get there, and why.
     CouldNot(Why),
 }
@@ -109,6 +124,8 @@ pub struct Seen {
     pub white: Option<u8>,
     /// When it was captured, in nanoseconds on any steady clock.
     pub at_nanos: i64,
+    /// The whole frame's brightness: with no tag seen, which way to look for one.
+    pub brightness: Brightness,
 }
 
 /// What the dial answers a frame with.
@@ -117,6 +134,9 @@ pub struct Answer {
     /// The settings to ask the camera for now, if any.
     pub ask: Option<Tried>,
     pub state: State,
+    /// Once, as it gives up after asking for anything: the settings it started from, to be set
+    /// again. Only a settled dial leaves new settings.
+    pub put_back: Option<InEffect>,
 }
 
 /// An exposure and gain, as the dial reasons about them.
@@ -139,7 +159,9 @@ struct Waiting {
 /// The dial for one go: made afresh for each.
 #[derive(Debug, Clone)]
 pub struct Dial {
-    goal: Goal,
+    start: Start,
+    /// The exposure kept: the configured one, or the one a tag was first seen at.
+    kept: Option<u32>,
     state: State,
     waiting: Option<Waiting>,
     /// The ladder's rung last asked for, while searching.
@@ -149,6 +171,26 @@ pub struct Dial {
     too_dim: Option<(Setting, u8)>,
     too_bright: Option<(Setting, u8)>,
     asks: u32,
+    /// The settings in effect at its first frame, put back if it can't get there.
+    started: Option<InEffect>,
+    /// The search's rungs, chosen when a search begins by which way the frame says to look.
+    rungs: Vec<Setting>,
+    /// Whether it has said what to put back.
+    put_back: bool,
+}
+
+/// Which way a search for a tag walks the light.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Way {
+    /// A dark frame: up.
+    Up,
+    /// A clipping frame: down.
+    Down,
+    /// Neither: down first, then up from where it started. A frame that is neither dark nor
+    /// clipping with no tag found is likelier to have the tag washed out than too dim to see (a
+    /// tag is found down to 20 grey levels of contrast), and the rungs down are few and shorten
+    /// the exposure, which costs nothing in blur.
+    DownThenUp,
 }
 
 /// The camera's limits as the dial uses them.
@@ -161,15 +203,23 @@ struct Limits {
 }
 
 impl Dial {
-    pub fn new(goal: Goal) -> Dial {
+    pub fn new(start: Start) -> Dial {
+        let kept = match start {
+            Start::Exposure(us) => Some(us),
+            Start::Ladder => None,
+        };
         Dial {
-            goal,
+            start,
+            kept,
             state: State::Steering,
             waiting: None,
             rung: None,
             too_dim: None,
             too_bright: None,
             asks: 0,
+            started: None,
+            rungs: Vec::new(),
+            put_back: false,
         }
     }
 
@@ -180,14 +230,32 @@ impl Dial {
 
     /// Takes a frame: what to ask for next, if anything, and what to show.
     pub fn step(&mut self, seen: &Seen, ranges: &Ranges, period: Duration) -> Answer {
+        if self.started.is_none() {
+            self.started = Some(seen.in_effect);
+        }
+        let mut answer = self.decide(seen, ranges, period);
+        // Gave up having changed something: what it started from goes back, once.
+        if let State::CouldNot(_) = self.state
+            && !self.put_back
+            && self.asks > 0
+        {
+            self.put_back = true;
+            answer.put_back = self.started;
+        }
+        answer
+    }
+
+    /// What to ask for next, if anything, and what to show.
+    fn decide(&mut self, seen: &Seen, ranges: &Ranges, period: Duration) -> Answer {
         let answer = |dial: &Dial, ask: Option<Setting>| Answer {
             ask: ask.map(|s| Tried {
                 exposure_us: Some(s.exposure_us),
                 gain: s.gain,
             }),
             state: dial.state,
+            put_back: None,
         };
-        if matches!(self.state, State::Settled | State::CouldNot(_)) {
+        if matches!(self.state, State::Settled(_) | State::CouldNot(_)) {
             return answer(self, None);
         }
         let Some(limits) = limits(ranges, period) else {
@@ -197,20 +265,28 @@ impl Dial {
         if !self.ready(seen) {
             return answer(self, None);
         }
+        // The exposure kept, never past a frame's length.
+        self.kept = self
+            .kept
+            .map(|us| (i64::from(us).clamp(limits.exposure.least, limits.longest_us)) as u32);
         let ask = match (seen.white, current(seen.in_effect, &limits)) {
-            (Some(white), Some(now)) => self.steer(now, white, &limits),
+            (Some(white), Some(now)) => {
+                if self.kept.is_none() {
+                    self.kept = Some(now.exposure_us);
+                }
+                self.steer(now, white, &limits)
+            }
             // A tag, but an exposure not known (the camera's automatic exposure, say): from the
             // ladder's first rung, then steered from there.
-            (Some(_), None) => self.search(&limits, Some(0)),
+            (Some(_), None) => self.search(&limits, 0, seen),
             (None, _) => {
-                let next = self.rung.map_or(0, |rung| rung + 1);
-                // A tag lost while steering: from the bottom again, as one washed out is lost.
-                let next = if self.state == State::Steering && self.rung.is_some() {
-                    0
-                } else {
-                    next
+                // A tag lost while steering, or none seen yet: a search afresh, the way the frame
+                // says; otherwise the search's next rung.
+                let next = match (self.state, self.rung) {
+                    (State::Searching { .. }, Some(rung)) => rung + 1,
+                    _ => 0,
                 };
-                self.search(&limits, Some(next))
+                self.search(&limits, next, seen)
             }
         };
         if let Some(asked) = ask {
@@ -250,10 +326,33 @@ impl Dial {
         false
     }
 
-    /// The next rung of the ladder, from `from`; none left is no tag found.
-    fn search(&mut self, limits: &Limits, from: Option<usize>) -> Option<Setting> {
-        let rungs = ladder(limits);
-        let next = from.unwrap_or(0);
+    /// Rung `next` of the search; at its first, the rungs are chosen. None left is no tag found.
+    fn search(&mut self, limits: &Limits, next: usize, seen: &Seen) -> Option<Setting> {
+        if next == 0 {
+            self.rungs = match self.start {
+                Start::Ladder => ladder(limits),
+                Start::Exposure(_) => {
+                    let from = current(seen.in_effect, limits).unwrap_or(Setting {
+                        exposure_us: self.kept.unwrap_or(limits.exposure.least as u32),
+                        gain: limits.gain.map(|g| g.least),
+                    });
+                    let from = Setting {
+                        exposure_us: self.kept.unwrap_or(from.exposure_us),
+                        ..from
+                    };
+                    match way(seen.brightness) {
+                        Way::Up => toward(from, Way::Up, limits),
+                        Way::Down => toward(from, Way::Down, limits),
+                        Way::DownThenUp => {
+                            let mut rungs = toward(from, Way::Down, limits);
+                            rungs.extend(toward(from, Way::Up, limits));
+                            rungs
+                        }
+                    }
+                }
+            };
+        }
+        let rungs = &self.rungs;
         let Some(setting) = rungs.get(next).copied() else {
             self.state = State::CouldNot(Why::NoTag);
             return None;
@@ -271,13 +370,14 @@ impl Dial {
     fn steer(&mut self, now: Setting, white: u8, limits: &Limits) -> Option<Setting> {
         self.state = State::Steering;
         if (BAND.0..=BAND.1).contains(&white) {
-            // In the band, but on gain the exposure could carry: the same light from a longer
-            // exposure and the least gain, for less noise, then a look again.
+            // In the band, but not at the exposure to keep (a first look, from settings tried by
+            // hand): the same light at that exposure, when the gain can make it up, then a look
+            // again.
             let same = self.spread(light(now, limits), now, false, limits);
-            if same.gain != now.gain && same.exposure_us != now.exposure_us {
+            if Some(same.exposure_us) == self.kept && same.exposure_us != now.exposure_us {
                 return Some(same);
             }
-            self.state = State::Settled;
+            self.state = State::Settled(self.became(now));
             return None;
         }
         let brighter = white < BAND.0;
@@ -307,7 +407,7 @@ impl Dial {
         let good = (light::TOO_DIM_BELOW..=light::TOO_BRIGHT_ABOVE).contains(&white);
         if (brighter && at_most) || (!brighter && at_least) {
             self.state = match (good, brighter) {
-                (true, _) => State::Settled,
+                (true, _) => State::Settled(self.became(now)),
                 (false, true) => State::CouldNot(Why::TooDark),
                 (false, false) => State::CouldNot(Why::TooBright),
             };
@@ -349,7 +449,7 @@ impl Dial {
             .min_by(|a, b| off(a.1).total_cmp(&off(b.1)));
         match best {
             Some((setting, _)) => {
-                self.state = State::Settled;
+                self.state = State::Settled(self.became(setting));
                 Some(setting)
             }
             None => {
@@ -359,37 +459,65 @@ impl Dial {
         }
     }
 
-    /// An exposure and gain giving `wanted` light, by the goal's rule, in the camera's steps: one
+    /// What became of the exposure, settled at `at`.
+    fn became(&self, at: Setting) -> Exposure {
+        match self.start {
+            Start::Ladder => Exposure::Chosen,
+            Start::Exposure(us) if at.exposure_us == us => Exposure::Kept,
+            Start::Exposure(_) => Exposure::Moved,
+        }
+    }
+
+    /// An exposure and gain giving `wanted` light, in the camera's steps: the kept exposure and the
+    /// gain to match, or, where the gain runs out, the gain at its end and the exposure moved. One
     /// step at least away from `now` in the direction wanted, when there's room.
     fn spread(&self, wanted: f64, now: Setting, brighter: bool, limits: &Limits) -> Setting {
-        match self.goal {
-            Goal::Focusing => {
-                let least_gain = limits.gain.map(|g| g.least);
-                let exposure = wanted / gain_factor(least_gain, limits);
-                if exposure <= limits.longest_us as f64 || limits.gain.is_none() {
-                    let mut us = units(exposure, limits);
-                    if us == now.exposure_us && now.gain == least_gain {
-                        us = nudge(us, brighter, limits);
-                    }
-                    return Setting {
-                        exposure_us: us,
-                        gain: least_gain,
-                    };
-                }
-                // The exposure as long as a frame allows, and the rest from gain.
-                let longest = units(limits.longest_us as f64, limits);
-                let gain = limits.gain.map(|range| {
-                    let mut gain = gain_for(wanted / f64::from(longest), range).round() as i64;
-                    if longest == now.exposure_us && Some(gain) == now.gain {
-                        gain += if brighter { 1 } else { -1 };
-                    }
-                    range.hold(gain)
-                });
-                Setting {
-                    exposure_us: longest,
-                    gain,
-                }
+        let kept = self
+            .kept
+            .unwrap_or(now.exposure_us)
+            .clamp(limits.exposure.least as u32, limits.longest_us as u32);
+        let Some(range) = limits.gain else {
+            // No gain: the exposure is all there is.
+            let mut us = units(wanted, limits);
+            if us == now.exposure_us {
+                us = nudge(us, brighter, limits);
             }
+            return Setting {
+                exposure_us: us,
+                gain: None,
+            };
+        };
+        let factor = wanted / f64::from(kept);
+        let most = gain_factor(Some(range.most), limits);
+        if factor < 1.0 {
+            // Too bright even at the least gain: a shorter exposure.
+            let mut us = units(wanted, limits);
+            if us == now.exposure_us && now.gain == Some(range.least) {
+                us = nudge(us, brighter, limits);
+            }
+            return Setting {
+                exposure_us: us,
+                gain: Some(range.least),
+            };
+        }
+        if factor > most {
+            // Too dim even at the most gain: a longer exposure, never past a frame.
+            let mut us = units(wanted / most, limits);
+            if us == now.exposure_us && now.gain == Some(range.most) {
+                us = nudge(us, brighter, limits);
+            }
+            return Setting {
+                exposure_us: us,
+                gain: Some(range.most),
+            };
+        }
+        let mut gain = range.hold(gain_for(factor, range).round() as i64);
+        if kept == now.exposure_us && Some(gain) == now.gain {
+            gain = range.hold(gain + if brighter { 1 } else { -1 });
+        }
+        Setting {
+            exposure_us: kept,
+            gain: Some(gain),
         }
     }
 }
@@ -470,6 +598,67 @@ fn nudge(exposure_us: u32, brighter: bool, limits: &Limits) -> u32 {
         i64::from(exposure_us) - unit
     };
     moved.clamp(limits.exposure.least, limits.longest_us) as u32
+}
+
+/// Which way to look for a tag by the frame's brightness: up when its brightest 1% is dark,
+/// down when more than 1% of it clips (the thresholds [`brightness`] warns of), down then up when
+/// it's neither.
+fn way(frame: Brightness) -> Way {
+    if frame.clipped > brightness::CLIPPED_ABOVE {
+        Way::Down
+    } else if frame.high < brightness::DARK_BELOW {
+        Way::Up
+    } else {
+        Way::DownThenUp
+    }
+}
+
+/// The rungs from `from` one way, the kept exposure first: up, gains doubling to the most, then
+/// exposures doubling at the most gain to the longest a frame allows; down, gains halving to the
+/// least, then exposures halving at the least gain to the shortest. `from` itself isn't a rung.
+fn toward(from: Setting, way: Way, limits: &Limits) -> Vec<Setting> {
+    let mut rungs = Vec::new();
+    let mut gain = from.gain;
+    if let (Some(range), Some(start)) = (limits.gain, from.gain) {
+        let mut factor = gain_factor(Some(start), limits);
+        let mut at = start;
+        loop {
+            factor = match way {
+                Way::Down => factor / 2.0,
+                _ => factor * 2.0,
+            };
+            let next = range.hold(gain_for(factor.max(1.0), range).round() as i64);
+            let further = match way {
+                Way::Down => next < at,
+                _ => next > at,
+            };
+            if !further {
+                break;
+            }
+            rungs.push(Setting {
+                exposure_us: from.exposure_us,
+                gain: Some(next),
+            });
+            at = next;
+        }
+        gain = Some(at);
+    }
+    let mut us = i64::from(from.exposure_us);
+    loop {
+        let next = match way {
+            Way::Down => i64::from(units(us as f64 / 2.0, limits)),
+            _ => (us * 2).min(limits.longest_us),
+        };
+        if next == us {
+            break;
+        }
+        us = next;
+        rungs.push(Setting {
+            exposure_us: us as u32,
+            gain,
+        });
+    }
+    rungs
 }
 
 /// The ladder walked with no tag in view: exposures doubling from [`LADDER_START_US`] to the
@@ -611,21 +800,87 @@ mod tests {
     }
 
     #[test]
-    fn light_is_spread_over_the_exposure_first_then_the_gain() {
+    fn with_no_tag_the_search_walks_toward_the_light_the_frame_says() {
         let limits = limits_of((100, 819_200), Some((16, 255)), 60);
-        let dial = Dial::new(Goal::Focusing);
-        let now = Setting {
-            exposure_us: 8000,
+        let from = Setting {
+            exposure_us: 4000,
             gain: Some(16),
         };
-        // Each row: the light wanted, then the exposure and gain it's spread over.
+        let walk = |from: Setting, way: Way, limits: &Limits| -> Rungs {
+            toward(from, way, limits)
+                .into_iter()
+                .map(|s| (s.exposure_us, s.gain))
+                .collect()
+        };
+        assert_eq!(
+            walk(from, Way::Up, &limits),
+            [
+                (4000, Some(32)),
+                (4000, Some(64)),
+                (4000, Some(128)),
+                (4000, Some(255)),
+                (8000, Some(255)),
+                (16_000, Some(255)),
+            ]
+        );
+        let from_gain = Setting {
+            exposure_us: 4000,
+            gain: Some(40),
+        };
+        assert_eq!(
+            walk(from_gain, Way::Down, &limits),
+            [
+                (4000, Some(20)),
+                (4000, Some(16)),
+                (2000, Some(16)),
+                (1000, Some(16)),
+                (500, Some(16)),
+                (300, Some(16)),
+                (200, Some(16)),
+                (100, Some(16)),
+            ]
+        );
+        // A camera without gain: the exposure alone.
+        let no_gain = limits_of((100, 819_200), None, 60);
+        let bare = Setting {
+            exposure_us: 4000,
+            gain: None,
+        };
+        assert_eq!(
+            walk(bare, Way::Up, &no_gain),
+            [(8000, None), (16_000, None)]
+        );
+        // Which way, by the frame: dark walks up, clipping down, neither down then up.
+        let frame = |high: u8, clipped: u16| Brightness {
+            median: high / 2,
+            high,
+            clipped,
+        };
+        assert_eq!(way(frame(40, 0)), Way::Up);
+        assert_eq!(way(frame(255, 3000)), Way::Down);
+        assert_eq!(way(frame(200, 50)), Way::DownThenUp);
+    }
+
+    #[test]
+    fn light_comes_from_the_gain_at_the_kept_exposure_and_the_exposure_moves_only_past_its_ends() {
+        let limits = limits_of((100, 819_200), Some((16, 255)), 60);
+        let dial = Dial::new(Start::Exposure(4000));
+        let now = Setting {
+            exposure_us: 4000,
+            gain: Some(40),
+        };
+        // Each row: the light wanted (microseconds at the least gain), then the exposure and gain
+        // it's spread over.
         let rows = [
             (4000.0, 4000, 16),
-            (12_340.0, 12_300, 16),
-            (16_000.0, 16_000, 16),
-            // Past a frame: the rest from gain, which goes as its value (16 is 1x).
-            (32_000.0, 16_000, 32),
+            (8000.0, 4000, 32),
+            (12_340.0, 4000, 49),
+            (63_000.0, 4000, 252),
+            // Past the most gain: a longer exposure, never past a frame (16.0 ms at 60 fps).
+            (127_500.0, 8000, 255),
             (1e9, 16_000, 255),
+            // Under the least gain: a shorter exposure.
+            (2000.0, 2000, 16),
             (10.0, 100, 16),
         ];
         for (wanted, exposure_us, gain) in rows {
@@ -641,7 +896,7 @@ mod tests {
             );
         }
         // Where rounding would leave it where it is, it still moves a step the way it's wanted.
-        let near = dial.spread(8040.0, now, true, &limits);
-        assert_eq!(near.exposure_us, 8100);
+        let near = dial.spread(10_020.0, now, true, &limits);
+        assert_eq!(near.gain, Some(41));
     }
 }

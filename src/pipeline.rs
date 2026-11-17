@@ -109,6 +109,8 @@ pub fn run(
                 brightness,
                 sequence,
                 monotonic_nanos: captured.monotonic_nanos,
+                link: frame.link,
+                clock: crate::stream::feed::Clock::of(frame.clock_synced),
             });
         }
         if let Some(image) = image {

@@ -232,35 +232,44 @@ per frame on USB 5000 Mb/s (a USB 3.10 device, 8-1)`, and `visor cameras` lists 
 
 ### The live view
 
-`http://<coprocessor>:5809/` shows every camera's live view, and `/stream/<camera>` is one camera's
-by its name (escaped as an address needs: `/stream/front%20left`), an MJPEG stream any browser
-shows in an `<img>`. A robot's Pitwall shows each camera's on its card. The picture is the camera's
-frame at half its size (800 x 652 of a ThriftyCam), 10 a second at JPEG quality 60: about 2 Mbit/s,
-20 to 25 KB a picture. Each tag found is outlined with its ID, and the line along the top gives
-detection's frame rate, the exposure and gain, and the brightness (median / 99th percentile). Each
-camera's `stream_scale`, `stream_fps` and `stream_quality` change it
-([deploy/visor.example.toml](deploy/visor.example.toml)).
+`http://<coprocessor>:5809/` is a small application, compiled into Visor and loading nothing from
+elsewhere (a robot's network has no internet), that works on a laptop and a phone. Its first screen
+shows every camera on that coprocessor, scaled to fit the window, each with its name, serial and a
+list of plain sentences, what needs attention first: its USB connection, its frame rate against the
+one asked for (and when a long exposure has slowed it), its brightness, its focus, its lens
+calibration and the clock's sync to the robot. A tab for each camera shows its picture beside three
+live rows: brightness, focus with a bar and a magnified corner of the tag, and lens calibration
+(calibrating from the page isn't built yet). The page reads one status document, `/status`, as JSON.
+
+`/stream/<camera>` is one camera's view by its name (escaped as an address needs:
+`/stream/front%20left`), an MJPEG stream any browser shows in an `<img>`. A robot's Pitwall shows
+each camera's on its card. The picture is the camera's frame at half its size (800 x 652 of a
+ThriftyCam), 10 a second at JPEG quality 60: about 2 Mbit/s, 20 to 25 KB a picture. Each tag found
+is outlined with its ID, and one line along the top gives detection's frame rate, the exposure and
+gain, and the brightness (median / 99th percentile). Each camera's `stream_scale`, `stream_fps` and
+`stream_quality` change it ([deploy/visor.example.toml](deploy/visor.example.toml)).
 
 It never costs detection. With no one watching, nothing is made. While someone watches, the view's
 own thread asks for a frame at the view's rate, the detect thread hands over its next one after
 sending it to the robot, without waiting, and the picture is made on that thread at a lower
 priority (nice 10): about 2.2 ms a picture on a laptop core, about 2% of one core at the defaults.
 Each watcher gets the newest picture when its connection is ready for one, so a slow watcher skips
-pictures; one that stops reading is closed after 5 s, and at most 8 watch at once. To focus a
-camera by, the view says how many pixels wide a tag's edge is in the frame (smaller is sharper),
-with the best it has been and a bar that fills as the lens nears it, and shows that tag's corner
-magnified. A reading counts only when the tag is lit well for it (its white from 80 to 170: a
-camera's squeezed top end reads an edge falsely sharp), and a sentence in plain words says what to
-do: no tag, too dim, too bright, keep turning, sharp. When the camera has slowed because the
-exposure is longer than a frame, the view says so. `/frame/<camera>` gives the camera's next frame
-at full size, as detection read it, with the tags found in it and each one's black and white.
+pictures; one that stops reading is closed after 5 s, and at most 8 watch at once.
 
-A bench's configuration (`try_settings = true`) adds, under each camera, sliders for the exposure
-and gain bounded by the camera's own ranges, and a focus step: one button and Visor remembers the
-settings, sets the least gain and an exposure that lights the tag for focusing (never longer than
-a frame, so the frame rate holds), and says so; another puts the settings back, as the last watcher
-leaving does. It's bench-only for now, never on a robot. More in
-[docs/live-view.md](docs/live-view.md).
+Focus is a readout: how many pixels wide a tag's edge is in the frame (smaller is sharper), with an
+absolute verdict (sharp up to 2.0 px, soft to 3.0, needs focusing past it: provisional lines, from
+rendered frames), judged only on a tag near the middle and only in good light (the tag's white from
+80 to 170, past which a camera's squeezed response reads an edge falsely sharp). `/frame/<camera>`
+gives the camera's next frame at full size, as detection read it, with the tags found in it and
+each one's black and white.
+
+A bench's configuration (`try_settings = true`) adds **Set exposure and gain**, which keeps the
+configured exposure (chosen against motion blur) and steers the gain until the tag is lit well,
+moving the exposure only if the gain runs out and never past a frame's length; and setting both by
+hand, with sliders bounded by the camera's own ranges. Either lasts until Visor restarts, and the
+page says when the settings differ from the configuration's and what to write to keep them. It's
+bench-only, never on a robot. More in [docs/live-view.md](docs/live-view.md);
+`cargo run --example page` serves the page from rendered scenes, with no cameras.
 
 ## Releases
 

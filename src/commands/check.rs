@@ -57,7 +57,7 @@ pub fn check(path: &Path) -> Result<()> {
     if config.try_settings {
         println!(
             "  try_settings: an exposure and gain can be tried from the live view \
-             (POST /settings/<camera>), and each camera's focus step run from it, \
+             (POST /settings/<camera>) and set for the light (POST /set/<camera>), \
              for a bench, not a robot"
         );
     }

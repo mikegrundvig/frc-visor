@@ -8,14 +8,24 @@
 //! sending it to the robot, without waiting ([`feed`]); and the view's thread makes the picture
 //! ([`picture`]) at a lower priority ([`view`]). The server ([`server`]) sends each watcher the
 //! newest picture whenever its connection is ready, so a slow watcher skips pictures.
+//!
+//! The same server serves the page ([`page`]), a small application that reads one status document
+//! ([`status`]): each camera's checks ([`checks`]), its brightness ([`light`]) and "Set exposure and
+//! gain" ([`dial`]), its focus ([`focus`], [`sharpness`]) with a magnified corner ([`corner`]), in
+//! plain words ([`words`]).
 
+pub mod checks;
+pub mod corner;
 pub mod dial;
 pub mod feed;
 pub mod focus;
 pub mod light;
+pub mod page;
 pub mod picture;
 pub mod server;
-pub mod step;
+pub mod sharpness;
+pub mod status;
+pub mod still;
 pub mod view;
 pub mod words;
 

@@ -16,7 +16,6 @@
 //! read its pictures.
 
 use std::convert::Infallible;
-use std::fmt::Write as _;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -27,7 +26,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -39,9 +38,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_io_timeout::TimeoutStream;
 
 use crate::settings::{Ranges, Tried};
-use crate::stream::dial;
-use crate::stream::step::Phase;
-use crate::stream::view::{Status, View};
+use crate::stream::page;
+use crate::stream::view::View;
 
 /// The boundary between pictures in a stream.
 const BOUNDARY: &str = "frame";
@@ -85,13 +83,9 @@ pub struct Options {
     /// The socket's send buffer for each watcher, in bytes: a few pictures, so a stalled watcher
     /// fills it, and is found, in seconds.
     pub send_buffer: usize,
-    /// Whether an exposure and gain may be tried from here by hand (`try_settings` in the
-    /// configuration).
+    /// Whether a camera's exposure and gain may be set from here, by hand or by "Set exposure and
+    /// gain" (`try_settings` in the configuration).
     pub try_settings: bool,
-    /// Whether a camera's focus step may run from here: it sets the exposure and gain itself, and
-    /// puts them back after. A decision of its own, though today it's `try_settings` too
-    /// (src/main.rs): bench-only for now.
-    pub focus_step: bool,
 }
 
 impl Default for Options {
@@ -104,7 +98,6 @@ impl Default for Options {
             kept_for_controller: 2,
             send_buffer: 256 * 1024,
             try_settings: false,
-            focus_step: false,
         }
     }
 }
@@ -166,7 +159,6 @@ async fn serve(
             .map(|_| tokio::sync::Mutex::new(None))
             .collect(),
         try_settings: options.try_settings,
-        focus_step: options.focus_step,
         views,
         watchers: Places::new(
             options.most_watchers,
@@ -176,15 +168,18 @@ async fn serve(
     });
     let names = Arc::new(own_names());
     let app = Router::new()
-        .route("/", get(index))
+        .route("/", get(|| page::file(page::INDEX)))
+        .route("/page.css", get(|| page::file(page::STYLE)))
+        .route("/page.js", get(|| page::file(page::SCRIPT)))
+        // A browser asks for an icon; there's none, and saying so plainly keeps its console quiet.
+        .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/status", get(status))
         .route("/stream/{camera}", get(stream))
+        .route("/corner/{camera}", get(corner))
         .route("/frame/{camera}", get(frame))
         .route("/settings/{camera}", post(settings))
+        .route("/set/{camera}", post(set_exposure_and_gain))
         .route("/focus/{camera}", post(forget_focus))
-        .route("/focus-start/{camera}", post(focus_start))
-        .route("/focus-again/{camera}", post(focus_again))
-        .route("/focus-end/{camera}", post(focus_end))
-        .route("/status/{camera}", get(status))
         .with_state(shared)
         .layer(middleware::from_fn_with_state(names, only_addressed_here));
     let connections = Places::new(
@@ -294,85 +289,6 @@ struct Shared {
     /// For each view, when its last frame at full size was made: one request at a time holds it.
     stills: Vec<tokio::sync::Mutex<Option<tokio::time::Instant>>>,
     try_settings: bool,
-    focus_step: bool,
-}
-
-/// The page at `/`: each camera's view, by name; where the configuration allows, each camera's
-/// focus step and its exposure and gain by hand, with what the view says in words.
-async fn index(State(shared): State<Arc<Shared>>) -> Html<String> {
-    let mut page = String::from(
-        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
-         <meta name=\"viewport\" content=\"width=device-width\"><title>Visor</title>\
-         <style>body{font-family:sans-serif;background:#111;color:#eee;margin:1em}\
-         img{max-width:100%;background:#000}.said{font-size:1.2em}.small{color:#aaa}\
-         input[type=range]{width:14em;vertical-align:middle}</style></head><body>\n\
-         <h1>Visor's cameras</h1>\n",
-    );
-    page.push_str(FOCUS_SCRIPT);
-    let controls = shared.try_settings || shared.focus_step;
-    if controls {
-        page.push_str(STATUS_SCRIPT);
-    }
-    if shared.focus_step {
-        page.push_str(STEP_SCRIPT);
-    }
-    if shared.try_settings {
-        page.push_str(TRY_SCRIPT);
-    }
-    for view in shared.views.iter() {
-        let href = stream_path(&view.name);
-        let full = frame_path(&view.name);
-        let focus = focus_path(&view.name);
-        let name = escaped(&view.name);
-        let _ = write!(
-            page,
-            "<h2><a href=\"{href}\">{name}</a></h2>\n<img src=\"{href}\" alt=\"{name}'s live view\">\n\
-             <p><button onclick=\"forgetFocus(this, '{focus}')\">forget the best focus seen</button> \
-             <a href=\"{full}\">one frame at full size, as detection read it (PGM)</a></p>\n"
-        );
-        if !controls {
-            continue;
-        }
-        let _ = writeln!(
-            page,
-            "<div class=\"camera\" data-status=\"{}\"><p class=\"said\"></p>\
-             <p class=\"small\"></p>",
-            status_path(&view.name)
-        );
-        if shared.focus_step {
-            let (start, again, end) = (
-                step_path("focus-start", &view.name),
-                step_path("focus-again", &view.name),
-                step_path("focus-end", &view.name),
-            );
-            let _ = writeln!(
-                page,
-                "<p><button onclick=\"focusStep(this, '{start}')\">focus this camera</button> \
-                 <button onclick=\"focusStep(this, '{again}')\">set it for me again</button> \
-                 <button onclick=\"focusStep(this, '{end}')\">end focusing and put the settings back</button> \
-                 <output class=\"answer\"></output></p>"
-            );
-        }
-        if shared.try_settings {
-            let to = settings_path(&view.name);
-            let _ = writeln!(
-                page,
-                "<form onsubmit=\"return trySettings(this, '{to}')\">\
-                 <p>exposure <input type=\"range\" name=\"exposureSlider\" min=\"0\" max=\"1000\" \
-                 oninput=\"exposureFromSlider(this.form)\" onchange=\"trySettings(this.form, '{to}')\"> \
-                 <input name=\"exposure\" size=\"7\" inputmode=\"decimal\"> ms \
-                 <span class=\"exposureRange\"></span></p>\
-                 <p>gain <input type=\"range\" name=\"gainSlider\" \
-                 oninput=\"this.form.gain.value = this.value\" onchange=\"trySettings(this.form, '{to}')\"> \
-                 <input name=\"gain\" size=\"5\" inputmode=\"numeric\"> \
-                 <span class=\"gainRange\"></span></p>\
-                 <p><button>set</button> <output name=\"said\"></output></p></form>"
-            );
-        }
-        page.push_str("</div>\n");
-    }
-    page.push_str("</body></html>\n");
-    Html(page)
 }
 
 /// A camera's stream's address on this server: `/stream/front-left`.
@@ -380,102 +296,19 @@ pub fn stream_path(camera: &str) -> String {
     format!("/stream/{}", utf8_percent_encode(camera, SEGMENT))
 }
 
-/// The page's script for a camera's focus button: asks Visor to forget the best seen, and says so
-/// on the button for a moment.
-const FOCUS_SCRIPT: &str = "<script>function forgetFocus(button, to) {\n\
-  const was = button.textContent;\n\
-  fetch(to, {method: 'POST'})\n\
-    .then(answer => { button.textContent = answer.ok ? 'forgotten' : 'not forgotten: ' + answer.status; })\n\
-    .catch(error => { button.textContent = String(error); })\n\
-    .finally(() => setTimeout(() => { button.textContent = was; }, 1500));\n\
-}</script>\n";
-
 /// Where a camera's best focus is forgotten on this server: `/focus/front-left`.
 pub fn focus_path(camera: &str) -> String {
     format!("/focus/{}", utf8_percent_encode(camera, SEGMENT))
 }
 
-/// The page's script that shows what each camera's view says, and keeps its controls to the
-/// camera's ranges and the settings in effect: it reads `/status/<camera>` twice a second.
-const STATUS_SCRIPT: &str = "<script>\n\
-function exposureOfSlider(form) {\n\
-  const least = Number(form.dataset.least), most = Number(form.dataset.most);\n\
-  const us = least * Math.pow(most / least, form.exposureSlider.value / 1000);\n\
-  return Math.max(least, Math.min(most, Math.round(us / 100) * 100));\n\
-}\n\
-function sliderOfExposure(form, us) {\n\
-  const least = Number(form.dataset.least), most = Number(form.dataset.most);\n\
-  if (!(most > least) || !(us > 0)) return 0;\n\
-  return Math.round(1000 * Math.log(Math.max(us, least) / least) / Math.log(most / least));\n\
-}\n\
-function exposureFromSlider(form) { form.exposure.value = (exposureOfSlider(form) / 1000).toFixed(1); }\n\
-function showStatus(camera, text) {\n\
-  const said = {};\n\
-  for (const line of text.split('\\n')) {\n\
-    const at = line.indexOf(' ');\n\
-    if (at > 0) said[line.slice(0, at)] = line.slice(at + 1);\n\
-  }\n\
-  camera.querySelector('.said').textContent = [said.slowed, said.sentence].filter(Boolean).join(' ');\n\
-  camera.querySelector('.small').textContent = said.small_print || '';\n\
-  const form = camera.querySelector('form');\n\
-  if (!form) return;\n\
-  const editing = form.contains(document.activeElement);\n\
-  if (said.exposure_range_us) {\n\
-    const [least, most] = said.exposure_range_us.split(' ').map(Number);\n\
-    form.dataset.least = Math.max(least, 1); form.dataset.most = most;\n\
-    form.querySelector('.exposureRange').textContent =\n\
-      'the camera takes ' + (least / 1000).toFixed(1) + ' to ' + (most / 1000).toFixed(1) + ' ms';\n\
-  }\n\
-  if (said.gain_range) {\n\
-    const [least, most] = said.gain_range.split(' ');\n\
-    form.gainSlider.min = least; form.gainSlider.max = most;\n\
-    form.querySelector('.gainRange').textContent = 'the camera takes ' + least + ' to ' + most;\n\
-  } else {\n\
-    form.querySelector('.gainRange').textContent = 'this camera has no gain';\n\
-  }\n\
-  if (!editing && said.exposure_us) {\n\
-    form.exposure.value = (Number(said.exposure_us) / 1000).toFixed(1);\n\
-    form.exposureSlider.value = sliderOfExposure(form, Number(said.exposure_us));\n\
-  }\n\
-  if (!editing && said.gain) { form.gain.value = said.gain; form.gainSlider.value = said.gain; }\n\
-}\n\
-function readStatus() {\n\
-  for (const camera of document.querySelectorAll('.camera')) {\n\
-    fetch(camera.dataset.status).then(answer => answer.text())\n\
-      .then(text => showStatus(camera, text)).catch(() => {});\n\
-  }\n\
-}\n\
-setInterval(readStatus, 500);\n\
-</script>\n";
-
-/// The page's script for a camera's focus step buttons: posts, and shows the answer beside them.
-const STEP_SCRIPT: &str = "<script>function focusStep(button, to) {\n\
-  const answer = button.parentElement.querySelector('.answer');\n\
-  fetch(to, {method: 'POST'})\n\
-    .then(reply => reply.text()).then(text => { answer.value = text; })\n\
-    .catch(error => { answer.value = String(error); });\n\
-}</script>\n";
-
-/// The page's script where settings can be tried: posts what a camera's form holds, the exposure
-/// given in milliseconds, and shows the answer beside it.
-const TRY_SCRIPT: &str = "<script>function trySettings(form, to) {\n\
-  const asked = [];\n\
-  if (form.exposure.value) asked.push('exposure_us=' + Math.round(Number(form.exposure.value) * 1000));\n\
-  if (form.gain.value) asked.push('gain=' + encodeURIComponent(form.gain.value));\n\
-  fetch(to + '?' + asked.join('&'), {method: 'POST'})\n\
-    .then(answer => answer.text()).then(text => { form.said.value = text; })\n\
-    .catch(error => { form.said.value = String(error); });\n\
-  return false;\n\
-}</script>\n";
-
-/// Where a camera's focus step is started, run again or ended on this server: `/focus-start/x`.
-pub fn step_path(what: &str, camera: &str) -> String {
-    format!("/{what}/{}", utf8_percent_encode(camera, SEGMENT))
+/// Where "Set exposure and gain" is asked for on this server: `/set/front-left`.
+pub fn set_path(camera: &str) -> String {
+    format!("/set/{}", utf8_percent_encode(camera, SEGMENT))
 }
 
-/// Where what a camera's view says is read on this server: `/status/front-left`.
-pub fn status_path(camera: &str) -> String {
-    format!("/status/{}", utf8_percent_encode(camera, SEGMENT))
+/// Where a camera's magnified corner is on this server: `/corner/front-left`.
+pub fn corner_path(camera: &str) -> String {
+    format!("/corner/{}", utf8_percent_encode(camera, SEGMENT))
 }
 
 /// Where a camera's settings are tried on this server: `/settings/front-left`.
@@ -486,22 +319,6 @@ pub fn settings_path(camera: &str) -> String {
 /// A camera's full-size frame's address on this server: `/frame/front-left`.
 pub fn frame_path(camera: &str) -> String {
     format!("/frame/{}", utf8_percent_encode(camera, SEGMENT))
-}
-
-/// Text safe in HTML, in an element or an attribute.
-fn escaped(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 /// A camera's stream: each new picture as a part, for as long as the watcher stays.
@@ -614,18 +431,20 @@ async fn settings(
         Err(why) => return (StatusCode::BAD_REQUEST, format!("{why}\n")).into_response(),
     };
     let (tried, held) = held_to(tried, view.trial.ranges());
-    // A change by hand: the focus step's dial, if it's on, stops and leaves it be.
+    // A change by hand: "Set exposure and gain", if it's running, stops and leaves it be.
     view.try_by_hand(tried);
-    let said = |name: &str, value: Option<String>| value.map(|v| format!("{name} {v}"));
+    // As a person says them: the exposure in milliseconds.
     let asked: Vec<String> = [
-        said("exposure_us", tried.exposure_us.map(|us| us.to_string())),
-        said("gain", tried.gain.map(|gain| gain.to_string())),
+        tried
+            .exposure_us
+            .map(|us| format!("exposure {}", super::words::milliseconds(us))),
+        tried.gain.map(|gain| format!("gain {gain}")),
     ]
     .into_iter()
     .flatten()
     .collect();
     let mut answer = format!(
-        "{camera}: trying {}, until the camera is opened again. The view's line says what's in effect",
+        "{camera}: set {}. It lasts until Visor restarts or the camera is replugged",
         asked.join(" and ")
     );
     for why in held {
@@ -669,145 +488,71 @@ pub fn held_to(tried: Tried, ranges: Option<Ranges>) -> (Tried, Vec<String>) {
     (held, said)
 }
 
-/// Starts a camera's focus step: `POST /focus-start/<camera>`. Visor remembers the exposure and
-/// gain in effect, then sets them for focusing itself; the view's line says what it's doing. Only
-/// where this Visor may run the focus step ([`Options::focus_step`]). A page from another site
-/// can't ask ([`same_origin`]).
-async fn focus_start(
+/// Sets a camera's exposure and gain for its light: `POST /set/<camera>`. The configured exposure
+/// is kept and the gain steered until the tag's white is in the band ([`super::dial`]); the status
+/// document says how it goes. Only where the configuration says `try_settings = true`, as setting
+/// them by hand. A page from another site can't ask ([`same_origin`]).
+async fn set_exposure_and_gain(
     State(shared): State<Arc<Shared>>,
     Path(camera): Path<String>,
     request: Request,
 ) -> Response {
-    let view = match step_allowed(&shared, &camera, &request) {
-        Ok(view) => view,
-        Err(refused) => return *refused,
-    };
-    let answer = if view.focus_step_on() {
-        format!("{camera}: focusing already; setting the exposure for focusing again\n")
-    } else {
-        format!("{camera}: focusing; setting the exposure for focusing\n")
-    };
-    view.start_focus_step();
-    (StatusCode::ACCEPTED, answer).into_response()
-}
-
-/// Sets the exposure and gain for focusing again, while a camera's focus step is on:
-/// `POST /focus-again/<camera>`, after a change by hand or in the light.
-async fn focus_again(
-    State(shared): State<Arc<Shared>>,
-    Path(camera): Path<String>,
-    request: Request,
-) -> Response {
-    let view = match step_allowed(&shared, &camera, &request) {
-        Ok(view) => view,
-        Err(refused) => return *refused,
-    };
-    if !view.focus_step_on() {
-        let why = format!("{camera}: not focusing; start focusing first\n");
-        return (StatusCode::CONFLICT, why).into_response();
-    }
-    view.start_focus_step();
-    let answer = format!("{camera}: setting the exposure for focusing again\n");
-    (StatusCode::ACCEPTED, answer).into_response()
-}
-
-/// Ends a camera's focus step, putting back the exposure and gain it remembered:
-/// `POST /focus-end/<camera>`. They go back too when the last watcher leaves.
-async fn focus_end(
-    State(shared): State<Arc<Shared>>,
-    Path(camera): Path<String>,
-    request: Request,
-) -> Response {
-    let view = match step_allowed(&shared, &camera, &request) {
-        Ok(view) => view,
-        Err(refused) => return *refused,
-    };
-    let answer = if view.end_focus_step() {
-        format!("{camera}: done focusing; the settings it had are put back\n")
-    } else {
-        format!("{camera}: wasn't focusing; nothing changed\n")
-    };
-    (StatusCode::ACCEPTED, answer).into_response()
-}
-
-/// The camera, where its focus step may be run from here and the request is from Visor's own
-/// page; otherwise the refusal.
-fn step_allowed<'a>(
-    shared: &'a Shared,
-    camera: &str,
-    request: &Request,
-) -> Result<&'a View, Box<Response>> {
-    let Some(view) = shared.views.iter().find(|view| view.name == camera) else {
-        return Err(Box::new(no_such_camera(shared, camera)));
-    };
-    if !shared.focus_step {
-        let why = "the focus step can't be run here: this Visor's configuration doesn't say \
-                   try_settings = true. On a robot, a camera's settings are the robot program's\n";
-        return Err(Box::new((StatusCode::FORBIDDEN, why).into_response()));
-    }
-    if !same_origin(request.headers()) {
-        let why = "the focus step is run from Visor's own page, not another site's\n";
-        return Err(Box::new((StatusCode::FORBIDDEN, why).into_response()));
-    }
-    Ok(view)
-}
-
-/// What a camera's view says now, for the page, as plain text, one `name value` a line:
-/// `phase`, the camera's `exposure_range_us` and `gain_range` (least and most, where known), the
-/// `exposure_us` and `gain` in effect, the `sentence`, `slowed` when the camera has slowed, and the
-/// focus's `small_print`. Only where the page has controls to show it by.
-async fn status(State(shared): State<Arc<Shared>>, Path(camera): Path<String>) -> Response {
     let Some(view) = shared.views.iter().find(|view| view.name == camera) else {
         return no_such_camera(&shared, &camera);
     };
-    if !(shared.try_settings || shared.focus_step) {
-        let why = "a camera's settings and focus step aren't shown here: this Visor's \
-                   configuration doesn't say try_settings = true\n";
+    if !shared.try_settings {
+        let why = "exposure and gain can't be set here: this Visor's configuration doesn't say \
+                   try_settings = true. On a robot, a camera's settings are the robot program's\n";
         return (StatusCode::FORBIDDEN, why).into_response();
     }
-    let mut text = status_text(&view.status(), view.trial.ranges());
-    text.push('\n');
+    if !same_origin(request.headers()) {
+        let why = "exposure and gain are set from Visor's own page, not another site's\n";
+        return (StatusCode::FORBIDDEN, why).into_response();
+    }
+    if view.watchers() == 0 {
+        let why = format!(
+            "{camera}: nobody is watching it, so there are no pictures to set it by: open its view\n"
+        );
+        return (StatusCode::CONFLICT, why).into_response();
+    }
+    view.set_exposure_and_gain();
+    let answer = format!("{camera}: setting the exposure and gain for the light\n");
+    (StatusCode::ACCEPTED, answer).into_response()
+}
+
+/// The page's status document: every camera's facts, checks, brightness, focus and lens, as JSON
+/// ([`super::status`]). Read-only, so it's answered with or without `try_settings`; it says
+/// whether settings can be changed from the page.
+async fn status(State(shared): State<Arc<Shared>>) -> Response {
+    let document = super::status::document(
+        shared
+            .views
+            .iter()
+            .map(|view| (view.camera(), view.live(), view.opened())),
+        shared.try_settings,
+    );
     Response::builder()
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::CONTENT_TYPE, "application/json")
         .header(header::CACHE_CONTROL, "no-store")
-        .body(Body::from(text))
+        .body(Body::from(document))
         .expect("a fixed set of valid headers")
 }
 
-/// The status route's text.
-pub fn status_text(status: &Status, ranges: Option<Ranges>) -> String {
-    let phase = match status.phase {
-        Phase::Off => "off",
-        Phase::ByHand => "by_hand",
-        Phase::Dialling(dial::State::Searching { .. }) => "looking",
-        Phase::Dialling(dial::State::Steering) => "setting",
-        Phase::Dialling(dial::State::Settled) => "settled",
-        Phase::Dialling(dial::State::CouldNot(_)) => "could_not",
+/// A camera's magnified corner, the newest the view has made: a small JPEG, 503 while nobody
+/// watches the camera.
+async fn corner(State(shared): State<Arc<Shared>>, Path(camera): Path<String>) -> Response {
+    let Some(view) = shared.views.iter().find(|view| view.name == camera) else {
+        return no_such_camera(&shared, &camera);
     };
-    let mut lines = vec![format!("phase {phase}")];
-    let ranges = ranges.unwrap_or_default();
-    if let Some(range) = ranges.exposure_us {
-        lines.push(format!("exposure_range_us {} {}", range.least, range.most));
-    }
-    if let Some(range) = ranges.gain {
-        lines.push(format!("gain_range {} {}", range.least, range.most));
-    }
-    if let Some(us) = status.in_effect.exposure_us {
-        lines.push(format!("exposure_us {us}"));
-    }
-    if let Some(gain) = status.in_effect.gain {
-        lines.push(format!("gain {gain}"));
-    }
-    if !status.sentence.is_empty() {
-        lines.push(format!("sentence {}", status.sentence));
-    }
-    if let Some(slowed) = &status.slowed {
-        lines.push(format!("slowed {slowed}"));
-    }
-    if !status.small_print.is_empty() {
-        lines.push(format!("small_print {}", status.small_print));
-    }
-    lines.join("\n")
+    let Some(jpeg) = view.corner() else {
+        let why = format!("{camera}: no corner yet: its view is made only while it's watched\n");
+        return (StatusCode::SERVICE_UNAVAILABLE, why).into_response();
+    };
+    Response::builder()
+        .header(header::CONTENT_TYPE, "image/jpeg")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(jpeg))
+        .expect("a fixed set of valid headers")
 }
 
 /// Forgets the best focus a camera's view has seen: `POST /focus/<camera>`. The view's focus line
@@ -959,7 +704,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_camera_s_name_is_escaped_in_its_address_and_on_the_page() {
+    fn a_camera_s_name_is_escaped_in_its_addresses() {
         let cases = [
             ("front-left", "/stream/front-left"),
             ("Front Left", "/stream/Front%20Left"),
@@ -972,11 +717,9 @@ mod tests {
         for (name, path) in cases {
             assert_eq!(stream_path(name), path);
             assert_eq!(frame_path(name), path.replacen("/stream/", "/frame/", 1));
+            assert_eq!(corner_path(name), path.replacen("/stream/", "/corner/", 1));
+            assert_eq!(set_path(name), path.replacen("/stream/", "/set/", 1));
         }
-        assert_eq!(
-            escaped("<b>\"Tom's\" & co</b>"),
-            "&lt;b&gt;&quot;Tom&#39;s&quot; &amp; co&lt;/b&gt;"
-        );
     }
 
     #[test]

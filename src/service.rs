@@ -70,7 +70,7 @@ pub fn run<S: Source + Send>(
     let views: Arc<Vec<View>> = Arc::new(
         cameras
             .iter()
-            .map(|wired| View::new(&wired.camera.name))
+            .map(|wired| View::new(wired.camera))
             .collect(),
     );
     thread::scope(|scope| {

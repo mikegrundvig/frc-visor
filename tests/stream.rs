@@ -159,7 +159,7 @@ fn with_camera(options: Options, pace: &(impl Pace + Sync), test: impl FnOnce(&R
     let period = Duration::from_secs(1) / camera.fps;
     let latest = Latest::new();
     let feed = Feed::new();
-    let views = Arc::new(vec![View::new(&camera.name)]);
+    let views = Arc::new(vec![View::new(&camera)]);
     let stop = AtomicBool::new(false);
     let done = AtomicBool::new(false);
     // How many frames the robot is to receive, once the camera has stopped.
@@ -369,8 +369,7 @@ fn a_watcher_sees_the_tags_outlined_at_the_views_size_and_rate() {
             .call()
             .unwrap();
         let page = index.body_mut().read_to_string().unwrap();
-        assert!(page.contains(&format!("<img src=\"{STREAM}\"")), "{page}");
-        assert!(page.contains(">front left</a>"), "{page}");
+        assert!(page.contains("<script src=\"page.js\">"), "{page}");
 
         let mut response = agent
             .get(format!("http://{}{STREAM}", rig.address))
@@ -436,12 +435,8 @@ fn a_frame_at_full_size_is_what_detection_read_with_the_tags_it_found() {
     let scene = lit_for_focus();
     let received = with_camera(Options::default(), &RealTime, |rig| {
         let agent = agent();
-        let mut page = agent
-            .get(format!("http://{}/", rig.address))
-            .call()
-            .unwrap();
-        let page = page.body_mut().read_to_string().unwrap();
-        assert!(page.contains(&format!("<a href=\"{FRAME}\">")), "{page}");
+        let status = status_of(rig.address);
+        assert_eq!(status["cameras"][0]["frame"], FRAME, "{status}");
 
         let asked = Instant::now();
         let mut response = agent
@@ -563,12 +558,7 @@ fn a_watcher_s_view_measures_focus_and_forgets_its_best_when_the_page_asks() {
     let received = with_camera(Options::default(), &RealTime, |rig| {
         let here = format!("http://{}", rig.address);
         let agent = agent();
-        let mut page = agent.get(format!("{here}/")).call().unwrap();
-        let page = page.body_mut().read_to_string().unwrap();
-        assert!(
-            page.contains(&format!("forgetFocus(this, '{FOCUS}')")),
-            "{page}"
-        );
+        assert_eq!(status_of(rig.address)["cameras"][0]["forget"], FOCUS);
 
         // No one watches: no focus is measured.
         assert_eq!(rig.view.focus(), visor::stream::focus::Shown::default());
@@ -623,7 +613,7 @@ fn a_watcher_s_view_measures_focus_and_forgets_its_best_when_the_page_asks() {
 
 #[test]
 fn settings_are_tried_from_the_view_only_where_the_configuration_allows_it() {
-    use visor::settings::{Asked, Base, Tried};
+    use visor::settings::{Tried, Wanted};
     let _one = one_at_a_time();
     const SETTINGS: &str = "/settings/front%20left";
 
@@ -633,9 +623,9 @@ fn settings_are_tried_from_the_view_only_where_the_configuration_allows_it() {
         assert_eq!(status, 403, "{why}");
         assert!(why.contains("try_settings = true"), "{why}");
         assert_eq!(rig.view.trial.take(), None);
-        let page = get_from(CONTROLLER, rig.address, "/", "localhost").1;
-        assert!(!page.contains("trySettings"), "no form: {page}");
-        assert!(!page.contains("exposureSlider"), "no sliders: {page}");
+        let status = status_of(rig.address);
+        assert_eq!(status["can_set"], false, "{status}");
+        assert_eq!(status["cameras"][0]["brightness"]["can_set"], false);
     });
     assert_detection_kept_up(&received);
 
@@ -649,16 +639,14 @@ fn settings_are_tried_from_the_view_only_where_the_configuration_allows_it() {
         let query = format!("{SETTINGS}?exposure_us=1500&gain=2");
         let (status, said) = post_from(rig.address, &query, Some(&here));
         assert_eq!(status, 202, "{said}");
-        assert!(said.contains("exposure_us 1500 and gain 2"), "{said}");
+        assert!(said.contains("set exposure 1.5 ms and gain 2."), "{said}");
+        assert!(said.contains("lasts until Visor restarts"), "{said}");
         assert_eq!(
             rig.view.trial.take(),
-            Some(Asked {
-                from: Base::AsItIs,
-                tried: Tried {
-                    exposure_us: Some(1500),
-                    gain: Some(2),
-                },
-            })
+            Some(Wanted::Values(Tried {
+                exposure_us: Some(1500),
+                gain: Some(2),
+            }))
         );
         // Not from another site's page, not something else, not another camera, not by GET.
         let (status, why) = post_from(rig.address, &query, Some("http://evil.example"));
@@ -670,59 +658,79 @@ fn settings_are_tried_from_the_view_only_where_the_configuration_allows_it() {
         let (status, _) = get_from(CONTROLLER, rig.address, &query, "localhost");
         assert_eq!(status, 405);
         assert_eq!(rig.view.trial.take(), None, "none of those asked anything");
-        let page = get_from(CONTROLLER, rig.address, "/", "localhost").1;
-        assert!(
-            page.contains("trySettings(this, '/settings/front%20left')"),
-            "{page}"
-        );
+        let status = status_of(rig.address);
+        assert_eq!(status["can_set"], true, "{status}");
+        assert_eq!(status["cameras"][0]["by_hand"], SETTINGS);
+    });
+    assert_detection_kept_up(&received);
+}
+
+/// The page's status document, read as the page reads it.
+fn status_of(address: SocketAddr) -> serde_json::Value {
+    let (code, body) = get_from(CONTROLLER, address, "/status", "localhost");
+    assert_eq!(code, 200, "{body}");
+    serde_json::from_str(&body).unwrap_or_else(|e| panic!("{e}: {body}"))
+}
+
+#[test]
+fn the_page_s_files_are_served_with_their_types_and_load_nothing_from_elsewhere() {
+    let _one = one_at_a_time();
+    let received = with_camera(Options::default(), &RealTime, |rig| {
+        let agent = agent();
+        // Each row: the address, its type, and something it must hold.
+        let rows = [
+            ("/", "text/html; charset=utf-8", "<script src=\"page.js\">"),
+            ("/page.css", "text/css; charset=utf-8", "#grid"),
+            (
+                "/page.js",
+                "text/javascript; charset=utf-8",
+                "fetch(\"status\"",
+            ),
+        ];
+        for (path, kind, holds) in rows {
+            let mut response = agent
+                .get(format!("http://{}{path}", rig.address))
+                .call()
+                .unwrap();
+            assert_eq!(response.status(), 200, "{path}");
+            assert_eq!(response.headers()["content-type"], kind, "{path}");
+            let body = response.body_mut().read_to_string().unwrap();
+            assert!(body.contains(holds), "{path}");
+            // Nothing from anywhere else: a robot's network has no internet.
+            for outside in ["http:", "https:", "//cdn", "src=\"//", "url(", "@import"] {
+                assert!(!body.contains(outside), "{path} holds {outside:?}");
+            }
+        }
     });
     assert_detection_kept_up(&received);
 }
 
 #[test]
-fn the_focus_step_runs_only_where_the_configuration_allows_it_and_puts_the_settings_back() {
-    use visor::settings::{Asked, Base, Range, Ranges, Tried};
+fn the_status_document_and_set_exposure_and_gain_follow_the_configuration_s_gate() {
+    use visor::settings::{InEffect, Range, Ranges};
     let _one = one_at_a_time();
-    const START: &str = "/focus-start/front%20left";
-    const AGAIN: &str = "/focus-again/front%20left";
-    const END: &str = "/focus-end/front%20left";
-    const STATUS: &str = "/status/front%20left";
+    const SET: &str = "/set/front%20left";
+    const CORNER: &str = "/corner/front%20left";
 
-    // As on a robot: every new route refuses, the page has none of the controls, and nothing is
-    // asked of the camera.
+    // As on a robot: the status document is read, but nothing can be set.
     let received = with_camera(Options::default(), &RealTime, |rig| {
-        for path in [START, AGAIN, END] {
-            let (status, why) = post_from(rig.address, path, None);
-            assert_eq!(status, 403, "{path}: {why}");
-            assert!(why.contains("try_settings = true"), "{why}");
-        }
-        let (status, why) = get_from(CONTROLLER, rig.address, STATUS, "localhost");
+        let (status, why) = post_from(rig.address, SET, None);
         assert_eq!(status, 403, "{why}");
-        assert!(!rig.view.focus_step_on());
+        assert!(why.contains("try_settings = true"), "{why}");
         assert_eq!(rig.view.trial.take(), None);
-        let page = get_from(CONTROLLER, rig.address, "/", "localhost").1;
-        assert!(
-            !page.contains("focusStep") && !page.contains("/status/"),
-            "{page}"
-        );
+        let status = status_of(rig.address);
+        assert_eq!(status["can_set"], false);
+        assert_eq!(status["cameras"][0]["name"], "front left");
     });
     assert_detection_kept_up(&received);
 
     let bench = Options {
         try_settings: true,
-        focus_step: true,
         ..Options::default()
     };
-    // The rig's frames are always at 1 ms and gain 40, as the configuration has them.
-    let was = Asked {
-        from: Base::AsItIs,
-        tried: Tried {
-            exposure_us: Some(1000),
-            gain: Some(40),
-        },
-    };
     let received = with_camera(bench, &RealTime, |rig| {
-        // The ranges a capture thread says when it opens the camera: the rig has none.
+        // What a capture thread says when it opens the camera; the rig has none. The rig's frames
+        // are always at 1 ms and gain 40, as the configuration gives them.
         rig.view.trial.offer(Ranges {
             exposure_us: Some(Range {
                 least: 100,
@@ -733,58 +741,113 @@ fn the_focus_step_runs_only_where_the_configuration_allows_it_and_puts_the_setti
                 most: 255,
             }),
         });
-        let here = format!("http://{}", rig.address);
-        let page = get_from(CONTROLLER, rig.address, "/", "localhost").1;
-        assert!(
-            page.contains(&format!("focusStep(this, '{START}')")),
-            "{page}"
-        );
-        assert!(
-            page.contains("exposureSlider") && page.contains(STATUS),
-            "{page}"
-        );
+        rig.view.trial.offer_serial(Some("A1B2C3".to_string()));
+        let configured = InEffect {
+            exposure_us: Some(1000),
+            gain: Some(40),
+            auto_exposure: Some(false),
+        };
+        rig.view.trial.offer_configured(configured);
 
+        // Nobody watching: the camera's facts, but nothing yet of its pictures, and nothing to
+        // set it by.
+        let status = status_of(rig.address);
+        let camera = &status["cameras"][0];
+        assert_eq!(camera["index"], 2, "{camera}");
+        assert_eq!(camera["serial"], "A1B2C3");
+        assert_eq!(
+            (&camera["width"], &camera["fps_asked"]),
+            (&1600.into(), &60.into())
+        );
+        assert!(camera["fps"].is_null());
+        assert_eq!(camera["focus"]["verdict"], "cant_judge");
+        assert_eq!(camera["lens"]["calibrated"], true);
+        assert_eq!(camera["corner"], CORNER);
+        let (code, why) = post_from(rig.address, SET, None);
+        assert_eq!(code, 409, "{why}");
+        let (code, _) = get_from(CONTROLLER, rig.address, CORNER, "localhost");
+        assert_eq!(code, 503, "no corner while nobody watches");
+
+        let here = format!("http://{}", rig.address);
         let agent = agent();
         let mut response = agent.get(format!("{here}{STREAM}")).call().unwrap();
         let mut reader = BufReader::new(response.body_mut().as_reader());
         next_picture(&mut reader);
-        let status = || get_from(CONTROLLER, rig.address, STATUS, "localhost").1;
-        wait_until("the view's words", || status().contains("sentence "));
-        let said = status();
-        assert!(said.contains("phase off"), "{said}");
-        assert!(said.contains("exposure_range_us 100 819200"), "{said}");
-        assert!(said.contains("gain_range 16 255"), "{said}");
-        assert!(said.contains("exposure_us 1000\ngain 40"), "{said}");
+        wait_until("a frame rate in the document", || {
+            !status_of(rig.address)["cameras"][0]["fps"].is_null()
+        });
+        let status = status_of(rig.address);
+        let camera = &status["cameras"][0];
+        let brightness = &camera["brightness"];
+        // The scene is lit for focus, its tag sharp and near the middle.
+        assert_eq!(brightness["verdict"], "good", "{brightness}");
+        assert_eq!(brightness["exposure_us"], 1000);
+        assert_eq!(brightness["gain"], 40);
+        assert_eq!(brightness["configured_exposure_us"], 1000);
+        assert_eq!(brightness["configured_gain"], 40);
+        assert_eq!(brightness["changed_here"], false);
+        assert!(
+            brightness["settings_say"]
+                .as_str()
+                .unwrap()
+                .contains("the configuration's settings"),
+            "{brightness}"
+        );
+        assert_eq!(
+            brightness["exposure_range_us"],
+            serde_json::json!([100, 819_200])
+        );
+        assert_eq!(brightness["gain_range"], serde_json::json!([16, 255]));
+        assert_eq!(brightness["setting"], "idle");
+        assert_eq!(camera["focus"]["verdict"], "sharp", "{camera}");
+        let checks = camera["checks"].as_array().unwrap();
+        let mark = |topic: &str| {
+            checks
+                .iter()
+                .find(|c| c["topic"] == topic)
+                .map(|c| c["mark"].as_str().unwrap().to_string())
+        };
+        assert_eq!(mark("clock").as_deref(), Some("fine"), "{camera}");
+        assert_eq!(mark("focus").as_deref(), Some("fine"), "{camera}");
+        assert_eq!(mark("lens").as_deref(), Some("fine"), "{camera}");
+        assert_eq!(mark("settings"), None, "nothing changed here");
+        let (code, _) = get_from(CONTROLLER, rig.address, CORNER, "localhost");
+        assert_eq!(code, 200, "a corner while watched");
 
         // Each row: who asks, where, and the answer.
         let refused = [
             (
                 Some("http://elsewhere.example"),
-                START,
+                SET,
                 403,
                 "not another site's",
             ),
-            (None, "/focus-start/back", 404, "front left"),
-            (None, AGAIN, 409, "start focusing first"),
-            (None, END, 202, "wasn't focusing"),
+            (None, "/set/back", 404, "front left"),
         ];
-        for (origin, path, status, says) in refused {
+        for (origin, path, code, says) in refused {
             let (answered, said) = post_from(rig.address, path, origin);
-            assert_eq!(answered, status, "{path}: {said}");
+            assert_eq!(answered, code, "{path}: {said}");
             assert!(said.contains(says), "{path}: {said}");
         }
         assert_eq!(rig.view.trial.take(), None, "none of those asked anything");
 
-        // Started: the dial asks for the least gain.
-        let (answered, said) = post_from(rig.address, START, Some(&here));
+        // Asked: the scene's tag is already in the band at the configured exposure and gain, so
+        // it settles with nothing to ask (the dial's steps are tests/dial.rs's), and says so.
+        let (answered, said) = post_from(rig.address, SET, Some(&here));
         assert_eq!(answered, 202, "{said}");
-        wait_until("the dial's first ask", || {
-            rig.view
-                .trial
-                .take()
-                .is_some_and(|asked| asked.tried.gain == Some(16))
+        wait_until("settled", || {
+            status_of(rig.address)["cameras"][0]["brightness"]["setting"] == "settled"
         });
-        assert!(!status().contains("phase off"));
+        let status = status_of(rig.address);
+        let say = status["cameras"][0]["brightness"]["setting_say"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            say.contains("the configured exposure (1.0 ms) kept"),
+            "{say}"
+        );
+        assert_eq!(rig.view.trial.take(), None, "nothing to change");
 
         // By hand, past the camera's ranges: held to them and said, and the dial stops.
         let query = "/settings/front%20left?exposure_us=900000&gain=300";
@@ -794,35 +857,47 @@ fn the_focus_step_runs_only_where_the_configuration_allows_it_and_puts_the_setti
             said.contains("held to 819.2 ms") && said.contains("held to 255"),
             "{said}"
         );
-        wait_until("by hand", || status().contains("phase by_hand"));
-        let by_hand = rig.view.trial.take().unwrap();
+        wait_until("stopped by hand", || {
+            status_of(rig.address)["cameras"][0]["brightness"]["setting"] == "idle"
+        });
         assert_eq!(
-            by_hand.tried,
-            Tried {
+            rig.view.trial.take(),
+            Some(visor::settings::Wanted::Values(visor::settings::Tried {
                 exposure_us: Some(819_200),
                 gain: Some(255)
-            }
+            }))
         );
         thread::sleep(Duration::from_millis(300));
         assert_eq!(rig.view.trial.take(), None, "the dial doesn't fight it");
 
-        // Again, then ended: the remembered settings go back.
-        let (answered, said) = post_from(rig.address, AGAIN, None);
-        assert_eq!(answered, 202, "{said}");
-        wait_until("dialling again", || !status().contains("phase by_hand"));
-        let (answered, said) = post_from(rig.address, END, None);
-        assert_eq!(answered, 202, "{said}");
-        assert!(said.contains("put back"), "{said}");
-        assert_eq!(rig.view.trial.take(), Some(was));
-        assert!(!rig.view.focus_step_on());
+        // Settings unlike what the configuration gave: said beside them, and noted on the list.
+        rig.view.trial.offer_configured(InEffect {
+            gain: Some(160),
+            ..configured
+        });
+        wait_until("the change noted", || {
+            status_of(rig.address)["cameras"][0]["brightness"]["changed_here"] == true
+        });
+        let status = status_of(rig.address);
+        let camera = &status["cameras"][0];
+        let say = camera["brightness"]["settings_say"].as_str().unwrap();
+        assert!(
+            say.contains("Gain 40, changed here from the configured 160. Not kept: it lasts until Visor restarts."),
+            "{say}"
+        );
+        let note = camera["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["topic"] == "settings")
+            .expect("a note of the change");
+        assert_eq!(note["mark"], "note");
 
-        // Started, and the last watcher leaves: they go back too.
-        post_from(rig.address, START, None);
-        wait_until("dialling", || !status().contains("phase off"));
+        // The watcher leaves: what was said of its pictures goes with it.
         drop(reader);
         wait_until("the watcher's gone", || rig.view.watchers() == 0);
-        wait_until("the settings put back", || {
-            !rig.view.focus_step_on() && rig.view.trial.take() == Some(was)
+        wait_until("its pictures forgotten", || {
+            status_of(rig.address)["cameras"][0]["fps"].is_null()
         });
     });
     assert_detection_kept_up(&received);

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Visor</title>
+<link rel="stylesheet" href="page.css">
+</head>
+<body>
+<header>
+  <a class="home" href="#">Visor</a>
+  <nav id="tabs" aria-label="Cameras"></nav>
+  <span id="reach" role="status"></span>
+</header>
+<main>
+  <section id="cameras" aria-label="Every camera">
+    <div id="grid"></div>
+    <p id="none" hidden>This Visor has no cameras configured.</p>
+  </section>
+
+  <section id="camera" hidden>
+    <div class="tab">
+      <figure class="picture">
+        <img id="tab-stream" alt="">
+      </figure>
+      <div class="panel">
+        <section class="row" id="brightness">
+          <h2>Brightness <span class="verdict"></span></h2>
+          <p class="say"></p>
+          <p class="facts"></p>
+          <div class="setting-controls">
+            <button type="button" id="set">Set exposure and gain</button>
+            <p class="setting"></p>
+            <details id="by-hand">
+              <summary>Set by hand</summary>
+              <form id="hand">
+                <label>Exposure
+                  <input type="range" name="exposureSlider" min="0" max="1000" step="1">
+                  <input name="exposure" inputmode="decimal" size="7" aria-label="Exposure, milliseconds"> ms
+                </label>
+                <span class="range exposure-range"></span>
+                <label>Gain
+                  <input type="range" name="gainSlider" step="1">
+                  <input name="gain" inputmode="numeric" size="5" aria-label="Gain">
+                </label>
+                <span class="range gain-range"></span>
+                <button type="submit">Apply</button>
+              </form>
+            </details>
+            <p class="changed"></p>
+          </div>
+          <p class="answer" role="status"></p>
+        </section>
+
+        <section class="row" id="focus">
+          <h2>Focus <span class="verdict"></span></h2>
+          <p class="say"></p>
+          <div class="bar" role="meter" aria-label="Focus against the best seen" aria-valuemin="0" aria-valuemax="1"><div></div></div>
+          <p class="small"></p>
+          <img class="corner" alt="The tag's corner, magnified: a clean step when in focus">
+          <button type="button" id="forget">Forget the best focus seen</button>
+          <p class="answer" role="status"></p>
+        </section>
+
+        <section class="row" id="lens">
+          <h2>Lens calibration <span class="verdict"></span></h2>
+          <p class="say"></p>
+          <button type="button" disabled>Calibrate the lens (not built yet)</button>
+          <p class="note">Calibrate after focusing: turning the lens again means calibrating again.</p>
+        </section>
+      </div>
+    </div>
+    <h2 class="facts-title">This camera</h2>
+    <dl id="facts"></dl>
+  </section>
+</main>
+<script src="page.js"></script>
+</body>
+</html>

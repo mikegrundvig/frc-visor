@@ -38,7 +38,7 @@ use crate::formats::{self, Choice, Rates, Why};
 use crate::latest::{Captured, Latest};
 use crate::link_state::LinkState;
 use crate::recovery::{self, Outcome, Recovery};
-use crate::settings::{self, Controls, InEffect, Said, Trial};
+use crate::settings::{self, Controls, InEffect, Said, Trial, Wanted};
 use crate::usb::Usb;
 
 pub use v4l2::{V4l2, V4l2Camera};
@@ -175,6 +175,13 @@ fn capture(
     }
     let mut in_effect = applied.in_effect;
     trial.offer(settings::ranges(&opened));
+    trial.offer_configured(applied.in_effect);
+    trial.offer_serial(
+        opening
+            .link
+            .as_ref()
+            .and_then(|link| link.identity.serial.clone()),
+    );
     info!("{}: {}", camera.name, described(in_effect));
     // The camera as tried: the configuration's, with each exposure and gain asked for since.
     let mut tried: Option<Camera> = None;
@@ -208,15 +215,17 @@ fn capture(
     // The driver's number of the last frame it gave, since the camera was opened.
     let mut numbered: Option<u32> = None;
     while !stop.load(Ordering::Relaxed) {
-        if let Some(asked) = trial.take() {
-            // Back to the configuration's first, when asked: it's how the camera's own automatic
-            // exposure comes back after an exposure was tried.
-            if asked.from == settings::Base::Configured {
-                tried = None;
-            }
-            let with = tried.get_or_insert_with(|| camera.clone());
-            with.exposure_us = asked.tried.exposure_us.or(with.exposure_us);
-            with.gain = asked.tried.gain.or(with.gain);
+        if let Some(wanted) = trial.take() {
+            let with = match wanted {
+                Wanted::Values(asked) => {
+                    let with = tried.get_or_insert_with(|| camera.clone());
+                    with.exposure_us = asked.exposure_us.or(with.exposure_us);
+                    with.gain = asked.gain.or(with.gain);
+                    with
+                }
+                // The configuration's again: what was tried is forgotten.
+                Wanted::Configuration => tried.insert(camera.clone()),
+            };
             // A trial that can't be set is said, and the camera keeps what it had.
             match settings::apply(&opened, with) {
                 Ok(applied) => {

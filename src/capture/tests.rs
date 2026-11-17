@@ -686,37 +686,31 @@ fn an_exposure_tried_is_set_before_the_next_frame_and_gone_when_the_camera_is_op
 }
 
 #[test]
-fn an_ask_to_go_back_to_the_configuration_sets_it_over_what_was_tried() {
+fn the_camera_s_ranges_and_serial_are_said_when_it_is_opened() {
     use Event::*;
-    // Each row: what's asked before the first frame, and the exposure that frame is taken at.
-    let rows = [
-        ("tried", settings::Base::AsItIs, Some(2000)),
-        (
-            "back to the configuration's",
-            settings::Base::Configured,
-            Some(1000),
-        ),
-    ];
-    for (name, from, exposure) in rows {
-        let camera = camera("back", None);
-        let latest = Latest::new();
-        let stop = AtomicBool::new(false);
-        let mut fake = Fake::new(vec![Plug::Streams(vec![Frame])], &latest, &stop);
-        let trial = Trial::default();
-        trial.ask(settings::Tried {
-            exposure_us: Some(2000),
-            gain: None,
-        });
-        if from == settings::Base::Configured {
-            trial.ask_configured(settings::Tried::default());
-        }
-        let retry = Duration::from_millis(1);
-        run_from(&mut fake, &camera, &latest, &Unread, &trial, &stop, retry);
-        fake.take();
-        assert_eq!(fake.exposures, [exposure], "{name}");
-        // The camera's ranges were said when it was opened.
-        assert!(trial.ranges().is_some(), "{name}");
-    }
+    let camera = camera("said", None);
+    let latest = Latest::new();
+    let stop = AtomicBool::new(false);
+    let mut fake = Fake::new(vec![Plug::Streams(vec![Frame])], &latest, &stop);
+    let trial = Trial::default();
+    assert_eq!(trial.ranges(), None);
+    run_from(
+        &mut fake,
+        &camera,
+        &latest,
+        &Unread,
+        &trial,
+        &stop,
+        Duration::from_millis(1),
+    );
+    fake.take();
+    // The test camera's exposure control runs 1 to 5000 units of 100 µs; it's on no known link,
+    // so it has no serial to say.
+    let ranges = trial.ranges().unwrap();
+    assert!(ranges.exposure_us.is_some());
+    assert_eq!(trial.serial(), None);
+    // What the configuration gave it, read back: the test camera's 1 ms.
+    assert_eq!(trial.configured().unwrap().exposure_us, Some(1000));
 }
 
 #[test]
