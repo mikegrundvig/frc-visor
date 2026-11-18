@@ -1490,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "visor"
-version = "2026.11.16"
+version = "2026.11.18"
 dependencies = [
  "axum",
  "cc",
