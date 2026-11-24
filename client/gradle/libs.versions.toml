@@ -3,7 +3,7 @@
 
 [versions]
 jspecify = "1.0.1"
-spotless = "8.11.0"
+spotless = "8.12.0"
 # The formatters Spotless runs (gradle/quality.gradle), pinned rather than left to Spotless's
 # defaults, so a newer Spotless can't reformat the code on its own.
 google-java-format = "2.0.0"
